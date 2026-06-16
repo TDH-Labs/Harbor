@@ -1,0 +1,91 @@
+name: Personal-Data Gate
+
+# Permanent guard: fails the build if absolute user-home paths appear in
+# shipping code or docs.
+#
+# The gate uses GENERIC patterns only — no client or project names.  This
+# keeps the CI configuration itself free of confidential information.
+#
+# Patterns detected (case-insensitive regex via grep -iE):
+#   /Users/<any>/  — macOS absolute home path (catches any username)
+#   /home/<any>/   — Linux absolute home path (catches any username)
+#
+# Allowed exclusions (documented here so reviewers understand why):
+#   tests/          — test assertions may reference path strings;
+#                     the assertion itself is the guard.
+#   scripts/        — fresh_history_cut.sh embeds the gate regex as a
+#                     shell command; false-positive by construction.
+#   personal-data-gate.yml (this file) — the grep command line itself
+#                     contains the pattern string; false-positive by
+#                     construction.  All other .github/* files are scanned.
+#   plan.md / ARCHITECT_BRIEF.md / build-status.md / scratchpad*.md
+#                   — internal process docs, not shipped in the public
+#                     repo (see RELEASE.md fresh-history cut).
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  personal-data-gate:
+    name: Personal-data gate
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Self-test — gate must detect a planted path
+        run: |
+          # Verify the gate pattern actually fires before trusting a PASS.
+          printf 'PLANTED = "/Users/x/sentinel.txt"\n' > /tmp/_gate_selftest.py
+          printf '{"path": "/Users/x/sentinel.txt"}\n' > /tmp/_gate_selftest.json
+          FOUND=$(grep -rilE '/Users/[^/[:space:]]+/|/home/[^/[:space:]]+/' \
+            /tmp/_gate_selftest.py /tmp/_gate_selftest.json 2>/dev/null || true)
+          rm -f /tmp/_gate_selftest.py /tmp/_gate_selftest.json
+          if [ -z "$FOUND" ]; then
+            echo "❌  Gate self-test FAILED — planted path was not detected."
+            exit 1
+          fi
+          echo "✅  Gate self-test PASSED — planted paths detected correctly."
+
+      - name: Scan for absolute user-home paths (source + docs)
+        run: |
+          # Regex: match /Users/<word>/ or /home/<word>/ anywhere in any text
+          # file type, including .json, .sh, .cfg, .ini (common config formats).
+          # Case-insensitive so /users/... and /HOME/... are also caught.
+          FOUND=$(grep -rilE '/Users/[^/[:space:]]+/|/home/[^/[:space:]]+/' \
+            --include="*.py" \
+            --include="*.md" \
+            --include="*.toml" \
+            --include="*.yml" \
+            --include="*.yaml" \
+            --include="*.txt" \
+            --include="*.json" \
+            --include="*.sh" \
+            --include="*.cfg" \
+            --include="*.ini" \
+            . \
+            --exclude-dir=".git" \
+            --exclude-dir="__pycache__" \
+            --exclude-dir="tests" \
+            --exclude-dir="scripts" \
+            --exclude="personal-data-gate.yml" \
+            --exclude="plan.md" \
+            --exclude="ARCHITECT_BRIEF.md" \
+            --exclude="build-status.md" \
+            --exclude="scratchpad*.md" \
+            --exclude="scratchpad*.tsv" \
+            2>/dev/null || true)
+
+          if [ -n "$FOUND" ]; then
+            echo "❌  Personal-data gate FAILED — absolute user-home paths found in:"
+            echo "$FOUND" | sed 's/^/  /'
+            echo ""
+            echo "Replace any /Users/<name>/... or /home/<name>/... references with"
+            echo "relative paths, environment variables, or generic placeholders."
+            exit 1
+          fi
+
+          echo "✅  Personal-data gate PASSED — no absolute user-home paths in shipping files."

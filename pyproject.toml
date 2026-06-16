@@ -1,0 +1,95 @@
+[build-system]
+requires = ["setuptools>=61.0", "build>=1.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-environment"
+version = "0.2.0"
+description = "Turnkey 5-layer agent operating environment: one markdown map, many agent beacons."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+keywords = ["agents", "claude", "cursor", "opencode", "beacons", "agent-context"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Topic :: Utilities",
+    "Environment :: Console",
+]
+
+# Runtime is stdlib-only on Python 3.11+ (tomllib is built in). On 3.10, the
+# config layer (Phase 1) needs a TOML parser, so tomli is declared only there.
+dependencies = [
+    "tomli; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.4",
+    "build>=1.0",
+    "twine>=5.0",
+]
+
+# <!-- replace before first release: set real URLs -->
+[project.urls]
+Homepage = "https://github.com/adamrmatar/Harbor"
+Repository = "https://github.com/adamrmatar/Harbor"
+"Bug Tracker" = "https://github.com/adamrmatar/Harbor/issues"
+Changelog = "https://github.com/adamrmatar/Harbor/blob/main/CHANGELOG.md"
+
+# The unified console entry point (Phase 4). Each module also stays runnable on
+# its own via `python -m agent_env.<module>` (decision #2) — the CLI is a thin
+# wrapper, not the only entry path.
+[project.scripts]
+agent-env = "agent_env.cli:main"
+
+[tool.setuptools]
+packages = ["agent_env", "agent_env.demo"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+"agent_env.demo" = [
+    "*.md", "*.toml",
+    "Obsidian/*.md",
+    "rooms/*/*.md",
+    "data/*.md",
+    "data/sample_db/*.md",
+    "data/sample_db/*.db",
+    "workspace/example-project/*.md",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+
+[tool.coverage.run]
+source = ["agent_env"]
+omit = [
+    "agent_env/__pycache__/*",
+]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 80
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+# E: pycodestyle errors, F: pyflakes, I: isort, W: warnings
+select = ["E", "F", "W", "I"]
+ignore = [
+    "E501",   # line too long — enforced by line-length but some docs are verbose
+    "E402",   # module level import not at top (cli.py has conditional imports by design)
+]

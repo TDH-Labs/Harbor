@@ -1,0 +1,20 @@
+# Machine Orientation — Read First
+
+Before doing any work on this machine:
+
+1. Read `<HOME>/agent_map.md` — the master routing table
+2. Identify which room your task belongs to (research, writing)
+3. Read `<HOME>/rooms/<domain>/room_rules.md` — domain-specific rules
+4. Work in `<HOME>/workspace/<project>/` — never work from ~/Downloads/ directly
+
+## Key Rules
+
+- All active work goes in `~/workspace/<project>/` with compaction files (research.md, plan.md, scratchpad.md)
+- Secrets are quarantined in `~/secrets/` with 600 permissions — only read when making specific API calls
+- Never traverse outside `<HOME>/` unless explicitly asked
+- Use `~/workspace/<project>/project/` symlink for codebase access (original locations may have hard-coded paths)
+- The room structure under `~/rooms/` contains domain-specific skills and constraints — respect them
+
+See `<HOME>/AGENTS.md` for full orientation details.
+
+<!-- agent-env:sync -->

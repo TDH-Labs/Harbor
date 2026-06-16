@@ -1,0 +1,41 @@
+# Repo-root agent artifacts (NOT golden fixtures).
+# Anchored with a leading slash so tests/golden/**/AGENTS.md stays tracked.
+# (.gitignore has no trailing-comment support, so keep notes on their own lines.)
+# /AGENTS.md is a symlink to the live ~/AGENTS.md (points outside the repo).
+# research.md / scratchpad.md are compaction scratch (machine convention).
+/AGENTS.md
+/research.md
+/scratchpad.md
+
+# Machine-local config override (personal dir names live here, never shipped).
+/config.local.toml
+
+# Build-process status notes maintained by the orchestrating session (not product).
+/build-status.md
+
+# Python build / install artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Editor / OS noise
+.DS_Store
+
+# Claude Code session-local settings (never shipped)
+.claude/

@@ -1,0 +1,18 @@
+# generic_config.toml — fixture config for golden rendering tests.
+# The `home` path is replaced at render time; <HOME> is a placeholder only.
+schema_version = "1.0"
+
+[paths]
+home = "<HOME>"
+skills_dir = "<HOME>/.agents/skills"
+state_dir = "<HOME>/.agent-env"
+
+[discovery]
+scan_home = false
+skip_list = []
+
+[beacons]
+home_targets = ["AGENTS.md", "CLAUDE.md", ".cursorrules"]
+
+[tidy]
+enabled = false

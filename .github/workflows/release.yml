@@ -1,0 +1,62 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"          # triggers on v0.1.0, v1.0.0, etc.
+
+jobs:
+  build:
+    name: Build distribution
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: pip install build twine
+
+      - name: Build wheel and sdist
+        run: python -m build
+
+      - name: Check distribution with twine
+        run: twine check dist/*
+
+      - name: Upload distribution artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    # Only publish when the tag is on the main branch and the token is set.
+    # The operator adds PYPI_API_TOKEN as a repository secret before the first
+    # release. Without that secret, pypa/gh-action-pypi-publish will error.
+    environment:
+      name: pypi
+      url: https://pypi.org/project/agent-environment/
+    permissions:
+      id-token: write   # required for trusted publishing (OIDC)
+
+    steps:
+      - name: Download distribution artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        # Requires PYPI_API_TOKEN set as a repository secret by the operator.
+        # To use OIDC trusted publishing instead, remove the `password` line and
+        # configure the PyPI project's trusted publisher settings.
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}

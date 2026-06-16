@@ -1,0 +1,210 @@
+# config.template.toml — agent-environment machine settings
+#
+# agent_map.md remains the single source of truth for rooms, projects, and
+# directives. This file holds only machine settings. Every value below is the
+# built-in default; uncomment and edit to override. A missing config.toml
+# behaves exactly as these defaults.
+#
+# Path templates use "~" to mean the environment root: "~" alone is the root,
+# "~/.agents/skills" is <root>/.agents/skills.
+
+schema_version = "1.0"
+
+[paths]
+# Root of the environment. "~" => your real home (Path.home()).
+home = "~"
+# Canonical shared skill pool — the single store agents read from.
+skills_dir = "~/.agents/skills"
+# Process/internal state (config, watcher.pid, logs, version stamp, backups).
+state_dir = "~/.agent-env"
+
+[discovery]
+# Scan-and-confirm home project discovery (decision #9).
+scan_home = true
+# Directories at the root that are NOT projects.
+skip_dirs = [
+  "rooms",
+  "workspace",
+  "archive",
+  "secrets",
+  "scripts",
+  ".agents",
+  ".antigravity",
+  ".cursor",
+  ".vscode",
+  ".ssh",
+  ".gnupg",
+  ".config",
+  ".cache",
+  ".local",
+  ".npm",
+  ".docker",
+  ".cargo",
+  ".rustup",
+  ".pyenv",
+  ".asdf",
+  "node_modules",
+  ".venv",
+  "venv",
+  "__pycache__",
+  "Applications",
+  "Desktop",
+  "Documents",
+  "Downloads",
+  "Library",
+  "Movies",
+  "Music",
+  "Pictures",
+  "Public",
+  ".DS_Store",
+  ".Trash",
+  ".TemporaryItems",
+]
+# File markers that mark a directory as a project.
+project_signatures = [
+  ".git",
+  "AGENTS.md",
+  "CLAUDE.md",
+  "package.json",
+  "Cargo.toml",
+  "pyproject.toml",
+  "go.mod",
+  "Gemfile",
+  "Makefile",
+  "justfile",
+  "PROJECT.md",
+]
+# Home dirs you rejected as projects; never re-offered.
+skip_list = []
+
+[beacons]
+# Home-level beacon files generated from agent_map.md.
+home_targets = [
+  "AGENTS.md",
+  "CLAUDE.md",
+  ".cursorrules",
+]
+# Per-project beacon filename (symlinked to the home AGENTS.md).
+project_beacon = "AGENTS.md"
+
+[watch]
+# Paths the watcher monitors; a change fires a --generate-only sync.
+paths = [
+  "~/agent_map.md",
+  "~/.agents/skills",
+  "~/Obsidian",
+]
+cooldown_seconds = 10
+
+[tidy]
+# Destructive hygiene is OFF by default (decision #7). Enable deliberately.
+enabled = false
+downloads_archive_days = 7
+# Files/dirs that are OK at the root (not flagged as stray). Universal set only;
+# add your own machine's project/data/app dirs below (this list replaces the
+# default wholesale, so include these entries plus your own).
+home_whitelist = [
+  # macOS system
+  "Applications",
+  "Desktop",
+  "Documents",
+  "Downloads",
+  "Library",
+  "Movies",
+  "Music",
+  "Pictures",
+  "Public",
+  ".DS_Store",
+  ".Trash",
+  ".TemporaryItems",
+  # agent-env infrastructure (the 5-layer structure)
+  "rooms",
+  "workspace",
+  "archive",
+  "secrets",
+  "scripts",
+  "data",
+  "Obsidian",
+  # Tool dotdirs
+  ".agents",
+  ".config",
+  ".antigravity",
+  ".cursor",
+  ".vscode",
+  ".ssh",
+  ".gnupg",
+  ".cache",
+  ".local",
+  ".npm",
+  ".docker",
+  ".cargo",
+  ".rustup",
+  ".pyenv",
+  ".asdf",
+  ".nvm",
+  ".venv",
+  "venv",
+  "__pycache__",
+  "node_modules",
+  "go",
+  ".git",
+  ".gitconfig",
+  ".gitignore",
+  ".zshrc",
+  ".zshenv",
+  ".zprofile",
+  ".bashrc",
+  ".bash_profile",
+  ".profile",
+  ".curlrc",
+  ".npmrc",
+  ".yarnrc",
+  # Beacon files
+  "AGENTS.md",
+  "CLAUDE.md",
+  ".cursorrules",
+  "agent_map.md",
+]
+
+[tidy.stray_files]
+# filename = "delete" | "archive"  — empty by default; add your own debris files.
+# "old_build.log" = "delete"
+# "scratch.py" = "archive"
+
+[skill_pool]
+# Directories symlinked into the unified pool (decision #8). Empty by default.
+# Each entry: source, into, mode = "rglob"|"flat", link = "absolute"|"relative".
+#   mode "rglob" links every dir containing a SKILL.md (nested/categorized pool);
+#   mode "flat"  links the top-level entries (already-flat pool).
+#   link "relative" writes symlinks relative to `into` (survive pool relocation).
+sources = []
+# Example (two pool sources — a categorized pool linked into a flat pool):
+# [[skill_pool.sources]]
+# source = "~/.my-agent/skills"
+# into = "~/.agents/skills"
+# mode = "rglob"
+# link = "absolute"
+# [[skill_pool.sources]]
+# source = "~/.agents/skills"
+# into = "~/.config/other-agent/skills"
+# mode = "flat"
+# link = "relative"
+[skills]
+# Skill organization is empty by default — no machine-specific skill names are
+# shipped. Declare your own rooms and category-routing below (each table
+# replaces the default wholesale). The mapping for THIS machine lives in the
+# untracked config.local.toml.
+
+# Room -> skill mapping (ROOM_SKILLS). One table per room. Example:
+# [skills.rooms.research]
+# description = "Research, writing, summarisation"
+# skills = [
+#   "note-taker",
+#   "doc-linter",
+#   "data-cleaner",
+# ]
+
+# Skill-pool category directory name -> room. Example:
+# [skills.skill_category_to_room]
+# "software-development" = "devops"
+# "data-science" = "research"
