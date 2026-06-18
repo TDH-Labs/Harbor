@@ -8,7 +8,7 @@ WebSocket event push.
 |--------|----------------|
 | `spawn.ts` | `spawn(command, args, opts) → HarborChildProcess`, `awaitExit`, `listActiveSpawns`, `SpawnTimeoutError` |
 | `budget.ts` | `checkBudget`, `spendBudget`, `BudgetExceededError`, `BudgetResult` |
-| `gate.ts` | `gate(toolName, fn)`, `setGateContext`, `currentGateContext`, `AccessDeniedError` |
+| `gate.ts` | `gate(toolName, fn)`, `runWithGateContext`, `currentGateContext`, `AccessDeniedError` |
 | `audit.ts` | `audit.{allow,deny,recent,denialsToday}`, `onHypervisorEvent`/`emitHypervisorEvent` (event bus) |
 | `evict.ts` | `evict.{lru,retrieve,stats}` |
 
@@ -124,3 +124,72 @@ genuine concurrent connections and to avoid a Bun allocator double-free on Worke
 isolate teardown) and asserts: usage never exceeds the limit, no lost writes, and
 every denial lands. RED on the pre-fix tree (overspend, `finalUsed` 1100–1300 vs a
 1000 limit); GREEN after.
+
+## Re-gate fix #2 — gate context concurrency (capability gate fail-open)
+
+The WAL fix above is sound and stays. The re-gate then surfaced a **separate**
+flaw in the gate's context handling: the capability gate was observed failing
+**OPEN** once (a marketing session's gated `read_skill` resolved instead of
+denying), unreproducible in ~360 runs.
+
+**Root cause — a mutable module-global context.** `gate()` resolved the active
+session through `currentGateContext()`, which read a single process-global slot
+(`explicitContext`, written by `setGateContext`). That is unsafe for concurrent
+in-process sessions — the model Phase 5 (MCP server, Pi in-process import) is
+built on. The wrapper reads the slot at call time; with two session handlers each
+doing `setGateContext(theirCtx); … await …`, one session's context can be the
+live slot value when the *other* session's gated call reads it. A capability-
+denied session then evaluates against a capability-allowed session's context and
+the gate **fails open**. The 1-in-360 flake (`gate.test.ts` + `hypervisor.test.ts`
+sharing the global) was a sampling of exactly this production hazard.
+
+**Design fix — per-call binding via `AsyncLocalStorage` (structural, not a
+patch).** The mutable global is gone. Context is now carried by an
+`AsyncLocalStorage<GateContext>`:
+
+- `runWithGateContext(context, callback)` binds `context` for the entire async
+  call chain `callback` starts; the store propagates across every `await`.
+  Nested/overlapping scopes each carry their own context, so two concurrent gated
+  calls for different sessions can never read each other's. There is no shared
+  cell to clobber — the fail-open is **structurally impossible**, not merely
+  improbable. This is the verb Phase 5 wraps each per-session request handler in.
+- `currentGateContext()` reads the ALS-bound context if a scope is active, else
+  falls back to the `AGENT_ENV_ROOM`/`AGENT_ENV_SESSION` env vars (the vars
+  `spawn()` injects). The env-var path is documented as the *single-session-per-
+  process* fallback only: env vars are process-global and cannot represent two
+  identities at once, so concurrent in-process sessions MUST bind explicitly.
+- `setGateContext` (the unsafe mutable-global setter) is **removed** from the
+  public surface and `index.ts`; `cli.ts`, `gate.test.ts`, and `hypervisor.test.ts`
+  migrate to `runWithGateContext`. Removing the global is what makes the hazard
+  unreachable rather than just unlikely.
+
+**Proving test — deterministic RED→GREEN.** `gate.test.ts` →
+`gate — concurrent session context isolation` interleaves two sessions with a
+rendezvous (no scheduler-timing reliance): the denied session (marketing, no
+`read_skill`) parks, the allowed session (legal) sets its context and holds it
+live, then the denied session fires its gated `read_skill`.
+
+- **RED** on the module-global implementation (reproduced via a global-backed
+  `runWithGateContext` shim with identical semantics to `setGateContext`):
+  `expect(marketingOutcome.denied).toBe(true)` fails — the marketing call read
+  legal's live context and **resolved** (`denied:false`, value `loaded:nda-review`).
+  This is the observed fail-open, now deterministic instead of 1-in-360.
+- **GREEN** on the ALS fix: marketing's call reads its own bound context, is
+  denied, and the denial lands on marketing's ledger; legal is unaffected.
+
+A second guard (`many interleaved chains … zero crossover`) soaks 270 chains of
+all three verdict kinds (allowed / capability-denied / room-skill-denied) with
+repeated yields, asserting every chain resolves against its own context.
+
+**Root-cause note.** The deterministic interleaving *is* the root-cause
+reproduction — it isolates the exact mechanism the flake sampled (a second
+session's context live in the shared slot at the denied call's read), so no
+runtime instrumentation of `currentGateContext()` was needed. The design fix
+removes the shared slot, so the mechanism cannot occur regardless of timing.
+
+**Test hardening + determinism.** With context now call-scoped, nothing can leak
+between tests — the `afterEach(() => setGateContext(null))` resets in
+`gate.test.ts` / `hypervisor.test.ts` are removed (the per-call binding is the
+stronger equivalent). Full suite re-proved deterministic: **100/100 green, zero
+non-green** (`bun test`, 184 tests/run, ~176s total). Typecheck clean; de-perso
+scan over `src/` clean.

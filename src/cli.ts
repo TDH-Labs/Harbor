@@ -32,7 +32,7 @@ import { startDashboard, DEFAULT_PORT } from "./dashboard.ts";
 import { runForeground, startDaemon, stopDaemon, watcherStatus } from "./watch.ts";
 import { spawn } from "./spawn.ts";
 import { checkBudget, spendBudget, BudgetExceededError } from "./budget.ts";
-import { gate, setGateContext, AccessDeniedError } from "./gate.ts";
+import { gate, runWithGateContext, AccessDeniedError } from "./gate.ts";
 import { audit } from "./audit.ts";
 
 // ── Environment resolution ────────────────────────────────────────────────────
@@ -619,15 +619,14 @@ const gateCmd = defineCommand({
   async run({ args }) {
     const env = envFromArgs(args);
     const session = createSession({ room: args.room, env });
-    setGateContext({ env, session });
     try {
-      await gate(args.tool, async (_resource: string) => true)(args.resource ?? "");
+      await runWithGateContext({ env, session }, () =>
+        gate(args.tool, async (_resource: string) => true)(args.resource ?? ""),
+      );
       console.log(`ALLOW  room=${args.room} tool=${args.tool}${args.resource ? ` resource=${args.resource}` : ""}`);
     } catch (err) {
       if (err instanceof AccessDeniedError) console.log(`DENY  ${err.message}`);
       else throw err;
-    } finally {
-      setGateContext(null);
     }
   },
 });

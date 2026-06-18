@@ -17,7 +17,7 @@ import { CompactionEngine } from "./compaction.ts";
 import { startDashboard } from "./dashboard.ts";
 import { Environment } from "./env.ts";
 import { lru, retrieve, stats } from "./evict.ts";
-import { AccessDeniedError, gate, setGateContext } from "./gate.ts";
+import { AccessDeniedError, gate, runWithGateContext } from "./gate.ts";
 import { createSession } from "./isolation.ts";
 import { spawn } from "./spawn.ts";
 
@@ -26,7 +26,6 @@ beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "harbor-hyp-"));
 });
 afterEach(() => {
-  setGateContext(null);
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -64,11 +63,14 @@ describe("hypervisor chain", () => {
     expect(checkBudget(sid, "huge", 800, { env: e }).ok).toBe(false);
 
     // gate: allow the in-room skill, deny an out-of-room one — under the same session.
-    setGateContext({ env: e, session: createSession({ room: "legal", env: e, sessionId: sid }) });
     const readSkill = gate("read_skill", async (name: string) => `loaded:${name}`);
-    expect(await readSkill("nda-review")).toBe("loaded:nda-review");
-    await expect(readSkill("payroll")).rejects.toThrow(AccessDeniedError);
-    setGateContext(null);
+    await runWithGateContext(
+      { env: e, session: createSession({ room: "legal", env: e, sessionId: sid }) },
+      async () => {
+        expect(await readSkill("nda-review")).toBe("loaded:nda-review");
+        await expect(readSkill("payroll")).rejects.toThrow(AccessDeniedError);
+      },
+    );
 
     // audit: the denied gate call is on today's denial ledger for the room.
     expect(audit.denialsToday("legal", { env: e })).toBeGreaterThanOrEqual(1);

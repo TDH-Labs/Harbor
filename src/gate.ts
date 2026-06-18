@@ -21,11 +21,18 @@
  * through the budget/session path instead).
  *
  * Session context: the wrapped signature has no room to add a session argument,
- * so the session is ambient. Set it once with {@link setGateContext} (Pi / the
- * MCP server do this at session start). With no explicit context, it is resolved
- * from the `AGENT_ENV_ROOM` / `AGENT_ENV_SESSION` env vars (the same vars
- * `spawn()` injects), memoized so repeated calls don't re-audit a session.
+ * so the session is ambient — but ambient PER ASYNC CALL CHAIN, not process-wide.
+ * Bind it with {@link runWithGateContext}, which carries the context through every
+ * `await` via AsyncLocalStorage; Pi and the MCP server wrap each per-session
+ * request handler in it, so concurrent sessions interleaved in one process never
+ * read each other's context (the earlier mutable module-global context could be
+ * clobbered by a second session mid-call and fail OPEN — see
+ * `gate — concurrent session context isolation` in `gate.test.ts`). With no bound
+ * scope, context is resolved from the `AGENT_ENV_ROOM` / `AGENT_ENV_SESSION` env
+ * vars (the vars `spawn()` injects) — the single-session-per-process fallback.
  */
+import { AsyncLocalStorage } from "node:async_hooks";
+
 import {
   AccessDenied,
   AgentSession,
@@ -48,17 +55,53 @@ export interface GateContext {
   session: AgentSession;
 }
 
-let explicitContext: GateContext | null = null;
+/**
+ * The active gate context, carried by AsyncLocalStorage so each async call chain
+ * has its OWN context. This replaces a mutable module-global slot: there is no
+ * shared cell for a second session to overwrite, so two concurrent gated calls
+ * for different sessions can NEVER read each other's context. The gate therefore
+ * cannot be raced into evaluating the wrong session — the fail-open is structural-
+ * ly impossible, not merely improbable.
+ */
+const gateContextStore = new AsyncLocalStorage<GateContext>();
+
+/**
+ * Env-var fallback sessions, memoized by `room:sessionId`. Used ONLY when no
+ * {@link runWithGateContext} scope is active — i.e. a single-session-per-process
+ * spawn resolving its identity from `AGENT_ENV_ROOM`/`AGENT_ENV_SESSION` (the
+ * vars `spawn()` injects). Keyed, not a single slot, so distinct identities never
+ * alias. This path is NOT for concurrent in-process sessions: env vars are
+ * process-global and cannot represent two identities at once, so a process that
+ * hosts multiple sessions must bind each explicitly via `runWithGateContext`.
+ */
 const envVarSessions = new Map<string, AgentSession>();
 
-/** Set (or clear, with `null`) the ambient session context for `gate()`. */
-export function setGateContext(context: GateContext | null): void {
-  explicitContext = context;
+/**
+ * Run `callback` with `context` bound as the active gate context for the entire
+ * async call chain it starts. Concurrency-safe replacement for a mutable module
+ * global: nested and overlapping scopes each carry their own context across every
+ * `await`, so interleaved sessions never cross. Returns whatever `callback`
+ * returns (its value, or its promise for an async callback).
+ *
+ *   await runWithGateContext({ env, session }, () => read_skill('nda-review'));
+ *
+ * Pi and the MCP server wrap each per-session request handler in this, so every
+ * gated call inside resolves against that session even with many sessions
+ * interleaved in one process.
+ */
+export function runWithGateContext<T>(context: GateContext, callback: () => T): T {
+  return gateContextStore.run(context, callback);
 }
 
-/** Resolve the active gate context: explicit if set, else from env vars (memoized). */
+/**
+ * Resolve the active gate context: the context bound by an enclosing
+ * {@link runWithGateContext} scope if there is one, else resolved from the
+ * `AGENT_ENV_ROOM`/`AGENT_ENV_SESSION` env vars (memoized). The env-var path is
+ * the single-session-per-process fallback; concurrent sessions bind explicitly.
+ */
 export function currentGateContext(): GateContext {
-  if (explicitContext) return explicitContext;
+  const bound = gateContextStore.getStore();
+  if (bound) return bound;
   const env = Environment.default();
   const room = process.env.AGENT_ENV_ROOM ?? env.config.skillDefaultRoom;
   const sessionId = process.env.AGENT_ENV_SESSION ?? "";

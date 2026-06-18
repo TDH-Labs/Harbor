@@ -147,7 +147,7 @@ export type { HarborChildProcess, HarborSpawnOptions, SpawnInfo } from "./spawn.
 export { checkBudget, spendBudget, BudgetExceededError } from "./budget.ts";
 export type { BudgetResult, BudgetOptions } from "./budget.ts";
 
-export { gate, AccessDeniedError, setGateContext, currentGateContext } from "./gate.ts";
+export { gate, AccessDeniedError, runWithGateContext, currentGateContext } from "./gate.ts";
 export type { GateContext } from "./gate.ts";
 
 export {
