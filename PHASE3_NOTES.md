@@ -193,3 +193,10 @@ between tests — the `afterEach(() => setGateContext(null))` resets in
 stronger equivalent). Full suite re-proved deterministic: **100/100 green, zero
 non-green** (`bun test`, 184 tests/run, ~176s total). Typecheck clean; de-perso
 scan over `src/` clean.
+
+## Gate 3 → 4 — GO
+
+Phase 3 gate signed off. `main` fast-forwarded to include the WAL-race fix
+(single-connection SQLite) and the gate-context concurrency fix (call-scoped
+binding via `runWithGateContext`). Full suite **184 pass / 0 fail** on `main`,
+deterministic. Phase 4 (`phases/04-tooling.md`) branches from here.
