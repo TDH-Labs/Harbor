@@ -1,0 +1,16 @@
+node_modules/
+dist/
+*.db
+*.db-wal
+*.db-shm
+.DS_Store
+
+# Artifacts the live machine's beacon watcher / workflow hooks generate inside
+# the build dir (not Harbor deliverables): AGENTS.md is a symlink to the home
+# beacon; the others are workflow scaffolding stubs. Excluded so they never enter
+# the shippable tree. (See PHASE1_NOTES — the build dir should ideally be removed
+# from the watcher's paths per BUILD_BRIEF §7.)
+/AGENTS.md
+/research.md
+/plan.md
+/scratchpad.md
