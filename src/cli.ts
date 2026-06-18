@@ -47,6 +47,7 @@ import {
 import { scaffold } from "./skill-create.ts";
 import { install } from "./skill-install.ts";
 import { assignOrphans, assignOrphansAndReload, getOrphanSkills } from "./skill-assign.ts";
+import { AGENT_IDS, applyConfig, emitSnippet, type AgentId } from "./install.ts";
 
 // ── Environment resolution ────────────────────────────────────────────────────
 
@@ -883,6 +884,73 @@ const skillAssignCmd = defineCommand({
   },
 });
 
+// ── Agent integrations (Phase 5) ──────────────────────────────────────────────
+
+const mcpServerCmd = defineCommand({
+  meta: { name: "mcp-server", description: "Run the Harbor MCP server over stdio (JSON-RPC; Tier 1 universal)" },
+  args: {
+    ...commonArgs,
+    room: { type: "string", description: "Room (overrides AGENT_ENV_ROOM for this server)" },
+    session: { type: "string", description: "Session id (overrides AGENT_ENV_SESSION)" },
+  },
+  async run({ args }) {
+    const env = envFromArgs(args);
+    // Lazily import the integration so the CLI's startup path stays light and the
+    // `harbor` self-import in the server module is only resolved when serving.
+    const { createMcpServer, runStdioServer } = await import("../integrations/mcp-server.ts");
+    const procEnv: Record<string, string | undefined> = {
+      ...process.env,
+      ...(args.room ? { AGENT_ENV_ROOM: args.room } : {}),
+      ...(args.session ? { AGENT_ENV_SESSION: args.session } : {}),
+    };
+    const server = createMcpServer({ env, procEnv });
+    await runStdioServer(server);
+  },
+});
+
+const installCmd = defineCommand({
+  meta: {
+    name: "install",
+    description: "Emit an agent's MCP/integration config (use --write to apply it with a backup)",
+  },
+  args: {
+    ...commonArgs,
+    for: { type: "string", description: `Agent: ${AGENT_IDS.join(" | ")}` },
+    write: { type: "boolean", description: "Apply the config to the agent's file (backs it up first)" },
+    path: { type: "string", description: "Override the target config path" },
+    command: { type: "string", description: "Server command (default 'harbor')" },
+    "server-name": { type: "string", description: "Entry name (default 'harbor')" },
+  },
+  run({ args }) {
+    const agent = args.for as AgentId | undefined;
+    if (!agent || !AGENT_IDS.includes(agent)) {
+      console.error(`install: --for <agent> is required. Valid agents: ${AGENT_IDS.join(", ")}`);
+      process.exitCode = 1;
+      return;
+    }
+    const opts = {
+      ...(args.command ? { command: args.command } : {}),
+      ...(args["server-name"] ? { serverName: args["server-name"] } : {}),
+    };
+    if (args.write) {
+      const r = applyConfig(agent, { ...opts, ...(args.path ? { path: args.path } : {}) });
+      if (r.action === "unchanged") {
+        console.log(`install: ${agent} already configured at ${r.path} (no change)`);
+      } else {
+        console.log(`install: ${r.action} ${r.path}${r.backup ? ` (backup: ${r.backup})` : ""}`);
+      }
+      return;
+    }
+    // Default: EMIT to stdout, mutate nothing.
+    const s = emitSnippet(agent, opts);
+    console.log(s.snippet);
+    console.log("");
+    for (const line of s.instructions.split("\n")) console.log(`# ${line}`);
+    console.log(`#`);
+    console.log(`# Nothing was written. Re-run with --write to apply (a backup is made first).`);
+  },
+});
+
 // ── Root command ──────────────────────────────────────────────────────────────
 
 export const main: CommandDef = defineCommand({
@@ -911,6 +979,8 @@ export const main: CommandDef = defineCommand({
     "skill-create": skillCreateCmd,
     "skill-install": skillInstallCmd,
     "skill-assign": skillAssignCmd,
+    "mcp-server": mcpServerCmd,
+    install: installCmd,
   },
 });
 

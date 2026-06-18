@@ -277,3 +277,60 @@ describe("Phase 4 skill / MCP tooling (acceptance criteria, in-process)", () => 
     expect(r.out).toContain("no skills in pool");
   });
 });
+
+// ── Phase 5: agent integrations ───────────────────────────────────────────────
+
+describe("install command (emit-don't-mutate)", () => {
+  test("install --for cursor emits a JSON snippet and writes nothing", async () => {
+    const r = await cli("install", "--for", "cursor");
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('"mcpServers"');
+    expect(r.out).toContain("harbor");
+    expect(r.out).toContain("Re-run with --write");
+  });
+
+  test("install with no/invalid --for exits non-zero", async () => {
+    const r = await cli("install", "--for", "nope");
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("Valid agents");
+  });
+
+  test("install --for codex --write --path creates the file (with no backup for a new file)", async () => {
+    const target = join(dir, "codex.toml");
+    const r = await cli("install", "--for", "codex", "--write", "--path", target);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("created");
+    expect(existsSync(target)).toBe(true);
+    expect(readFileSync(target, "utf8")).toContain("mcp_servers.harbor");
+  });
+
+  test("install --for gemini --write twice is idempotent (no change second time)", async () => {
+    const target = join(dir, "gemini.json");
+    await cli("install", "--for", "gemini", "--write", "--path", target);
+    const second = await cli("install", "--for", "gemini", "--write", "--path", target);
+    expect(second.out).toContain("already configured");
+  });
+});
+
+describe("mcp-server command (subprocess stdio smoke)", () => {
+  test("tools/list over stdio returns the harbor tool catalog", () => {
+    const proc = Bun.spawnSync(["bun", CLI, "mcp-server", "--root", dir], {
+      stdin: Buffer.from('{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n'),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const out = proc.stdout.toString();
+    expect(out).toContain('"read_skill"');
+    expect(out).toContain('"list_skills"');
+    expect(out).toContain('"budget_status"');
+  });
+
+  test("initialize returns the pinned protocol version", () => {
+    const proc = Bun.spawnSync(["bun", CLI, "mcp-server", "--root", dir], {
+      stdin: Buffer.from('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n'),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(proc.stdout.toString()).toContain("2025-06-18");
+  });
+});

@@ -30,7 +30,10 @@
     "./skill-install": "./src/skill-install.ts",
     "./skill-assign": "./src/skill-assign.ts",
     "./config-edit": "./src/config-edit.ts",
-    "./cli": "./src/cli.ts"
+    "./install": "./src/install.ts",
+    "./cli": "./src/cli.ts",
+    "./integrations/pi": "./integrations/pi.ts",
+    "./integrations/mcp-server": "./integrations/mcp-server.ts"
   },
   "scripts": {
     "test": "bun test",

@@ -230,5 +230,19 @@ export type { AssignMode, AssignOptions, AssignResult, OrphanSuggestion } from "
 export { addSkillToRoom, reloadEnv, ConfigEditError } from "./config-edit.ts";
 export type { EditResult } from "./config-edit.ts";
 
+// ── Agent integrations (Phase 5) ──────────────────────────────────────────────
+// The MCP server (Tier 1) and Pi extension (Tier 2) live under `integrations/`
+// and are reached via the `harbor/integrations/*` subpath exports (they import
+// `harbor` themselves). The install command's config-emission API is core:
+export { AGENT_IDS, applyConfig, emitSnippet, renderSnippet } from "./install.ts";
+export type {
+  AgentId,
+  ApplyOptions,
+  ApplyResult,
+  ConfigFormat,
+  EmitOptions,
+  InstallSnippet,
+} from "./install.ts";
+
 // ── CLI command tree (extensible by later phases) ────────────────────────────-
 export { main as cli, commonArgs, envFromArgs } from "./cli.ts";
