@@ -61,3 +61,80 @@ export type {
 // ── Session tracking ─────────────────────────────────────────────────────────
 export { SessionTracker, listSessions, activeSession } from "./session.ts";
 export type { SessionState, SessionSummary, StartOptions, TrackOptions } from "./session.ts";
+
+// ── Beacon sync ──────────────────────────────────────────────────────────────
+export {
+  SYNC_STAMP,
+  discoverAll,
+  discoverHomeProjects,
+  discoverWorkspaceProjects,
+  ensureWorkspaceDir,
+  fullSync,
+  generateHomeAgentsMd,
+  generateHomeClaudeMd,
+  generateCursorrules,
+  generateProjectAgentsMd,
+  generateRoomIndex,
+  isProjectDir,
+  parseAgentMap,
+  parseProjectTable,
+  parseRoomTable,
+  parseTable,
+  runGenerate,
+  writeIfChanged,
+} from "./sync.ts";
+export type { GenerateResult, TableRow } from "./sync.ts";
+
+// ── Watcher ──────────────────────────────────────────────────────────────────
+export {
+  CooldownGate,
+  PidFile,
+  Watcher,
+  runForeground,
+  startDaemon,
+  stopDaemon,
+  watcherStatus,
+} from "./watch.ts";
+export type { SyncFn, WatcherOptions, WatcherStatus } from "./watch.ts";
+
+// ── Dashboard ────────────────────────────────────────────────────────────────
+export {
+  DEFAULT_PORT,
+  buildAudit,
+  buildBudgets,
+  buildHealth,
+  buildRooms,
+  buildScheduler,
+  buildSessions,
+  buildSkills,
+  createDashboardApp,
+  startDashboard,
+} from "./dashboard.ts";
+export type {
+  AuditResponse,
+  BudgetsResponse,
+  DashboardServer,
+  HealthResponse,
+  LiveMessage,
+  RoomsResponse,
+  SchedulerResponse,
+  SessionsResponse,
+  SkillsResponse,
+} from "./dashboard.ts";
+
+// ── Benchmark ────────────────────────────────────────────────────────────────
+export {
+  WARMUP,
+  conditionFor,
+  formatSummary,
+  isMeasured,
+  latestReport,
+  median,
+  parseSessionJsonl,
+  runBench,
+  summarize,
+} from "./bench.ts";
+export type { BenchRun, BenchSummary, BenchOptions, ConditionStats, SessionMetrics } from "./bench.ts";
+
+// ── CLI command tree (extensible by later phases) ────────────────────────────-
+export { main as cli, commonArgs, envFromArgs } from "./cli.ts";
