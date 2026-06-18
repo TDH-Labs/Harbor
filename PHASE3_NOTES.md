@@ -88,3 +88,39 @@ The spec (§3) is the reference for these; tests assert the behavior it describe
 De-personalization: the `src/` scan is clean — no absolute home paths, user
 emails, secrets, or machine/room slugs — and the absolute build-repo path does
 not appear anywhere in the tree.
+
+## Re-gate fix — SQLite WAL cross-connection race (budget gate fail-open)
+
+The independent audit found a NO-GO: under concurrent load the budget gate could
+**fail OPEN** and allow an overspend. Root cause: `budget.ts`/`audit.ts` resolved
+the live store through Phase-1 `compaction.ts`/`isolation.ts`, which used an
+**open-per-call** `bun:sqlite` pattern (open → write → close → reopen). With
+genuinely concurrent connections, a debit committed on one connection was not
+reliably reflected in the next connection's read-modify-write, so two spenders
+could both read the same pre-spend total and both commit — overspending the limit.
+
+Root fix (two parts):
+
+1. **One long-lived connection per database, cached by absolute path**
+   (`src/db.ts` `openDb`/`closeAllDbs`). `compaction.ts` and `isolation.ts` (audit
+   log) now borrow the cached connection instead of opening per call, so a write
+   is immediately visible to the next read in-process. `:memory:` stays private
+   (never cached). `CompactionEngine.close()` only closes a private connection;
+   the shared one is owned by the cache. `busy_timeout` is now set **before**
+   `journal_mode=WAL` (a concurrent first-open otherwise fails with
+   `SQLITE_BUSY_RECOVERY` before the timeout applies).
+
+2. **Atomic, serialized budget debit** (`CompactionEngine.trySpend`, used by
+   `spendBudget`). The read-check-write runs inside a single `BEGIN IMMEDIATE`
+   transaction and re-reads the authoritative usage (registry sum) inside the
+   lock, so concurrent spenders serialize and the gate cannot be raced into an
+   overspend. Semantics are unchanged (allow iff `used + tokens <= limit`, no
+   eviction on a denied spend; same-key re-spend debits net).
+
+Regression guard: `concurrency.test.ts` drives interleaved
+`spendBudget`/`checkBudget`/`audit.deny` from 8 concurrent **processes**
+(`concurrency.worker.ts`; separate processes, not Worker threads, to model
+genuine concurrent connections and to avoid a Bun allocator double-free on Worker
+isolate teardown) and asserts: usage never exceeds the limit, no lost writes, and
+every denial lands. RED on the pre-fix tree (overspend, `finalUsed` 1100–1300 vs a
+1000 limit); GREEN after.

@@ -30,6 +30,7 @@ import { homedir } from "node:os";
 import { dirname } from "node:path";
 
 import { DEFAULT_CAPABILITIES } from "./config.ts";
+import { openDb } from "./db.ts";
 import type { Environment } from "./env.ts";
 
 // ── Capabilities ─────────────────────────────────────────────────────────────
@@ -269,25 +270,35 @@ export interface AuditLogInput {
   reason?: string;
 }
 
-function openAuditDb(env: Environment): Database {
+/**
+ * The audit log's long-lived, cached connection (one per `isolation.db` path).
+ * Audit writes are append-only inserts; sharing a single connection means an
+ * in-process denial is serialized and immediately visible to the next
+ * `auditRead`/`denialsToday`, and (with `busy_timeout`) concurrent writers from
+ * other connections wait rather than dropping the row — denials always land.
+ */
+function auditDb(env: Environment): Database {
   const path = env.isolationDb;
   mkdirSync(dirname(path), { recursive: true });
-  const db = new Database(path);
-  db.exec("PRAGMA journal_mode = WAL");
-  db.exec("PRAGMA busy_timeout = 5000");
-  db.exec(AUDIT_SCHEMA);
-  return db;
+  return openDb(path, (db) => {
+    // busy_timeout before journal_mode — see compaction.ts: the WAL switch can
+    // need recovery, and a concurrent first-open without the timeout set fails
+    // immediately with SQLITE_BUSY_RECOVERY instead of waiting for the lock.
+    db.exec("PRAGMA busy_timeout = 5000");
+    db.exec("PRAGMA journal_mode = WAL");
+    db.exec(AUDIT_SCHEMA);
+  }).db;
 }
 
 /** Record an audit event. Defaults to a "denied" decision (deny-by-default). */
 export function auditLog(env: Environment, session: AgentSession, input: AuditLogInput): void {
-  const db = openAuditDb(env);
-  try {
-    db.query(
+  auditDb(env)
+    .query(
       `INSERT INTO audit_log
          (timestamp, session_id, room, agent_id, event, capability, resource, decision, reason)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(
+    )
+    .run(
       Date.now() / 1000,
       session.sessionId,
       session.room,
@@ -298,9 +309,6 @@ export function auditLog(env: Environment, session: AgentSession, input: AuditLo
       input.decision ?? "denied",
       input.reason ?? "",
     );
-  } finally {
-    db.close();
-  }
 }
 
 /** Read recent audit entries, optionally filtered by room. */
@@ -309,42 +317,30 @@ export function auditRead(
   options: { room?: string; limit?: number } = {},
 ): AuditEntry[] {
   const limit = options.limit ?? 50;
-  const db = openAuditDb(env);
-  try {
-    const rows = options.room
-      ? (db
-          .query("SELECT * FROM audit_log WHERE room = ? ORDER BY timestamp DESC LIMIT ?")
-          .all(options.room, limit) as AuditRow[])
-      : (db
-          .query("SELECT * FROM audit_log ORDER BY timestamp DESC LIMIT ?")
-          .all(limit) as AuditRow[]);
-    return rows.map(rowToAudit);
-  } finally {
-    db.close();
-  }
+  const db = auditDb(env);
+  const rows = options.room
+    ? (db
+        .query("SELECT * FROM audit_log WHERE room = ? ORDER BY timestamp DESC LIMIT ?")
+        .all(options.room, limit) as AuditRow[])
+    : (db.query("SELECT * FROM audit_log ORDER BY timestamp DESC LIMIT ?").all(limit) as AuditRow[]);
+  return rows.map(rowToAudit);
 }
 
 /** Count denied access attempts today (since UTC midnight). */
 export function auditDenialsToday(env: Environment, room?: string): number {
   const nowSec = Date.now() / 1000;
   const todayStart = nowSec - (nowSec % 86400);
-  const db = openAuditDb(env);
-  try {
-    const row = room
-      ? (db
-          .query(
-            "SELECT COUNT(*) AS n FROM audit_log WHERE timestamp >= ? AND room = ? AND decision = 'denied'",
-          )
-          .get(todayStart, room) as { n: number })
-      : (db
-          .query(
-            "SELECT COUNT(*) AS n FROM audit_log WHERE timestamp >= ? AND decision = 'denied'",
-          )
-          .get(todayStart) as { n: number });
-    return row.n;
-  } finally {
-    db.close();
-  }
+  const db = auditDb(env);
+  const row = room
+    ? (db
+        .query(
+          "SELECT COUNT(*) AS n FROM audit_log WHERE timestamp >= ? AND room = ? AND decision = 'denied'",
+        )
+        .get(todayStart, room) as { n: number })
+    : (db
+        .query("SELECT COUNT(*) AS n FROM audit_log WHERE timestamp >= ? AND decision = 'denied'")
+        .get(todayStart) as { n: number });
+  return row.n;
 }
 
 interface AuditRow {

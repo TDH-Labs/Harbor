@@ -137,9 +137,11 @@ export function spendBudget(
 ): BudgetResult {
   const engine = engineFor(sessionId, options);
   try {
-    if (!engine.canLoad(tokens)) {
-      const remaining = engine.remainingBudget();
-      const limit = engine.tokenLimit;
+    // Atomic check-and-debit (BEGIN IMMEDIATE inside the engine): the gate cannot
+    // fail open under concurrency — a spend that would exceed the limit is denied,
+    // never silently absorbed by eviction.
+    const r = engine.trySpend(key, tokens);
+    if (!r.ok) {
       emitHypervisorEvent({
         kind: "budget",
         event: "exceeded",
@@ -147,21 +149,20 @@ export function spendBudget(
         room: engine.room,
         resource: key,
         tokens,
-        used: engine.tokensUsed,
-        remaining,
-        limit,
+        used: r.used,
+        remaining: r.remaining,
+        limit: r.limit,
         timestamp: nowSec(),
       });
-      throw new BudgetExceededError({ sessionId, key, requested: tokens, remaining, limit });
+      throw new BudgetExceededError({
+        sessionId,
+        key,
+        requested: tokens,
+        remaining: r.remaining,
+        limit: r.limit,
+      });
     }
-    // Pre-check passed ⇒ there is headroom ⇒ spend() will not evict.
-    engine.spend(key, tokens);
-    const result: BudgetResult = {
-      ok: true,
-      limit: engine.tokenLimit,
-      used: engine.tokensUsed,
-      remaining: engine.remainingBudget(),
-    };
+    const result: BudgetResult = { ok: true, limit: r.limit, used: r.used, remaining: r.remaining };
     emitHypervisorEvent({
       kind: "budget",
       event: "spent",

@@ -25,6 +25,7 @@ import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 
+import { openDb } from "./db.ts";
 import { Environment } from "./env.ts";
 
 // ── Token estimation ─────────────────────────────────────────────────────────
@@ -137,6 +138,8 @@ export class CompactionEngine {
   readonly sessionId: string;
   readonly room: string;
   private readonly db: Database;
+  /** True only for a private (":memory:") connection this engine must close. */
+  private readonly ownsDb: boolean;
   private readonly clock: () => number;
   private _tokenLimit: number;
   private _tokensUsed = 0;
@@ -146,10 +149,19 @@ export class CompactionEngine {
   constructor(options: CompactionOptions) {
     const path = resolveDbPath(options);
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
-    this.db = new Database(path);
-    this.db.exec("PRAGMA journal_mode = WAL");
-    this.db.exec("PRAGMA busy_timeout = 5000");
-    this.db.exec(SCHEMA_SQL);
+    // One long-lived connection per database file (shared, cached). A spend is
+    // therefore immediately visible to the next budget read in-process — the
+    // open-per-call WAL visibility race is gone. ":memory:" stays private.
+    const opened = openDb(path, (db) => {
+      // busy_timeout MUST be set before journal_mode: switching to WAL can need
+      // a lock / hot-journal recovery, and without the timeout a concurrent
+      // first-open fails immediately with SQLITE_BUSY_RECOVERY instead of waiting.
+      db.exec("PRAGMA busy_timeout = 5000");
+      db.exec("PRAGMA journal_mode = WAL");
+      db.exec(SCHEMA_SQL);
+    });
+    this.db = opened.db;
+    this.ownsDb = !opened.shared;
 
     this.sessionId = options.sessionId;
     this.room = options.room ?? "";
@@ -160,20 +172,26 @@ export class CompactionEngine {
 
   // ── Session restore ────────────────────────────────────────────────────--
   private loadSession(): void {
-    const row = this.db
+    let row = this.db
       .query("SELECT token_limit, tokens_used FROM session_budgets WHERE session_id = ?")
       .get(this.sessionId) as { token_limit: number; tokens_used: number } | null;
-    if (row) {
-      this._tokenLimit = row.token_limit;
-    } else {
+    if (!row) {
       const now = this.clock();
+      // Idempotent seed: a concurrent connection may have created the row first,
+      // so ignore the conflict and re-read the authoritative limit rather than
+      // crashing on the PRIMARY KEY.
       this.db
         .query(
           `INSERT INTO session_budgets (session_id, room, token_limit, tokens_used, created_at, last_access)
-           VALUES (?, ?, ?, 0, ?, ?)`,
+           VALUES (?, ?, ?, 0, ?, ?)
+           ON CONFLICT(session_id) DO NOTHING`,
         )
         .run(this.sessionId, this.room, this._tokenLimit, now, now);
+      row = this.db
+        .query("SELECT token_limit, tokens_used FROM session_budgets WHERE session_id = ?")
+        .get(this.sessionId) as { token_limit: number; tokens_used: number } | null;
     }
+    if (row) this._tokenLimit = row.token_limit;
 
     const rows = this.db
       .query(
@@ -318,6 +336,70 @@ export class CompactionEngine {
     this.saveRegistry(entry);
     this.updateBudget();
     return entry;
+  }
+
+  /**
+   * Atomically check-and-debit `tokens` under `key` against the session budget.
+   * This is the concurrency-safe budget gate used by `spendBudget`: the entire
+   * read-check-write runs inside a single `BEGIN IMMEDIATE` transaction, so two
+   * spenders (even on separate connections) can never both read the same
+   * pre-spend total and race each other into an overspend. The current usage is
+   * re-read from the registry inside the lock — the in-memory total is never
+   * trusted for the decision — so a spend committed by another connection is
+   * always accounted for.
+   *
+   * Budget-gate semantics match the previous `spendBudget` path exactly: allow
+   * iff `used + tokens <= limit`, with NO eviction (a denied spend never
+   * silently evicts prior context). A re-spend of an existing key debits net of
+   * its prior value. Returns the post-state and whether the spend was allowed.
+   */
+  trySpend(key: string, tokens: number): { ok: boolean; used: number; limit: number; remaining: number } {
+    const debit = this.db.transaction(() => {
+      const limit = this._tokenLimit;
+      const usedRow = this.db
+        .query(
+          "SELECT COALESCE(SUM(token_count), 0) AS used FROM context_registry " +
+            "WHERE session_id = ? AND is_loaded = 1",
+        )
+        .get(this.sessionId) as { used: number };
+      const used = usedRow.used;
+      const existingRow = this.db
+        .query(
+          "SELECT token_count FROM context_registry " +
+            "WHERE session_id = ? AND context_key = ? AND is_loaded = 1",
+        )
+        .get(this.sessionId, key) as { token_count: number } | null;
+      const existingTokens = existingRow ? existingRow.token_count : 0;
+
+      // Exact gate check: the full new amount must fit against the live total.
+      if (used + tokens > limit) {
+        this._tokensUsed = used; // keep the in-memory view current for the caller
+        return { ok: false, used, limit, remaining: Math.max(0, limit - used) };
+      }
+
+      const newUsed = used - existingTokens + tokens;
+      const now = this.clock();
+      const entry: ContextEntry = {
+        key,
+        content: "[tracked]",
+        tokenCount: tokens,
+        contentType: "tracked",
+        tier: "",
+        lastAccess: now,
+        metadata: {},
+        archiveId: null,
+      };
+      this.saveRegistry(entry);
+      this.db
+        .query("UPDATE session_budgets SET tokens_used = ?, last_access = ? WHERE session_id = ?")
+        .run(newUsed, now, this.sessionId);
+      this._tokensUsed = newUsed;
+      this.touch(key, entry);
+      return { ok: true, used: newUsed, limit, remaining: Math.max(0, limit - newUsed) };
+    });
+    // IMMEDIATE acquires the write lock up front so concurrent debits serialize
+    // (waiting up to busy_timeout) instead of interleaving their read-check-write.
+    return debit.immediate();
   }
 
   /** Retrieve a loaded entry, refreshing its LRU position. Null if not loaded. */
@@ -484,7 +566,11 @@ export class CompactionEngine {
   }
 
   close(): void {
-    this.db.close();
+    // Only a private (":memory:") connection is owned here. The shared, cached
+    // file connection is long-lived and owned by the connection cache — closing
+    // it would reintroduce the open-per-call pattern (and the visibility race),
+    // so a borrowed connection is left open for the next caller.
+    if (this.ownsDb) this.db.close();
   }
 }
 
