@@ -256,9 +256,13 @@ export function scaffold(env: Environment, name: string, options: ScaffoldOption
     }
   }
 
+  // Default workDir to env.dataDir (deterministic, not ambient cwd).
+  // process.cwd() coupling caused order-dependent test flakiness: any test
+  // that changed or deleted cwd broke every later test. The data dir is stable
+  // per-environment and never deleted mid-suite.
   const base = options.workDir
     ? resolvePath(options.workDir)
-    : join(process.cwd(), "skills-in-progress");
+    : join(env.dataDir, "skills-in-progress");
   const skillDir = join(base, name);
   if (existsSync(skillDir)) {
     throw new SkillCreateError(`${skillDir} already exists`);

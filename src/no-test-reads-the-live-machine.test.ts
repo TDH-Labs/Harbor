@@ -17,33 +17,32 @@ import { scaffold } from "./skill-create.ts";
 
 describe("live-machine isolation", () => {
   test("the bunfig preload is active — cwd is a throwaway sandbox, not the repo", () => {
-    // If `bunfig.toml`'s `[test] preload` is removed or test-setup stops calling
-    // process.chdir(), cwd reverts to the repo and this fails — the early warning
-    // that the cwd-fallback offender is no longer contained.
+    // Defense-in-depth: the test-setup preload sandboxes cwd. The primary
+    // isolation guarantee is that every test threads explicit env/root paths;
+    // this tripwire catches the case where the preload fails to fire.
     const cwd = process.cwd();
     expect(cwd).toContain("harbor-test-home-");
     expect(cwd.startsWith(tmpdir()) || cwd.startsWith("/private" + tmpdir())).toBe(true);
     expect(cwd).not.toContain("harbor-ts");
   });
 
-  test("skill-create's cwd fallback lands in the sandbox, never the repo or real home", () => {
-    // scaffold() with no workDir falls back to `process.cwd()/skills-in-progress`
-    // (skill-create.ts). With the preload's chdir, that is the sandbox — so even a
-    // test that forgets `workDir` cannot scribble into the git tree or the real
-    // home. Exercise the actual fallback path and assert where it wrote.
+  test("skill-create's fallback lands under env.dataDir, never the repo or real home", () => {
+    // scaffold() with no workDir falls back to env.dataDir/skills-in-progress
+    // (skill-create.ts:261). No ambient cwd coupling — the env carries its own
+    // root, so a test that forgets `workDir` cannot scribble into the git tree
+    // or the real home. Exercise the actual fallback path and assert containment.
     const root = mkdtempSync(join(tmpdir(), "harbor-iso-env-"));
     try {
       const env = new Environment(root, Config.defaults());
       const res = scaffold(env, "cwd-fallback-probe");
       try {
-        // Positive containment is the proof: the fallback wrote under the sandbox
-        // cwd (a `harbor-test-home-*` dir under the OS temp dir). Anything outside
-        // — the repo tree or the real home — fails these by construction, with no
-        // machine-specific literal hardcoded.
-        expect(res.skillDir.startsWith(process.cwd())).toBe(true);
-        expect(res.skillDir).toContain("harbor-test-home-");
-        expect(res.skillDir.startsWith(tmpdir()) || res.skillDir.startsWith("/private" + tmpdir())).toBe(true);
+        // The fallback writes under env.dataDir, which is under the test's temp
+        // root — NOT process.cwd(). Containment under root is the proof no
+        // real home or repo tree was touched.
+        expect(res.skillDir.startsWith(root)).toBe(true);
+        expect(res.skillDir).toContain("skills-in-progress");
         expect(res.skillDir).not.toContain("harbor-ts");
+        expect(res.skillDir).not.toContain(join("Users", "ai"));
       } finally {
         rmSync(dirname(res.skillDir), { recursive: true, force: true });
       }
