@@ -30,6 +30,10 @@ import { runGenerate, fullSync, writeIfChanged } from "./sync.ts";
 import { runBench, formatSummary, latestReport } from "./bench.ts";
 import { startDashboard, DEFAULT_PORT } from "./dashboard.ts";
 import { runForeground, startDaemon, stopDaemon, watcherStatus } from "./watch.ts";
+import { spawn } from "./spawn.ts";
+import { checkBudget, spendBudget, BudgetExceededError } from "./budget.ts";
+import { gate, setGateContext, AccessDeniedError } from "./gate.ts";
+import { audit } from "./audit.ts";
 
 // ── Environment resolution ────────────────────────────────────────────────────
 
@@ -527,6 +531,141 @@ const initCmd = defineCommand({
   },
 });
 
+// ── hypervisor: spawn / budget / gate / audit (Phase 3) ─────────────────────────
+
+const spawnCmd = defineCommand({
+  meta: { name: "spawn", description: "Spawn a Harbor-owned child process (room, budget, timeout)" },
+  args: {
+    ...commonArgs,
+    room: { type: "string", description: "Room", default: "" },
+    budget: { type: "string", description: "Token budget" },
+    timeout: { type: "string", description: "Timeout (ms)" },
+    "allow-path": { type: "string", description: "Allowed paths (':'-separated logical sandbox)" },
+  },
+  async run({ args }) {
+    const env = envFromArgs(args);
+    const rest = ((args as unknown as { _?: string[] })._ ?? []).filter(Boolean);
+    const command = rest[0];
+    if (!command) {
+      console.log("usage: harbor spawn [--room R] [--budget N] [--timeout MS] -- <command> [args...]");
+      return;
+    }
+    const child = spawn(command, rest.slice(1), {
+      harborEnv: env,
+      ...(args.room ? { room: args.room } : {}),
+      ...(args.budget ? { budget: Number.parseInt(args.budget, 10) } : {}),
+      ...(args.timeout ? { timeout: Number.parseInt(args.timeout, 10) } : {}),
+      ...(args["allow-path"] ? { allowedPaths: args["allow-path"].split(":").filter(Boolean) } : {}),
+    });
+    const code = await child.exited;
+    if (child.stdout) {
+      const out = (await new Response(child.stdout as ReadableStream).text()).trim();
+      if (out) console.log(out);
+    }
+    console.log(
+      `spawn: pid ${child.pid} room=${child.room} session=${child.sessionId} ` +
+        `exit=${code}${child.timedOut ? " (timeout)" : ""} tokens=${child.tokensUsed}/${child.budget}`,
+    );
+  },
+});
+
+const budgetCmd = defineCommand({
+  meta: { name: "budget", description: "In-process token budget check / spend" },
+  subCommands: {
+    check: defineCommand({
+      meta: { name: "check", description: "Check whether tokens can be spent (no mutation)" },
+      args: {
+        ...commonArgs,
+        "session-id": { type: "positional", required: true, description: "Session id" },
+        key: { type: "positional", required: true, description: "Context key" },
+        tokens: { type: "positional", required: true, description: "Token count" },
+      },
+      run({ args }) {
+        const env = envFromArgs(args);
+        const r = checkBudget(args["session-id"], args.key, Number.parseInt(args.tokens, 10), { env });
+        console.log(`${r.ok ? "OK" : "DENY"}  ${r.used}/${r.limit} used, ${r.remaining} remaining${r.reason ? ` — ${r.reason}` : ""}`);
+      },
+    }),
+    spend: defineCommand({
+      meta: { name: "spend", description: "Debit tokens against a session budget" },
+      args: {
+        ...commonArgs,
+        "session-id": { type: "positional", required: true, description: "Session id" },
+        key: { type: "positional", required: true, description: "Context key" },
+        tokens: { type: "positional", required: true, description: "Token count" },
+      },
+      run({ args }) {
+        const env = envFromArgs(args);
+        try {
+          const r = spendBudget(args["session-id"], args.key, Number.parseInt(args.tokens, 10), { env });
+          console.log(`spent: ${r.used}/${r.limit} used, ${r.remaining} remaining`);
+        } catch (err) {
+          if (err instanceof BudgetExceededError) console.log(`DENY  ${err.message}`);
+          else throw err;
+        }
+      },
+    }),
+  },
+});
+
+const gateCmd = defineCommand({
+  meta: { name: "gate", description: "Check whether a room may run a tool (room-gated capability check)" },
+  args: {
+    ...commonArgs,
+    room: { type: "positional", required: true, description: "Room" },
+    tool: { type: "positional", required: true, description: "Tool / capability name" },
+    resource: { type: "positional", required: false, description: "Resource (e.g. skill name)" },
+  },
+  async run({ args }) {
+    const env = envFromArgs(args);
+    const session = createSession({ room: args.room, env });
+    setGateContext({ env, session });
+    try {
+      await gate(args.tool, async (_resource: string) => true)(args.resource ?? "");
+      console.log(`ALLOW  room=${args.room} tool=${args.tool}${args.resource ? ` resource=${args.resource}` : ""}`);
+    } catch (err) {
+      if (err instanceof AccessDeniedError) console.log(`DENY  ${err.message}`);
+      else throw err;
+    } finally {
+      setGateContext(null);
+    }
+  },
+});
+
+const auditCmd = defineCommand({
+  meta: { name: "audit", description: "Hypervisor audit trail (denials / allowances)" },
+  subCommands: {
+    recent: defineCommand({
+      meta: { name: "recent", description: "Recent audit entries" },
+      args: {
+        ...commonArgs,
+        room: { type: "string", description: "Filter by room" },
+        limit: { type: "string", description: "Max entries", default: "20" },
+      },
+      run({ args }) {
+        const env = envFromArgs(args);
+        const entries = audit.recent({
+          env,
+          ...(args.room ? { room: args.room } : {}),
+          limit: Number.parseInt(args.limit, 10),
+        });
+        for (const e of entries) {
+          console.log(`${e.decision.padEnd(7)} ${e.room}/${e.event} ${e.capability} ${e.resource}`);
+        }
+      },
+    }),
+    denials: defineCommand({
+      meta: { name: "denials", description: "Count today's denials" },
+      args: { ...commonArgs, room: { type: "string", description: "Filter by room" } },
+      run({ args }) {
+        const env = envFromArgs(args);
+        const n = audit.denialsToday(args.room, { env });
+        console.log(`${n} denial(s) today${args.room ? ` in ${args.room}` : ""}`);
+      },
+    }),
+  },
+});
+
 // ── Root command ──────────────────────────────────────────────────────────────
 
 export const main: CommandDef = defineCommand({
@@ -542,6 +681,10 @@ export const main: CommandDef = defineCommand({
     compaction: compactionCmd,
     isolation: isolationCmd,
     session: sessionCmd,
+    spawn: spawnCmd,
+    budget: budgetCmd,
+    gate: gateCmd,
+    audit: auditCmd,
     check: checkCmd,
     init: initCmd,
   },

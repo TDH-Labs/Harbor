@@ -29,6 +29,8 @@ import { Scheduler, TaskState } from "./scheduler.ts";
 import { activeSession, listSessions } from "./session.ts";
 import { SYNC_STAMP } from "./sync.ts";
 import { watcherStatus } from "./watch.ts";
+import { onHypervisorEvent } from "./audit.ts";
+import { listActiveSpawns, type SpawnInfo } from "./spawn.ts";
 
 /** Default dashboard port (Python parity). */
 export const DEFAULT_PORT = 8765;
@@ -137,6 +139,12 @@ export interface SessionRow {
 }
 export interface SessionsResponse {
   sessions: SessionRow[];
+}
+
+/** Hypervisor panel data: the spawns this dashboard process currently owns. */
+export interface HypervisorResponse {
+  activeSpawns: SpawnInfo[];
+  count: number;
 }
 
 /** WebSocket message envelope (`/api/live`). Typed so Phase 3 can add event kinds. */
@@ -327,6 +335,15 @@ export function buildSessions(env: Environment): SessionsResponse {
   return { sessions };
 }
 
+/**
+ * Active hypervisor spawns. In-process only — reflects the spawns THIS process
+ * owns (the dashboard host / an integration), not spawns in other processes.
+ */
+export function buildHypervisor(): HypervisorResponse {
+  const activeSpawns = listActiveSpawns();
+  return { activeSpawns, count: activeSpawns.length };
+}
+
 // ── HTTP app ──────────────────────────────────────────────────────────────────
 
 const wsHelper = createBunWebSocket();
@@ -350,6 +367,7 @@ export function createDashboardApp(env: Environment): Hono {
   app.get("/api/budgets", (c) => c.json(buildBudgets(env)));
   app.get("/api/audit", (c) => c.json(buildAudit(env)));
   app.get("/api/sessions", (c) => c.json(buildSessions(env)));
+  app.get("/api/hypervisor", (c) => c.json(buildHypervisor()));
   return app;
 }
 
@@ -389,13 +407,21 @@ export function startDashboard(
     websocket: wsHelper.websocket,
   });
 
+  const broadcast = (message: LiveMessage): void => {
+    const data = JSON.stringify(message);
+    for (const ws of sockets) ws.send(data);
+  };
+
+  // Push real-time hypervisor events (spawn/budget/gate/audit) to live sockets.
+  const unsubscribe = onHypervisorEvent((event) => {
+    broadcast({ type: "hypervisor", payload: event });
+  });
+
   return {
     port: server.port ?? options.port ?? DEFAULT_PORT,
-    broadcast(message: LiveMessage) {
-      const data = JSON.stringify(message);
-      for (const ws of sockets) ws.send(data);
-    },
+    broadcast,
     stop() {
+      unsubscribe();
       server.stop(true);
     },
   };
@@ -438,6 +464,7 @@ const DASHBOARD_HTML = `<!doctype html>
   <div class="panel"><h2>Token Budgets</h2><div id="budgets"></div></div>
   <div class="panel"><h2>Audit Log</h2><div id="audit"></div></div>
   <div class="panel"><h2>Recent Sessions</h2><div id="sessions"></div></div>
+  <div class="panel"><h2>Hypervisor</h2><div id="hypervisor"></div><div id="hypfeed" class="muted"></div></div>
 </div>
 <script>
 const $ = (id) => document.getElementById(id);
@@ -469,14 +496,26 @@ async function fetchAll(){
     const s = await get('/api/sessions');
     $('sessions').innerHTML = '<table>' + s.sessions.slice(0,6).map(x =>
       '<tr><td>'+x.room+'</td><td>'+x.tokensUsed+'/'+x.tokenLimit+'</td><td>'+x.status+'</td></tr>').join('') + '</table>';
+    const hv = await get('/api/hypervisor');
+    $('hypervisor').innerHTML = 'active spawns: <b>'+hv.count+'</b>' + (hv.count
+      ? '<table>' + hv.activeSpawns.map(x =>
+          '<tr><td>'+x.command+'</td><td>'+x.room+'</td><td>'+x.budgetRemaining+'/'+x.budget+'</td></tr>').join('') + '</table>'
+      : '');
   } catch (e) { /* transient */ }
+}
+// Live hypervisor event feed (pushed over /api/live), most-recent first.
+const hypEvents = [];
+function pushHypEvent(e){
+  hypEvents.unshift(new Date((e.timestamp||0)*1000).toLocaleTimeString()+' '+e.kind+(e.event?'/'+e.event:'')+' '+(e.room||'')+' '+(e.resource||''));
+  if (hypEvents.length > 8) hypEvents.length = 8;
+  if ($('hypfeed')) $('hypfeed').innerHTML = hypEvents.join('<br>');
 }
 function connectLive(){
   try {
     const ws = new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/api/live');
     ws.onopen = () => { $('live').textContent='live'; $('live').classList.add('on'); };
     ws.onclose = () => { $('live').textContent='offline'; $('live').classList.remove('on'); setTimeout(connectLive, 3000); };
-    ws.onmessage = (ev) => { try { const m = JSON.parse(ev.data); if (m.type==='health') fetchAll(); } catch(_){} };
+    ws.onmessage = (ev) => { try { const m = JSON.parse(ev.data); if (m.type==='health') fetchAll(); else if (m.type==='hypervisor' && m.payload) pushHypEvent(m.payload); } catch(_){} };
   } catch (_) {}
 }
 fetchAll(); setInterval(fetchAll, 30000); connectLive();

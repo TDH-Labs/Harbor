@@ -54,6 +54,18 @@ export class Environment {
     return new Environment(rootPath, cfg, cfgFile);
   }
 
+  /**
+   * The process-wide default Environment, lazily loaded from the default config
+   * location and cached. The hypervisor primitives ({@link spawn}, budget, gate,
+   * audit, evict) call this when no explicit `env` is supplied so the spec's
+   * short call forms (e.g. `checkBudget(id, key, n)`) work in production. Tests
+   * always pass an explicit env and never hit this path.
+   */
+  private static _default: Environment | null = null;
+  static default(): Environment {
+    return (Environment._default ??= Environment.load());
+  }
+
   // ── Template resolution ──────────────────────────────────────────────────
   /** Resolve a config path template against the root. */
   resolve(template: string): string {

@@ -19,6 +19,11 @@
     "./watch": "./src/watch.ts",
     "./dashboard": "./src/dashboard.ts",
     "./bench": "./src/bench.ts",
+    "./spawn": "./src/spawn.ts",
+    "./budget": "./src/budget.ts",
+    "./gate": "./src/gate.ts",
+    "./audit": "./src/audit.ts",
+    "./evict": "./src/evict.ts",
     "./cli": "./src/cli.ts"
   },
   "scripts": {

@@ -100,9 +100,11 @@ export type { SyncFn, WatcherOptions, WatcherStatus } from "./watch.ts";
 // ── Dashboard ────────────────────────────────────────────────────────────────
 export {
   DEFAULT_PORT,
+  budgetClass,
   buildAudit,
   buildBudgets,
   buildHealth,
+  buildHypervisor,
   buildRooms,
   buildScheduler,
   buildSessions,
@@ -112,9 +114,11 @@ export {
 } from "./dashboard.ts";
 export type {
   AuditResponse,
+  BudgetClass,
   BudgetsResponse,
   DashboardServer,
   HealthResponse,
+  HypervisorResponse,
   LiveMessage,
   RoomsResponse,
   SchedulerResponse,
@@ -135,6 +139,30 @@ export {
   summarize,
 } from "./bench.ts";
 export type { BenchRun, BenchSummary, BenchOptions, ConditionStats, SessionMetrics } from "./bench.ts";
+
+// ── Hypervisor primitives (Phase 3 — in-process, no bridge) ───────────────────-
+export { spawn, awaitExit, listActiveSpawns, SpawnTimeoutError } from "./spawn.ts";
+export type { HarborChildProcess, HarborSpawnOptions, SpawnInfo } from "./spawn.ts";
+
+export { checkBudget, spendBudget, BudgetExceededError } from "./budget.ts";
+export type { BudgetResult, BudgetOptions } from "./budget.ts";
+
+export { gate, AccessDeniedError, setGateContext, currentGateContext } from "./gate.ts";
+export type { GateContext } from "./gate.ts";
+
+export {
+  audit,
+  allow as auditAllow,
+  deny as auditDeny,
+  recent as auditRecent,
+  denialsToday as auditDenialsTodayFor,
+  onHypervisorEvent,
+  emitHypervisorEvent,
+} from "./audit.ts";
+export type { HypervisorEvent, HypervisorEventKind, HypervisorEventListener } from "./audit.ts";
+
+export { evict, lru as evictLru, retrieve as evictRetrieve, stats as evictStats } from "./evict.ts";
+export type { EvictStats, EvictOptions, EvictLruOptions } from "./evict.ts";
 
 // ── CLI command tree (extensible by later phases) ────────────────────────────-
 export { main as cli, commonArgs, envFromArgs } from "./cli.ts";
