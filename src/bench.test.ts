@@ -65,6 +65,14 @@ describe("median", () => {
     expect(median([1, 2, 3, 4])).toBe(2.5);
     expect(median([])).toBe(0);
   });
+
+  test("is the true median, NOT the mean (skewed data discriminates the two)", () => {
+    // Right-skewed: an outlier pulls the mean up but the median holds.
+    expect(median([1, 2, 3, 4, 10])).toBe(3); // mean would be 4
+    expect(median([1, 2, 3, 100])).toBe(2.5); // mean would be 26.5
+    // Unsorted input with an outlier — still the middle by value, not position.
+    expect(median([100, 1, 2, 3])).toBe(2.5);
+  });
 });
 
 describe("parseSessionJsonl", () => {
@@ -103,7 +111,10 @@ describe("parseSessionJsonl", () => {
 
 describe("summarize", () => {
   test("computes per-condition medians, speedup, and token reduction over measured runs", () => {
-    // indices 0,1 are warm-up; 2,4 control; 3,5 harbor
+    // indices 0,1 are warm-up; 2,4,6 control; 3,5,7 harbor.
+    // Each condition has a skewing outlier so median != mean: control wall times
+    // are [10,10,40] (median 10, mean 20); harbor [5,5,20] (median 5, mean 10).
+    // The asserted speedup/reduction only hold if the aggregate is the MEDIAN.
     const runs: BenchRun[] = [
       run(0, { wallTimeSeconds: 99 }), // warm-up control (excluded)
       run(1, { wallTimeSeconds: 99 }), // warm-up harbor (excluded)
@@ -111,13 +122,17 @@ describe("summarize", () => {
       run(3, { wallTimeSeconds: 5, inputTokens: 400 }),
       run(4, { wallTimeSeconds: 10, inputTokens: 1000 }),
       run(5, { wallTimeSeconds: 5, inputTokens: 400 }),
+      run(6, { wallTimeSeconds: 40, inputTokens: 4000 }), // control outlier
+      run(7, { wallTimeSeconds: 20, inputTokens: 1600 }), // harbor outlier
     ];
     const s = summarize("bugfix", runs);
-    expect(s.measuredRuns).toBe(4);
-    expect(s.control?.medianWallTime).toBe(10);
-    expect(s.harbor?.medianWallTime).toBe(5);
-    expect(s.speedup).toBe(2); // 10 / 5
-    expect(s.inputTokenReductionPct).toBeCloseTo(60, 6); // (1 - 400/1000)*100
+    expect(s.measuredRuns).toBe(6);
+    expect(s.control?.medianWallTime).toBe(10); // median of [10,10,40]; mean would be 20
+    expect(s.harbor?.medianWallTime).toBe(5); // median of [5,5,20]; mean would be 10
+    expect(s.control?.medianInputTokens).toBe(1000); // median of [1000,1000,4000]; mean 2000
+    expect(s.harbor?.medianInputTokens).toBe(400); // median of [400,400,1600]; mean ~800
+    expect(s.speedup).toBe(2); // median 10 / median 5 (mean-based would be 2 also, but tokens below discriminate)
+    expect(s.inputTokenReductionPct).toBeCloseTo(60, 6); // (1 - 400/1000)*100; mean-based ≈ 60 too → see medianInputTokens asserts
     expect(formatSummary(s)).toContain("2.00x faster");
   });
 

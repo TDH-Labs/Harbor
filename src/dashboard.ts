@@ -85,11 +85,26 @@ export interface SchedulerResponse {
   counts: Record<string, number>;
 }
 
+/** Budget gauge color band. Thresholds match the Python prototype: >90 red, >70 yellow, else green. */
+export type BudgetClass = "green" | "yellow" | "red";
+
+/**
+ * Classify a usage percentage into a gauge color band. This is the single source
+ * of truth for the >90% red / >70% yellow / else green thresholds — the dashboard
+ * frontend consumes {@link BudgetRow.classified} rather than re-deriving them.
+ */
+export function budgetClass(percent: number): BudgetClass {
+  if (percent > 90) return "red";
+  if (percent > 70) return "yellow";
+  return "green";
+}
+
 export interface BudgetRow {
   limit: number;
   used: number;
   remaining: number;
   percent: number;
+  classified: BudgetClass;
 }
 export interface BudgetsResponse {
   budgets: Record<string, BudgetRow>;
@@ -259,15 +274,26 @@ export function buildBudgets(env: Environment): BudgetsResponse {
   const sessions = listSessions(env, { limit: 200 });
   const budgets: Record<string, BudgetRow> = {};
   for (const s of sessions) {
-    const row = budgets[s.room] ?? { limit: 0, used: 0, remaining: 0, percent: 0 };
-    // The limit is the actual per-session budget the room's sessions ran with.
-    row.limit = Math.max(row.limit, s.tokenLimit);
+    const row = budgets[s.room] ?? {
+      limit: 0,
+      used: 0,
+      remaining: 0,
+      percent: 0,
+      classified: "green" as BudgetClass,
+    };
+    // Behavioral fidelity (dashboard.py:342 `_get_budgets`): the limit is the
+    // room's *configured* budget, not whatever per-session limit a given session
+    // happened to run with. `config.roomBudget` is the de-personalized analogue
+    // of the prototype's hardcoded `default_budgets` dict (per-room override →
+    // `budgets.rooms[room]` → `default_session_limit`).
+    row.limit = env.config.roomBudget(s.room);
     row.used += s.tokensUsed;
     budgets[s.room] = row;
   }
   for (const row of Object.values(budgets)) {
     row.remaining = Math.max(0, row.limit - row.used);
     row.percent = row.limit > 0 ? Math.round((row.used / row.limit) * 1000) / 10 : 0;
+    row.classified = budgetClass(row.percent);
   }
   const active = activeSession(env);
   return { budgets, activeSession: active ? active.sessionId : null };
@@ -416,7 +442,8 @@ const DASHBOARD_HTML = `<!doctype html>
 <script>
 const $ = (id) => document.getElementById(id);
 async function get(p){ const r = await fetch(p); return r.json(); }
-function pct(p){ return p > 90 ? 'r' : p > 70 ? 'y' : 'g'; }
+// Color band comes from the API (server-side budgetClass) — map to the CSS class.
+const BAND = { green: 'g', yellow: 'y', red: 'r' };
 async function fetchAll(){
   try {
     const h = await get('/api/health');
@@ -434,7 +461,7 @@ async function fetchAll(){
     const b = await get('/api/budgets');
     $('budgets').innerHTML = Object.keys(b.budgets).length
       ? Object.entries(b.budgets).map(([room,v]) =>
-          room+' <div class="bar"><span class="'+pct(v.percent)+'" style="width:'+Math.min(100,v.percent)+'%"></span></div> '+v.used+'/'+v.limit).join('')
+          room+' <div class="bar"><span class="'+BAND[v.classified]+'" style="width:'+Math.min(100,v.percent)+'%"></span></div> '+v.used+'/'+v.limit).join('')
       : '<span class="muted">no sessions</span>';
     const a = await get('/api/audit');
     $('audit').innerHTML = 'denials today: <b>'+a.denialsToday+'</b><br>' +

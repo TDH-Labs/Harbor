@@ -150,6 +150,34 @@ describe("runGenerate (--generate-only path)", () => {
     runGenerate(e);
     expect(existsSync(join(dir, "rooms", "legal", "skills_index.md"))).toBe(true);
   });
+
+  test("does NOT discover or scaffold workspace projects (watcher-contamination guard)", () => {
+    // This is the exact boundary that keeps `--generate-only` from touching the
+    // watched workspace: it regenerates home beacons ONLY. An existing workspace
+    // project dir must come out untouched — no compaction stubs, no AGENTS.md
+    // symlink. If runGenerate ever starts scaffolding, the watcher would see new
+    // files appear and storm. Contrast: fullSync (below) DOES scaffold.
+    const proj = join(dir, "workspace", "live-proj");
+    mkdirSync(proj, { recursive: true });
+    writeFileSync(join(dir, "agent_map.md"), SAMPLE_MAP);
+
+    runGenerate(env());
+
+    // Home beacon was generated...
+    expect(existsSync(join(dir, "AGENTS.md"))).toBe(true);
+    // ...but the workspace project was NOT scaffolded.
+    for (const f of ["research.md", "plan.md", "scratchpad.md", "AGENTS.md"]) {
+      expect(existsSync(join(proj, f))).toBe(false);
+    }
+
+    // Contrast: fullSync DOES scaffold the same project (proves the guard is real,
+    // not just that scaffolding is broken everywhere).
+    fullSync(env());
+    for (const f of ["research.md", "plan.md", "scratchpad.md"]) {
+      expect(existsSync(join(proj, f))).toBe(true);
+    }
+    expect(readlinkSync(join(proj, "AGENTS.md"))).toBe(join(dir, "AGENTS.md"));
+  });
 });
 
 describe("ensureWorkspaceDir / fullSync", () => {

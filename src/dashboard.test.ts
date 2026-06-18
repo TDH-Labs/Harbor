@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 import { Config, DEFAULTS, deepMerge } from "./config.ts";
 import {
+  budgetClass,
   buildAudit,
   buildBudgets,
   buildHealth,
@@ -66,7 +67,9 @@ describe("data builders", () => {
   });
 
   test("buildSessions + buildBudgets reflect a tracked session", () => {
-    const e = env({ legal: { skills: [] } });
+    // The room's configured budget (1000) is the gauge limit — see the
+    // reconciliation test below for why this is NOT the session's own tokenLimit.
+    const e = env({ legal: { skills: [], budget: 1000 } });
     const t = new SessionTracker({ env: e, clock: () => 1000 });
     t.start("legal", { budget: 1000 });
     t.track("skill:a", 300);
@@ -79,6 +82,50 @@ describe("data builders", () => {
     const budgets = buildBudgets(e);
     expect(budgets.budgets["legal"]?.used).toBe(300);
     expect(budgets.budgets["legal"]?.remaining).toBe(700);
+  });
+
+  test("buildBudgets limit is the room's CONFIGURED budget, not the session's tokenLimit", () => {
+    // Behavioral fidelity with dashboard.py:342 `_get_budgets`: the gauge limit is
+    // the room default budget, independent of whatever per-session limit a session
+    // ran with. Here the session runs with a tokenLimit of 50_000 but the room is
+    // configured for 8_000 — the budget row must report 8_000, not 50_000.
+    const e = env({ legal: { skills: [], budget: 8_000 } });
+    const t = new SessionTracker({ env: e, clock: () => 1000 });
+    t.start("legal", { budget: 50_000 });
+    t.track("skill:a", 2_000);
+    t.end("completed", "done");
+
+    const row = buildBudgets(e).budgets["legal"];
+    expect(row?.limit).toBe(8_000); // configured room budget — NOT the session's 50_000
+    expect(row?.used).toBe(2_000);
+    expect(row?.remaining).toBe(6_000);
+    expect(row?.percent).toBe(25);
+  });
+
+  test("buildBudgets classifies the gauge band from the configured limit", () => {
+    // used/limit = 7_500/8_000 = 93.75% → red. If the limit fell back to the
+    // session's tokenLimit (50_000) the percent would be 15% → green, so this
+    // also guards the limit-source reconciliation.
+    const e = env({ legal: { skills: [], budget: 8_000 } });
+    const t = new SessionTracker({ env: e, clock: () => 1000 });
+    t.start("legal", { budget: 50_000 });
+    t.track("skill:a", 7_500);
+    t.end("completed", "done");
+
+    expect(buildBudgets(e).budgets["legal"]?.classified).toBe("red");
+  });
+});
+
+describe("budgetClass thresholds", () => {
+  test(">90 red, >70 yellow, else green (boundaries)", () => {
+    expect(budgetClass(91)).toBe("red");
+    expect(budgetClass(71)).toBe("yellow");
+    expect(budgetClass(50)).toBe("green");
+    // Boundary values land in the lower band (strict >).
+    expect(budgetClass(90)).toBe("yellow");
+    expect(budgetClass(70)).toBe("green");
+    expect(budgetClass(100)).toBe("red");
+    expect(budgetClass(0)).toBe("green");
   });
 });
 
