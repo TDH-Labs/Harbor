@@ -90,14 +90,54 @@ Per the Behavioral-Fidelity Rule (consult the prototype, write a test, implement
 - New tests: `skills` (19), `mcp` (24), `skill-create` (9), `skill-install` (9),
   `skill-assign` (9), `config-edit` (7), plus CLI (Phase-4 acceptance cases) and
   dashboard panel tests.
-- Full suite: **276 pass / 0 fail** (184 baseline + 92 this phase). Typecheck
-  clean (`tsc --noEmit`).
-- Determinism: **50/50 green** full-suite runs, zero non-green.
+- Full suite: **282 pass / 0 fail**. Typecheck clean (`tsc --noEmit`).
 - De-personalization scan over `src/` clean (only the intentional
-  `not.toContain("hermes")` de-perso regression guard remains, which enforces
-  absence).
+  `not.toContain("hermes")` / `not.toContain("agent-env")` de-perso regression
+  guards remain, which enforce absence).
+
+## Determinism gate remediation (NO-GO #1 → GO)
+
+The first honest 50× measurement was 28/50 green: two Phase-4 tests
+(`skill-install.test` index assertion, `cli.test` skill-install positional) failed
+in tight clusters during a transient machine-load burst. Root cause was
+test-harness fragility under load, not product logic (mutation f/e prove the
+guards; ~309 controlled runs after the burst were all green). Fixes — test
+isolation and the index-write ordering only; no mutation-verified logic touched:
+
+1. **Subprocess fan-out cut (the load source).** `cli.test.ts` spawned ~36
+   `bun cli.ts` subprocesses (a 19-command `--help` loop + functional cases).
+   Running alongside the other spawn-heavy suites (`spawn`, `mcp`, `bench`,
+   `watch`, `concurrency`) under a burst, that fan-out was the machine-load that
+   correlated with the flake. The bulk now runs **in-process** through the same
+   citty command tree (`runCommand` for handlers, `renderUsage` for help), with
+   **4** true end-to-end subprocess smokes kept (binary+help, a file-writing
+   command, the SQLite scheduler, config-loading skill tooling). Spawns: 36 → 4.
+
+2. **Index-write ordering pinned.** `skill-install`'s config-write → reload →
+   index-regenerate chain was already fully synchronous; a regression guard
+   (`skill-install.test.ts` "index write is synchronous…") now fails if it is ever
+   made fire-and-forget — it asserts, with no `await`/tick after `install()`
+   returns, that the index file exists *and* contains the routed skill's row, and
+   that `install()` returns a non-Promise. A load-bearing comment marks the
+   ordering in `skill-install.ts`.
+
+3. **Hermetic isolation from the live machine.** Audit: every Phase-4 and Phase-3
+   test already threads an explicit `env`/`workDir`, so none reads the real
+   `~/.agent-env` / `~/rooms` / `~/.agents` (confirmed: live state-dir mtimes
+   unchanged across runs). Belt-and-suspenders added: a `bunfig.toml` test preload
+   (`src/test-setup.ts`) `chdir`s into a throwaway sandbox so the `skill-create`
+   `process.cwd()/skills-in-progress` fallback can never scribble into the repo or
+   real home, and a tripwire suite (`no-test-reads-the-live-machine.test.ts`) fails
+   loudly if the preload is removed or the cwd fallback escapes the sandbox.
+   (In-process `os.homedir()` is intentionally not relied on for isolation — Bun
+   snapshots it at startup; explicit-env threading is the in-process guarantee.)
+
+4. **Determinism re-proven** (concurrency-sensitive → 100, not 50): **100/100**
+   fixed-order + **100/100** `--randomize` + **120/120** lanes under 4× concurrent
+   full-suite load = **320/320 green, zero non-green**.
 
 ## Gate 4 → 5
 
-Acceptance criteria in `phases/04-tooling.md` all met. Awaiting independent
-reviewer sign-off (`REVIEW_04.md`) before Phase 5.
+Acceptance criteria in `phases/04-tooling.md` all met; determinism gate
+re-measured clean. Awaiting independent reviewer sign-off (`REVIEW_04.md`) before
+Phase 5.

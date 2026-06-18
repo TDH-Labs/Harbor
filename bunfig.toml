@@ -1,0 +1,10 @@
+# Bun configuration.
+#
+# The test preload hermetically isolates the suite from the live machine: it
+# redirects $HOME and the working directory to a throwaway temp dir before any
+# test or product module loads, so any machine-default fallback resolves inside
+# a sandbox instead of the operator's real ~/.agent-env / ~/rooms / ~/.agents.
+# See src/test-setup.ts and BUILD_BRIEF §7 (the build must not perturb the live
+# system under soak).
+[test]
+preload = ["./src/test-setup.ts"]

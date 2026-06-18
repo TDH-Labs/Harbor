@@ -1,7 +1,23 @@
+/**
+ * cli.test.ts — CLI command coverage.
+ *
+ * Determinism note (Phase-4 gate): the bulk of these assertions run the command
+ * tree IN-PROCESS via citty's `runCommand`/`renderUsage` — the same handler code
+ * a subprocess would run, but without spawning a `bun` per case. The earlier
+ * version spawned ~36 `bun cli.ts` subprocesses (a 19-command `--help` loop plus
+ * the functional cases); under a concurrent load burst alongside the other
+ * spawn-heavy suites, that fan-out was the machine-load source correlated with the
+ * gate's flakiness. A handful of true end-to-end subprocess smokes remain to prove
+ * the binary actually launches, parses args, loads config, and exits cleanly.
+ */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+import { renderUsage, runCommand } from "citty";
+
+import { main } from "./cli.ts";
 
 const CLI = join(import.meta.dir, "cli.ts");
 
@@ -13,6 +29,7 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+/** Spawn the real CLI binary in a subprocess (true end-to-end). Used sparingly. */
 function run(...args: string[]): { code: number; out: string; err: string } {
   const proc = Bun.spawnSync(["bun", CLI, ...args], { stdout: "pipe", stderr: "pipe" });
   return {
@@ -20,6 +37,38 @@ function run(...args: string[]): { code: number; out: string; err: string } {
     out: proc.stdout.toString(),
     err: proc.stderr.toString(),
   };
+}
+
+/**
+ * Run a command IN-PROCESS through the same citty tree the binary uses, capturing
+ * stdout/stderr and the resolved exit code. No subprocess is spawned. `process.exitCode`
+ * is saved/restored so a command that signals failure in-process can never set the
+ * test runner's own exit code.
+ */
+async function cli(...args: string[]): Promise<{ code: number; out: string }> {
+  const logs: string[] = [];
+  const sink = (...a: unknown[]) => {
+    logs.push(a.map((x) => (typeof x === "string" ? x : String(x))).join(" "));
+  };
+  const origLog = console.log;
+  const origErr = console.error;
+  const savedExit = process.exitCode;
+  console.log = sink as typeof console.log;
+  console.error = sink as typeof console.error;
+  process.exitCode = 0;
+  let threw = false;
+  try {
+    await runCommand(main, { rawArgs: args });
+  } catch (err) {
+    threw = true;
+    sink(err instanceof Error ? err.message : String(err));
+  } finally {
+    console.log = origLog;
+    console.error = origErr;
+  }
+  const code = threw ? 1 : typeof process.exitCode === "number" ? process.exitCode : 0;
+  process.exitCode = savedExit;
+  return { code, out: logs.join("\n") };
 }
 
 /** Write a config.toml under the temp dir and return its path. */
@@ -54,85 +103,119 @@ function writeConfig(): string {
   return cfg;
 }
 
-describe("--help parses for every subcommand", () => {
-  const commands = [
-    "sync", "watch", "start", "stop", "dashboard", "bench",
-    "scheduler", "compaction", "isolation", "session", "check", "init",
-    "skills-list", "mcp-check", "mcp-gen", "mcp-merge",
-    "skill-create", "skill-install", "skill-assign",
-  ];
-  test("root --help exits 0 and lists subcommands", () => {
+// ── True end-to-end subprocess smokes (kept deliberately small) ───────────────--
+// One spawn per surface: the binary launches + help path, a core file-writing
+// command, the SQLite-backed scheduler, and the config-loading skill tooling.
+
+describe("end-to-end (subprocess) smokes", () => {
+  test("root --help exits 0 and lists subcommands (binary + runMain help path)", () => {
     const r = run("--help");
     expect(r.code).toBe(0);
     expect(r.out + r.err).toContain("scheduler");
   });
-  for (const cmd of commands) {
-    test(`${cmd} --help exits 0`, () => {
-      const r = run(cmd, "--help");
-      expect(r.code).toBe(0);
-      expect((r.out + r.err).toLowerCase()).toContain(cmd);
-    });
-  }
-});
 
-describe("init + sync (--generate-only)", () => {
-  test("init seeds agent_map.md and a stamped AGENTS.md", () => {
+  test("init writes agent_map.md + a stamped AGENTS.md through a real process", () => {
     const r = run("init", "--root", dir);
     expect(r.code).toBe(0);
     expect(existsSync(join(dir, "agent_map.md"))).toBe(true);
     expect(readFileSync(join(dir, "AGENTS.md"), "utf8")).toContain("<!-- agent-env:sync -->");
   });
 
-  test("sync --generate-only produces AGENTS.md with the sync stamp", () => {
-    const r = run("sync", "--generate-only", "--root", dir);
-    expect(r.code).toBe(0);
-    expect(readFileSync(join(dir, "AGENTS.md"), "utf8")).toContain("<!-- agent-env:sync -->");
-  });
-});
-
-describe("session round-trip", () => {
-  test("start then active reports the live session", () => {
-    const start = run("session", "start", "ops", "5000", "--root", dir);
-    expect(start.code).toBe(0);
-    expect(start.out).toContain("started in ops");
-
-    const active = run("session", "active", "--root", dir);
-    expect(active.code).toBe(0);
-    expect(active.out).toContain("ops");
-  });
-});
-
-describe("scheduler stats", () => {
-  test("prints task counts by state", () => {
+  test("scheduler stats opens its SQLite DB and reports state counts", () => {
     const r = run("scheduler", "stats", "--root", dir);
     expect(r.code).toBe(0);
     expect(r.out).toContain("tasks by state:");
     expect(r.out).toContain("queued:");
   });
 
-  test("submit then list shows the task", () => {
-    const submit = run("scheduler", "submit", "cleanup", "--room", "devops", "--priority", "5", "--root", dir);
+  test("skills-list loads --config in a real process", () => {
+    const cfg = writeConfig();
+    const r = run("skills-list", "--config", cfg);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("no skills in pool");
+  });
+});
+
+// ── Per-subcommand help (in-process usage rendering) ──────────────────────────--
+
+describe("--help renders for every subcommand", () => {
+  const commands = [
+    "sync", "watch", "start", "stop", "dashboard", "bench",
+    "scheduler", "compaction", "isolation", "session", "check", "init",
+    "skills-list", "mcp-check", "mcp-gen", "mcp-merge",
+    "skill-create", "skill-install", "skill-assign",
+  ];
+  const subCommands = (main as unknown as { subCommands: Record<string, unknown> }).subCommands;
+  for (const cmd of commands) {
+    test(`${cmd} usage renders and names the command`, async () => {
+      const sub = subCommands[cmd];
+      expect(sub).toBeDefined();
+      const usage = await renderUsage(sub as Parameters<typeof renderUsage>[0], main as Parameters<typeof renderUsage>[1]);
+      expect(usage.toLowerCase()).toContain(cmd);
+    });
+  }
+});
+
+// ── Functional command behavior (in-process) ──────────────────────────────────--
+
+describe("init + sync (in-process)", () => {
+  test("init seeds agent_map.md and a stamped AGENTS.md", async () => {
+    const r = await cli("init", "--root", dir);
+    expect(r.code).toBe(0);
+    expect(existsSync(join(dir, "agent_map.md"))).toBe(true);
+    expect(readFileSync(join(dir, "AGENTS.md"), "utf8")).toContain("<!-- agent-env:sync -->");
+  });
+
+  test("sync --generate-only produces AGENTS.md with the sync stamp", async () => {
+    const r = await cli("sync", "--generate-only", "--root", dir);
+    expect(r.code).toBe(0);
+    expect(readFileSync(join(dir, "AGENTS.md"), "utf8")).toContain("<!-- agent-env:sync -->");
+  });
+});
+
+describe("session round-trip (in-process)", () => {
+  test("start then active reports the live session", async () => {
+    const start = await cli("session", "start", "ops", "5000", "--root", dir);
+    expect(start.code).toBe(0);
+    expect(start.out).toContain("started in ops");
+
+    const active = await cli("session", "active", "--root", dir);
+    expect(active.code).toBe(0);
+    expect(active.out).toContain("ops");
+  });
+});
+
+describe("scheduler (in-process)", () => {
+  test("prints task counts by state", async () => {
+    const r = await cli("scheduler", "stats", "--root", dir);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("tasks by state:");
+    expect(r.out).toContain("queued:");
+  });
+
+  test("submit then list shows the task", async () => {
+    const submit = await cli("scheduler", "submit", "cleanup", "--room", "devops", "--priority", "5", "--root", dir);
     expect(submit.code).toBe(0);
     expect(submit.out).toContain("queued task");
 
-    const list = run("scheduler", "list", "--root", dir);
+    const list = await cli("scheduler", "list", "--root", dir);
     expect(list.out).toContain("devops/cleanup");
   });
 });
 
-describe("isolation rooms", () => {
-  test("reports no rooms under the default (de-personalized) config", () => {
-    const r = run("isolation", "rooms", "--root", dir);
+describe("isolation rooms (in-process)", () => {
+  test("reports no rooms under the default (de-personalized) config", async () => {
+    const r = await cli("isolation", "rooms", "--root", dir);
     expect(r.code).toBe(0);
     expect(r.out).toContain("(no rooms configured)");
   });
 });
 
-describe("Phase 4 skill / MCP tooling (acceptance criteria)", () => {
-  test("skill-create test-skill --no-register scaffolds a valid skill dir", () => {
+describe("Phase 4 skill / MCP tooling (acceptance criteria, in-process)", () => {
+  test("skill-create test-skill --no-register scaffolds a valid skill dir", async () => {
     const cfg = writeConfig();
     const wip = join(dir, "wip");
-    const r = run("skill-create", "test-skill", "--no-register", "--dir", wip, "--config", cfg);
+    const r = await cli("skill-create", "test-skill", "--no-register", "--dir", wip, "--config", cfg);
     expect(r.code).toBe(0);
     const skillDir = join(wip, "test-skill");
     expect(existsSync(join(skillDir, "SKILL.md"))).toBe(true);
@@ -141,56 +224,55 @@ describe("Phase 4 skill / MCP tooling (acceptance criteria)", () => {
     expect(existsSync(join(skillDir, "README.md"))).toBe(true);
   });
 
-  test("mcp-check --room devops validates the server", () => {
+  test("mcp-check --room devops validates the server", async () => {
     const cfg = writeConfig();
-    const r = run("mcp-check", "--room", "devops", "--config", cfg);
+    const r = await cli("mcp-check", "--room", "devops", "--config", cfg);
     expect(r.code).toBe(0);
     expect(r.out).toContain("devops/filesystem");
   });
 
-  test("mcp-merge research devops -o file produces a valid merged config", () => {
+  test("mcp-merge research devops -o file produces a valid merged config", async () => {
     const cfg = writeConfig();
     const out = join(dir, "merged.json");
-    const r = run("mcp-merge", "research", "devops", "-o", out, "--config", cfg);
+    const r = await cli("mcp-merge", "research", "devops", "-o", out, "--config", cfg);
     expect(r.code).toBe(0);
     const merged = JSON.parse(readFileSync(out, "utf8"));
     expect(merged.mcpServers["devops-filesystem"]).toBeDefined();
     expect(merged.mcpServers["devops-filesystem"].command).toBe("echo");
   });
 
-  test("skill-install <source> --room --dry-run (single positional, name from basename)", () => {
+  test("skill-install <source> --room --dry-run (single positional, name from basename)", async () => {
     const cfg = writeConfig();
-    // scaffold a source skill first
     const wip = join(dir, "wip");
-    run("skill-create", "demo", "--no-register", "--dir", wip, "--config", cfg);
+    await cli("skill-create", "demo", "--no-register", "--dir", wip, "--config", cfg);
     const src = join(wip, "demo");
     // Literal acceptance form: one positional source path, name derived from basename.
-    const r = run("skill-install", src, "--room", "research", "--dry-run", "--config", cfg);
+    const r = await cli("skill-install", src, "--room", "research", "--dry-run", "--config", cfg);
     expect(r.code).toBe(0);
     expect(r.out).toContain("Would install: demo");
     expect(r.out).toContain(src);
     expect(r.out).toContain("room: research");
   });
 
-  test("skill-install <name> <source> (two positionals) also works", () => {
+  test("skill-install <name> <source> (two positionals) also works", async () => {
     const cfg = writeConfig();
     const wip = join(dir, "wip");
-    run("skill-create", "demo2", "--no-register", "--dir", wip, "--config", cfg);
-    const r = run("skill-install", "renamed", join(wip, "demo2"), "--room", "research", "--dry-run", "--config", cfg);
+    await cli("skill-create", "demo2", "--no-register", "--dir", wip, "--config", cfg);
+    const r = await cli("skill-install", "renamed", join(wip, "demo2"), "--room", "research", "--dry-run", "--config", cfg);
     expect(r.code).toBe(0);
     expect(r.out).toContain("Would install: renamed");
   });
 
-  test("skill-assign --auto completes with zero orphans remaining", () => {
+  test("skill-assign --auto completes with zero orphans remaining", async () => {
     const cfg = writeConfig();
-    const r = run("skill-assign", "--auto", "--config", cfg);
+    const r = await cli("skill-assign", "--auto", "--config", cfg);
     expect(r.code).toBe(0);
     expect(r.out).toContain("0 orphan(s) remaining");
   });
 
-  test("skills-list runs against an empty pool", () => {
+  test("skills-list runs against an empty pool", async () => {
     const cfg = writeConfig();
-    const r = run("skills-list", "--config", cfg);
+    const r = await cli("skills-list", "--config", cfg);
     expect(r.code).toBe(0);
     expect(r.out).toContain("no skills in pool");
   });

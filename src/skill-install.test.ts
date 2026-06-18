@@ -63,6 +63,31 @@ describe("install (directory source)", () => {
     expect(existsSync(join(e.rooms, "research", "skills_index.md"))).toBe(true);
   });
 
+  test("index write is synchronous and complete before install() returns (ordering guard)", () => {
+    // Determinism regression guard (Phase-4 gate). The whole chain — config write,
+    // reload, room-index regeneration — must finish SYNCHRONOUSLY before install()
+    // returns. If a future change makes the index write fire-and-forget (async,
+    // unawaited), these immediate, un-awaited assertions race the write and fail.
+    const src = srcSkill("ordered", "Does an ordered thing");
+    const e = envWithConfig({ research: { description: "Research", skills: [] } });
+
+    const res = install(e, "ordered", src, { room: "research" });
+
+    // install() must return a plain result, NOT a Promise — turning it async to
+    // defer the write would break this (and tsc) too.
+    expect(res).not.toBeInstanceOf(Promise);
+
+    // No await, no tick: the index must already exist AND already contain the
+    // freshly-routed skill's row (proving the reload-then-regenerate ran, not just
+    // that an empty file was touched).
+    const indexPath = join(e.rooms, "research", "skills_index.md");
+    expect(existsSync(indexPath)).toBe(true);
+    expect(readFileSync(indexPath, "utf8")).toContain("| ordered |");
+    // And the config write that the index depends on is already on disk.
+    const cfg = parseToml(readFileSync(configPath, "utf8")) as any;
+    expect(cfg.skills.rooms.research.skills).toContain("ordered");
+  });
+
   test("auto-routes by keyword score when no room is given", () => {
     const src = srcSkill("container-deploy", "Deploy containers to a cluster");
     const e = envWithConfig({

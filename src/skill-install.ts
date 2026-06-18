@@ -121,6 +121,12 @@ export function install(
   }
 
   // Route to room (only if it's a configured room — default may not be).
+  // ORDERING IS LOAD-BEARING: the config write, the reload, and the index
+  // regeneration are all synchronous and must complete before install() returns,
+  // so a caller that inspects the room index immediately after never races a
+  // pending write. Keep these calls synchronous — do not defer the index write to
+  // a microtask/background task. Pinned by skill-install.test.ts
+  // ("index write is synchronous and complete before install() returns").
   if (room in env.config.roomSkills) {
     addSkillToRoom(env, name, room);
     generateRoomIndexes(reloadEnv(env));
