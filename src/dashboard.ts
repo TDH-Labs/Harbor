@@ -31,6 +31,8 @@ import { SYNC_STAMP } from "./sync.ts";
 import { watcherStatus } from "./watch.ts";
 import { onHypervisorEvent } from "./audit.ts";
 import { listActiveSpawns, type SpawnInfo } from "./spawn.ts";
+import { computeAssignments } from "./skills.ts";
+import { checkCommand, checkEnvVars, extractEnvVars, validateServerShape } from "./mcp.ts";
 
 /** Default dashboard port (Python parity). */
 export const DEFAULT_PORT = 8765;
@@ -71,6 +73,39 @@ export interface SkillsResponse {
   unassigned: number;
   byRoom: Record<string, number>;
 }
+
+/** Skill health panel: counts by room, orphan count, per-room index freshness. */
+export interface SkillRoomHealth {
+  skillCount: number;
+  hasIndex: boolean;
+  indexAgeMinutes: number | null;
+}
+export interface SkillHealthResponse {
+  total: number;
+  assigned: number;
+  /** Skills in the pool assigned to no room (before the default-room fallback). */
+  orphans: number;
+  orphanNames: string[];
+  byRoom: Record<string, SkillRoomHealth>;
+}
+
+/** MCP server status panel: per-room servers with lightweight health checks. */
+export interface McpServerStatus {
+  name: string;
+  command: string;
+  /** Command resolves on PATH / as an executable path. */
+  commandOk: boolean;
+  /** All referenced env vars are set. */
+  envOk: boolean;
+  /** Structural validity (declares name + command). */
+  valid: boolean;
+}
+export interface McpRoomStatus {
+  servers: McpServerStatus[];
+  /** True when every server in the room is valid + command-resolvable + env-ok. */
+  healthy: boolean;
+}
+export type McpStatusResponse = Record<string, McpRoomStatus>;
 
 export interface SchedulerTaskRow {
   id: string;
@@ -344,6 +379,55 @@ export function buildHypervisor(): HypervisorResponse {
   return { activeSpawns, count: activeSpawns.length };
 }
 
+/**
+ * Skill health panel data: per-room skill counts + index freshness, plus the
+ * orphan set (pool skills assigned to no room). Uses the same assignment logic
+ * as `skills.computeAssignments` so the orphan count matches `harbor skill-assign`.
+ */
+export function buildSkillHealth(env: Environment): SkillHealthResponse {
+  const { assignments, unassigned } = computeAssignments(env);
+  const byRoom: Record<string, SkillRoomHealth> = {};
+  for (const room of Object.keys(env.config.roomSkills)) {
+    const indexPath = join(env.rooms, room, "skills_index.md");
+    const count = Object.values(assignments).filter((r) => r === room).length;
+    byRoom[room] = {
+      skillCount: count,
+      hasIndex: existsSync(indexPath),
+      indexAgeMinutes: ageMinutes(indexPath),
+    };
+  }
+  const total = countSkills(env.skillsDir);
+  return {
+    total,
+    assigned: total - unassigned.length,
+    orphans: unassigned.length,
+    orphanNames: unassigned,
+    byRoom,
+  };
+}
+
+/**
+ * MCP server status panel data: per-room servers with lightweight (no-spawn)
+ * health — command resolution, env-var presence, and structural validity.
+ * Connectivity probing is intentionally omitted here (it would spawn processes
+ * on every dashboard poll); `harbor mcp-check --connectivity` does the deep test.
+ */
+export function buildMcpStatus(env: Environment): McpStatusResponse {
+  const out: McpStatusResponse = {};
+  for (const [room, data] of Object.entries(env.config.roomSkills)) {
+    const servers = data.mcp?.servers ?? [];
+    if (servers.length === 0) continue;
+    const rows: McpServerStatus[] = servers.map((s) => {
+      const commandOk = checkCommand(s.command ?? "").ok;
+      const envOk = checkEnvVars(extractEnvVars(s)).every((c) => c.ok);
+      const valid = validateServerShape(s).length === 0;
+      return { name: s.name ?? "unnamed", command: s.command ?? "", commandOk, envOk, valid };
+    });
+    out[room] = { servers: rows, healthy: rows.every((r) => r.valid && r.commandOk && r.envOk) };
+  }
+  return out;
+}
+
 // ── HTTP app ──────────────────────────────────────────────────────────────────
 
 const wsHelper = createBunWebSocket();
@@ -363,6 +447,8 @@ export function createDashboardApp(env: Environment): Hono {
   app.get("/api/health", (c) => c.json(buildHealth(env)));
   app.get("/api/rooms", (c) => c.json(buildRooms(env)));
   app.get("/api/skills", (c) => c.json(buildSkills(env)));
+  app.get("/api/skill-health", (c) => c.json(buildSkillHealth(env)));
+  app.get("/api/mcp", (c) => c.json(buildMcpStatus(env)));
   app.get("/api/scheduler", (c) => c.json(buildScheduler(env)));
   app.get("/api/budgets", (c) => c.json(buildBudgets(env)));
   app.get("/api/audit", (c) => c.json(buildAudit(env)));
@@ -459,6 +545,8 @@ const DASHBOARD_HTML = `<!doctype html>
 <div class="grid">
   <div class="panel"><h2>Watcher &amp; Beacons</h2><div id="health"></div></div>
   <div class="panel"><h2>Skill Pool</h2><div id="skills"></div></div>
+  <div class="panel"><h2>Skill Health</h2><div id="skillhealth"></div></div>
+  <div class="panel"><h2>MCP Servers</h2><div id="mcp"></div></div>
   <div class="panel"><h2>Rooms</h2><div id="rooms"></div></div>
   <div class="panel"><h2>Scheduler Queue</h2><div id="scheduler"></div></div>
   <div class="panel"><h2>Token Budgets</h2><div id="budgets"></div></div>
@@ -478,6 +566,15 @@ async function fetchAll(){
       Object.entries(h.beacons).map(([k,v]) => k + ': ' + (v.fresh ? 'fresh' : 'stale')).join('<br>');
     const sk = await get('/api/skills');
     $('skills').innerHTML = 'total <b>'+sk.total+'</b> · assigned '+sk.assigned+' · unassigned '+sk.unassigned;
+    const sh = await get('/api/skill-health');
+    $('skillhealth').innerHTML = 'orphans: <b>'+sh.orphans+'</b> / '+sh.total+'<br>' +
+      '<table>' + Object.entries(sh.byRoom).map(([k,v]) =>
+        '<tr><td>'+k+'</td><td>'+v.skillCount+'</td><td>'+(v.hasIndex?(v.indexAgeMinutes!=null?Math.round(v.indexAgeMinutes)+'m':'idx'):'<span class="muted">no idx</span>')+'</td></tr>').join('') + '</table>';
+    const mcp = await get('/api/mcp');
+    $('mcp').innerHTML = Object.keys(mcp).length
+      ? '<table>' + Object.entries(mcp).flatMap(([room,rs]) => rs.servers.map(s =>
+          '<tr><td>'+room+'/'+s.name+'</td><td>'+(s.commandOk?'cmd':'<span class="r">cmd</span>')+'</td><td>'+(s.envOk?'env':'<span class="r">env</span>')+'</td></tr>')).join('') + '</table>'
+      : '<span class="muted">no MCP servers configured</span>';
     const rooms = await get('/api/rooms');
     $('rooms').innerHTML = '<table>' + Object.entries(rooms).map(([k,v]) =>
       '<tr><td>'+k+'</td><td>'+v.skillCount+' skills</td><td>'+(v.hasIndex?'idx':'')+'</td></tr>').join('') + '</table>';

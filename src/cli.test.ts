@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -22,10 +22,44 @@ function run(...args: string[]): { code: number; out: string; err: string } {
   };
 }
 
+/** Write a config.toml under the temp dir and return its path. */
+function writeConfig(): string {
+  const cfg = join(dir, "config.toml");
+  writeFileSync(
+    cfg,
+    [
+      "[paths]",
+      `home = "${dir}"`,
+      'skills_dir = "~/.agents/skills"',
+      'state_dir = "~/.agent-env"',
+      "",
+      "[skills]",
+      'default_room = "research"',
+      "",
+      "[skills.rooms.research]",
+      'description = "Research and analysis"',
+      "skills = []",
+      "",
+      "[skills.rooms.devops]",
+      'description = "Infra and CI"',
+      "skills = []",
+      "",
+      "[[skills.rooms.devops.mcp.servers]]",
+      'name = "filesystem"',
+      'command = "echo"',
+      'args = ["-y", "server-filesystem"]',
+      "",
+    ].join("\n"),
+  );
+  return cfg;
+}
+
 describe("--help parses for every subcommand", () => {
   const commands = [
     "sync", "watch", "start", "stop", "dashboard", "bench",
     "scheduler", "compaction", "isolation", "session", "check", "init",
+    "skills-list", "mcp-check", "mcp-gen", "mcp-merge",
+    "skill-create", "skill-install", "skill-assign",
   ];
   test("root --help exits 0 and lists subcommands", () => {
     const r = run("--help");
@@ -91,5 +125,73 @@ describe("isolation rooms", () => {
     const r = run("isolation", "rooms", "--root", dir);
     expect(r.code).toBe(0);
     expect(r.out).toContain("(no rooms configured)");
+  });
+});
+
+describe("Phase 4 skill / MCP tooling (acceptance criteria)", () => {
+  test("skill-create test-skill --no-register scaffolds a valid skill dir", () => {
+    const cfg = writeConfig();
+    const wip = join(dir, "wip");
+    const r = run("skill-create", "test-skill", "--no-register", "--dir", wip, "--config", cfg);
+    expect(r.code).toBe(0);
+    const skillDir = join(wip, "test-skill");
+    expect(existsSync(join(skillDir, "SKILL.md"))).toBe(true);
+    expect(existsSync(join(skillDir, "tests", "test_scenario.md"))).toBe(true);
+    expect(existsSync(join(skillDir, "examples", "basic_usage.md"))).toBe(true);
+    expect(existsSync(join(skillDir, "README.md"))).toBe(true);
+  });
+
+  test("mcp-check --room devops validates the server", () => {
+    const cfg = writeConfig();
+    const r = run("mcp-check", "--room", "devops", "--config", cfg);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("devops/filesystem");
+  });
+
+  test("mcp-merge research devops -o file produces a valid merged config", () => {
+    const cfg = writeConfig();
+    const out = join(dir, "merged.json");
+    const r = run("mcp-merge", "research", "devops", "-o", out, "--config", cfg);
+    expect(r.code).toBe(0);
+    const merged = JSON.parse(readFileSync(out, "utf8"));
+    expect(merged.mcpServers["devops-filesystem"]).toBeDefined();
+    expect(merged.mcpServers["devops-filesystem"].command).toBe("echo");
+  });
+
+  test("skill-install <source> --room --dry-run (single positional, name from basename)", () => {
+    const cfg = writeConfig();
+    // scaffold a source skill first
+    const wip = join(dir, "wip");
+    run("skill-create", "demo", "--no-register", "--dir", wip, "--config", cfg);
+    const src = join(wip, "demo");
+    // Literal acceptance form: one positional source path, name derived from basename.
+    const r = run("skill-install", src, "--room", "research", "--dry-run", "--config", cfg);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("Would install: demo");
+    expect(r.out).toContain(src);
+    expect(r.out).toContain("room: research");
+  });
+
+  test("skill-install <name> <source> (two positionals) also works", () => {
+    const cfg = writeConfig();
+    const wip = join(dir, "wip");
+    run("skill-create", "demo2", "--no-register", "--dir", wip, "--config", cfg);
+    const r = run("skill-install", "renamed", join(wip, "demo2"), "--room", "research", "--dry-run", "--config", cfg);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("Would install: renamed");
+  });
+
+  test("skill-assign --auto completes with zero orphans remaining", () => {
+    const cfg = writeConfig();
+    const r = run("skill-assign", "--auto", "--config", cfg);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("0 orphan(s) remaining");
+  });
+
+  test("skills-list runs against an empty pool", () => {
+    const cfg = writeConfig();
+    const r = run("skills-list", "--config", cfg);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("no skills in pool");
   });
 });

@@ -15,6 +15,7 @@
  */
 import { type ArgsDef, type CommandDef, defineCommand, runMain } from "citty";
 import { existsSync, readFileSync } from "node:fs";
+import { basename } from "node:path";
 
 import { Config } from "./config.ts";
 import { CompactionEngine } from "./compaction.ts";
@@ -34,6 +35,18 @@ import { spawn } from "./spawn.ts";
 import { checkBudget, spendBudget, BudgetExceededError } from "./budget.ts";
 import { gate, runWithGateContext, AccessDeniedError } from "./gate.ts";
 import { audit } from "./audit.ts";
+import { listSkills, generateRoomIndexes } from "./skills.ts";
+import {
+  generateRoomConfig,
+  generateRoomConfigs,
+  mergeConfigs,
+  roomsWithMcp,
+  validateAllRooms,
+  validateRoom,
+} from "./mcp.ts";
+import { scaffold } from "./skill-create.ts";
+import { install } from "./skill-install.ts";
+import { assignOrphans, assignOrphansAndReload, getOrphanSkills } from "./skill-assign.ts";
 
 // ── Environment resolution ────────────────────────────────────────────────────
 
@@ -665,6 +678,211 @@ const auditCmd = defineCommand({
   },
 });
 
+// ── Skill / MCP tooling ─────────────────────────────────────────────────────--
+
+const skillsListCmd = defineCommand({
+  meta: { name: "skills-list", description: "List pool skills with room assignments" },
+  args: { ...commonArgs, room: { type: "string", description: "Filter to one room" } },
+  run({ args }) {
+    const env = envFromArgs(args);
+    const skills = listSkills(env, args.room);
+    if (skills.length === 0) {
+      console.log(args.room ? `(no skills in room ${args.room})` : "(no skills in pool)");
+      return;
+    }
+    for (const s of skills) {
+      console.log(`${s.name.padEnd(28)} ${s.room.padEnd(16)} ${s.description}`);
+    }
+    console.log(`\n${skills.length} skill(s)`);
+  },
+});
+
+const mcpCheckCmd = defineCommand({
+  meta: { name: "mcp-check", description: "Validate MCP servers (command exists, env vars set)" },
+  args: {
+    ...commonArgs,
+    room: { type: "string", description: "Check a single room" },
+    connectivity: { type: "boolean", description: "Also run a brief process-start test" },
+  },
+  async run({ args }) {
+    const env = envFromArgs(args);
+    const opts = { connectivity: Boolean(args.connectivity) };
+    const rooms = args.room ? [await validateRoom(env, args.room, opts)] : await validateAllRooms(env, opts);
+    let allOk = true;
+    for (const r of rooms) {
+      if (r.status === "no_servers") {
+        console.log(`  ${r.room}: no MCP servers configured`);
+        continue;
+      }
+      for (const s of r.servers) {
+        console.log(`  ${s.ok ? "✓" : "✗"} ${r.room}/${s.server} (${s.command} ${s.args.join(" ")})`);
+        for (const c of s.checks) {
+          if (!c.ok || !s.ok) console.log(`      ${c.ok ? "✓" : "✗"} ${c.check}: ${c.detail}`);
+        }
+        if (!s.ok) allOk = false;
+      }
+    }
+    if (!allOk) process.exitCode = 1;
+    else console.log("\n✅ All MCP servers OK");
+  },
+});
+
+const mcpGenCmd = defineCommand({
+  meta: { name: "mcp-gen", description: "Generate per-room .room-mcp.json configs" },
+  args: { ...commonArgs, room: { type: "string", description: "Generate for one room" } },
+  run({ args }) {
+    const env = envFromArgs(args);
+    if (args.room) {
+      const p = generateRoomConfig(env, args.room);
+      console.log(p ? `  ${args.room}: MCP servers → ${p}` : `  ${args.room}: no MCP servers configured`);
+      return;
+    }
+    const results = generateRoomConfigs(env);
+    for (const [room, p] of Object.entries(results)) {
+      console.log(p ? `  ${room}: MCP servers → ${p}` : `  ${room}: no MCP servers configured`);
+    }
+  },
+});
+
+const mcpMergeCmd = defineCommand({
+  meta: { name: "mcp-merge", description: "Merge several rooms' MCP servers into one config" },
+  args: {
+    ...commonArgs,
+    output: { type: "string", alias: "o", description: "Write merged JSON to this path" },
+    "no-prefix": { type: "boolean", description: "Keep bare server names (prefix only on collision)" },
+    list: { type: "boolean", description: "List rooms that declare MCP servers" },
+  },
+  run({ args }) {
+    const env = envFromArgs(args);
+    if (args.list) {
+      console.log("Rooms with MCP servers:");
+      for (const r of roomsWithMcp(env)) console.log(`  ${r}`);
+      return;
+    }
+    // citty collects bare positionals (the room names) on args._.
+    const positionals = ((args as Record<string, unknown>)._ as string[] | undefined) ?? [];
+    const selected = positionals.length > 0 ? positionals : roomsWithMcp(env);
+    if (selected.length === 0) {
+      console.log("No rooms with MCP servers found");
+      process.exitCode = 1;
+      return;
+    }
+    const merged = mergeConfigs(env, selected, {
+      prefix: !args["no-prefix"],
+      ...(args.output ? { output: args.output } : {}),
+    });
+    if (args.output) {
+      console.log(`Merged MCP config for ${selected.length} room(s) → ${args.output}`);
+    } else {
+      console.log(JSON.stringify(merged, null, 2));
+    }
+  },
+});
+
+const skillCreateCmd = defineCommand({
+  meta: { name: "skill-create", description: "Scaffold a new skill with a TDD harness" },
+  args: {
+    ...commonArgs,
+    name: { type: "positional", required: true, description: "Skill slug" },
+    room: { type: "string", description: "Target room (required to register)" },
+    description: { type: "string", description: "One-line description" },
+    "no-register": { type: "boolean", description: "Scaffold only; do not register" },
+    dir: { type: "string", description: "Working directory (default ./skills-in-progress)" },
+  },
+  run({ args }) {
+    const env = envFromArgs(args);
+    const res = scaffold(env, args.name, {
+      ...(args.room ? { room: args.room } : {}),
+      ...(args.description ? { description: args.description } : {}),
+      register: !args["no-register"] && Boolean(args.room),
+      ...(args.dir ? { workDir: args.dir } : {}),
+    });
+    for (const f of res.files) console.log(`  created ${f}`);
+    console.log(`\nScaffolded at ${res.skillDir}`);
+    console.log(res.registered ? `Registered to room: ${res.room}` : "Not registered (--no-register or no --room).");
+  },
+});
+
+const skillInstallCmd = defineCommand({
+  meta: { name: "skill-install", description: "Install a skill into the pool and route it to a room" },
+  args: {
+    ...commonArgs,
+    // Positionals are read from args._ (citty mis-parses multiple declared
+    // positionals). Forms: `<source>` (name = basename) or `<name> <source>`.
+    name: { type: "string", description: "Skill slug (else derived from the source path)" },
+    source: { type: "string", description: "Source directory or SKILL.md file" },
+    room: { type: "string", description: "Target room (else auto-routed by score)" },
+    "dry-run": { type: "boolean", description: "Report source/destination/room only" },
+  },
+  run({ args }) {
+    const env = envFromArgs(args);
+    const positionals = ((args as Record<string, unknown>)._ as string[] | undefined) ?? [];
+    let name = args.name;
+    let source = args.source;
+    if (!source) {
+      // <name> <source> when two positionals; <source> alone otherwise.
+      if (positionals.length >= 2) {
+        name = name ?? positionals[0];
+        source = positionals[1];
+      } else if (positionals.length === 1) {
+        source = positionals[0];
+      }
+    }
+    if (!source) {
+      console.error("skill-install: a source path is required");
+      process.exitCode = 1;
+      return;
+    }
+    name = name ?? basename(source.replace(/\/+$/, "")).replace(/\.md$/, "");
+    const res = install(env, name, source, {
+      ...(args.room ? { room: args.room } : {}),
+      dryRun: Boolean(args["dry-run"]),
+    });
+    if (res.dryRun) {
+      console.log(`Would install: ${res.name}`);
+      console.log(`  from: ${res.source}`);
+      console.log(`  to:   ${res.installedPath}`);
+      console.log(`  room: ${res.room}`);
+    } else {
+      console.log(`✓ Installed ${res.name} → ${res.installedPath}`);
+      console.log(`✓ Routed to room: ${res.room}`);
+    }
+  },
+});
+
+const skillAssignCmd = defineCommand({
+  meta: { name: "skill-assign", description: "Route orphan skills to rooms (report / auto / one room)" },
+  args: {
+    ...commonArgs,
+    auto: { type: "boolean", description: "Auto-assign each orphan to its best room" },
+    room: { type: "string", description: "Assign all orphans to this room" },
+  },
+  run({ args }) {
+    const env = envFromArgs(args);
+    if (args.auto || args.room) {
+      const mode = args.room ? "room" : "auto";
+      const { result, env: fresh } = assignOrphansAndReload(env, mode, args.room ? { room: args.room } : {});
+      const n = Object.keys(result.assigned).length;
+      for (const [skill, room] of Object.entries(result.assigned)) console.log(`  ${skill} → ${room}`);
+      generateRoomIndexes(fresh);
+      const remaining = getOrphanSkills(fresh).length;
+      console.log(`\nAssigned ${n} skill(s). ${remaining} orphan(s) remaining.`);
+      return;
+    }
+    // report (default)
+    const res = assignOrphans(env, "report");
+    if (res.orphans.length === 0) {
+      console.log("✅ All skills are assigned to rooms.");
+      return;
+    }
+    console.log(`⚠️  ${res.orphans.length} unassigned skill(s):\n`);
+    for (const o of res.orphans) {
+      const sugg = o.scores.slice(0, 3).map((s) => `${s.room}(${s.score})`).join(", ") || "(no clear match)";
+      console.log(`  ${o.name}\n    ${o.description.slice(0, 80)}\n    → ${sugg}\n`);
+    }
+  },
+});
+
 // ── Root command ──────────────────────────────────────────────────────────────
 
 export const main: CommandDef = defineCommand({
@@ -686,6 +904,13 @@ export const main: CommandDef = defineCommand({
     audit: auditCmd,
     check: checkCmd,
     init: initCmd,
+    "skills-list": skillsListCmd,
+    "mcp-check": mcpCheckCmd,
+    "mcp-gen": mcpGenCmd,
+    "mcp-merge": mcpMergeCmd,
+    "skill-create": skillCreateCmd,
+    "skill-install": skillInstallCmd,
+    "skill-assign": skillAssignCmd,
   },
 });
 

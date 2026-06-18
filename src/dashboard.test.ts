@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -9,8 +9,10 @@ import {
   buildAudit,
   buildBudgets,
   buildHealth,
+  buildMcpStatus,
   buildScheduler,
   buildSessions,
+  buildSkillHealth,
   startDashboard,
 } from "./dashboard.ts";
 import { Environment } from "./env.ts";
@@ -113,6 +115,54 @@ describe("data builders", () => {
     t.end("completed", "done");
 
     expect(buildBudgets(e).budgets["legal"]?.classified).toBe("red");
+  });
+});
+
+describe("Phase 4 panels", () => {
+  function writeSkill(name: string, pool = join(dir, ".agents", "skills")): void {
+    const d = join(pool, name);
+    mkdirSync(d, { recursive: true });
+    writeFileSync(join(d, "SKILL.md"), `---\nname: ${name}\ndescription: ${name} skill\n---\n`);
+  }
+
+  test("buildSkillHealth reports per-room counts + orphan set", () => {
+    writeSkill("assigned-one");
+    writeSkill("orphan-one");
+    const e = env({ ops: { description: "Ops", skills: ["assigned-one"] } });
+    const h = buildSkillHealth(e);
+    expect(h.total).toBe(2);
+    expect(h.orphans).toBe(1);
+    expect(h.orphanNames).toEqual(["orphan-one"]);
+    expect(h.byRoom.ops?.skillCount).toBe(1);
+    expect(h.byRoom.ops?.hasIndex).toBe(false); // no index generated yet
+  });
+
+  test("buildMcpStatus reports per-room server health (no spawn)", () => {
+    const e = env({
+      devops: {
+        description: "Dev",
+        skills: [],
+        mcp: { servers: [{ name: "filesystem", command: "echo", args: ["x"] }] },
+      },
+      empty: { description: "Empty", skills: [] },
+    });
+    const status = buildMcpStatus(e);
+    expect(Object.keys(status)).toEqual(["devops"]); // empty room omitted
+    expect(status.devops?.servers[0]?.commandOk).toBe(true);
+    expect(status.devops?.healthy).toBe(true);
+  });
+
+  test("buildMcpStatus flags an unresolvable command", () => {
+    const e = env({
+      devops: {
+        description: "Dev",
+        skills: [],
+        mcp: { servers: [{ name: "broken", command: "definitely-not-a-real-binary-xyz" }] },
+      },
+    });
+    const status = buildMcpStatus(e);
+    expect(status.devops?.servers[0]?.commandOk).toBe(false);
+    expect(status.devops?.healthy).toBe(false);
   });
 });
 

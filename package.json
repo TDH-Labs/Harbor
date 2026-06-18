@@ -24,6 +24,12 @@
     "./gate": "./src/gate.ts",
     "./audit": "./src/audit.ts",
     "./evict": "./src/evict.ts",
+    "./skills": "./src/skills.ts",
+    "./mcp": "./src/mcp.ts",
+    "./skill-create": "./src/skill-create.ts",
+    "./skill-install": "./src/skill-install.ts",
+    "./skill-assign": "./src/skill-assign.ts",
+    "./config-edit": "./src/config-edit.ts",
     "./cli": "./src/cli.ts"
   },
   "scripts": {

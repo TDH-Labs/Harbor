@@ -105,9 +105,11 @@ export {
   buildBudgets,
   buildHealth,
   buildHypervisor,
+  buildMcpStatus,
   buildRooms,
   buildScheduler,
   buildSessions,
+  buildSkillHealth,
   buildSkills,
   createDashboardApp,
   startDashboard,
@@ -120,9 +122,14 @@ export type {
   HealthResponse,
   HypervisorResponse,
   LiveMessage,
+  McpRoomStatus,
+  McpServerStatus,
+  McpStatusResponse,
   RoomsResponse,
   SchedulerResponse,
   SessionsResponse,
+  SkillHealthResponse,
+  SkillRoomHealth,
   SkillsResponse,
 } from "./dashboard.ts";
 
@@ -163,6 +170,65 @@ export type { HypervisorEvent, HypervisorEventKind, HypervisorEventListener } fr
 
 export { evict, lru as evictLru, retrieve as evictRetrieve, stats as evictStats } from "./evict.ts";
 export type { EvictStats, EvictOptions, EvictLruOptions } from "./evict.ts";
+
+// ── Skill / MCP tooling (Phase 4 — consumed by Phase 5's MCP server) ──────────-
+export {
+  assignCategorizedSkills,
+  assignRooms,
+  computeAssignments,
+  findSkillDir,
+  generateMasterIndex,
+  generateRoomIndexes,
+  getAllSkillNames,
+  getSkill,
+  getSkillDescription,
+  listSkills,
+  renderRoomIndex,
+} from "./skills.ts";
+export type { SkillRecord, SkillDetail, RoomIndexResult } from "./skills.ts";
+
+export {
+  checkCommand,
+  checkEnvVars,
+  extractEnvVars,
+  generateRoomConfig,
+  generateRoomConfigs,
+  mergeConfigs,
+  roomMcpConfig,
+  roomsWithMcp,
+  testConnect,
+  validateAllRooms,
+  validateRoom,
+  validateServer,
+  validateServerShape,
+} from "./mcp.ts";
+export type {
+  CheckResult,
+  McpConfig,
+  McpServerEntry,
+  MergeOptions,
+  RoomValidation,
+  ServerValidation,
+  ValidateOptions,
+} from "./mcp.ts";
+
+export { scaffold, inferCategory, inferPrompt, nameToTags, SkillCreateError } from "./skill-create.ts";
+export type { ScaffoldOptions, ScaffoldResult } from "./skill-create.ts";
+
+export { install, SkillInstallError } from "./skill-install.ts";
+export type { InstallOptions, InstallResult } from "./skill-install.ts";
+
+export {
+  assignOrphans,
+  assignOrphansAndReload,
+  deriveRoomSignals,
+  getOrphanSkills,
+  scoreSkillForRooms,
+} from "./skill-assign.ts";
+export type { AssignMode, AssignOptions, AssignResult, OrphanSuggestion } from "./skill-assign.ts";
+
+export { addSkillToRoom, reloadEnv, ConfigEditError } from "./config-edit.ts";
+export type { EditResult } from "./config-edit.ts";
 
 // ── CLI command tree (extensible by later phases) ────────────────────────────-
 export { main as cli, commonArgs, envFromArgs } from "./cli.ts";
