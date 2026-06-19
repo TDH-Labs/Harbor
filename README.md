@@ -141,31 +141,31 @@ import { gate, checkBudget, audit } from "harbor-tugboat";
 
 ---
 
-## Enforcement model — read this
+## Security model
 
-Harbor's isolation is a **cooperative, tool-level boundary, not an OS sandbox.** Be precise
-about what it does and does not guarantee:
+Harbor is a control plane, not a sandbox. It governs how cooperating agents load skills,
+spend budget, and enter rooms — and records every decision. It is not a cage for a hostile
+process.
 
-- **The gate is at the tool layer.** Routing an agent's skill access through Harbor's MCP
-  server means skill loads pass through the room/budget/audit gate. An agent with **raw
-  filesystem access can still read a `SKILL.md` directly** and bypass the gate. Harbor does
-  not sandbox the process, intercept syscalls, or restrict the filesystem at the OS level.
-  Treat it as a control plane you cooperate with, not a jail.
+**What Harbor enforces**
 
-- **The room is host-assigned and trusted.** A session's room comes from the
-  `AGENT_ENV_ROOM` environment variable set by whatever launches the agent. This is a
-  **cooperative trust boundary**: it assumes the launcher sets it honestly. It is not
-  OS-enforced isolation — a process that can change its own environment can change its room.
+- **Gated skill access** — every skill load runs a room + budget + audit check.
+- **In-process budgets** — token limits debit on the hot path; no quiet overspend.
+- **Full audit trail** — every allow and deny is logged with room, session, and reason.
 
-- **No skill list configured ⇒ no skill restriction (by design).** When a room has no
-  `skills` list configured, `roomSkillAllowed()` returns `true` for every skill — the room
-  imposes no skill allowlist. Skill gating is **opt-in per room**: list skills on a room to
-  restrict it; leave the list empty/absent to allow all. This is intentional, so an
-  unconfigured environment is usable out of the box rather than locked shut.
+**Where the boundary ends**
 
-In short: Harbor makes the *honest path* the *easy path*, audits what crosses its gates, and
-keeps budgets enforced in-process — but it is not, and does not claim to be, unbypassable
-OS-level isolation. True OS-enforced sandboxing is a separate, later concern.
+- **Not an OS sandbox.** Harbor doesn't intercept syscalls or lock the filesystem. An agent
+  with raw file access can read a skill file directly and skip the gate.
+- **Rooms are cooperative.** A session's room comes from `AGENT_ENV_ROOM`, set by whatever
+  launches the agent. Harbor trusts it — a process that can rewrite its own environment can
+  change its room.
+- **Open by default.** A room with no `skills` list allows every skill (`roomSkillAllowed()`
+  returns `true`). Gating is opt-in: list skills to restrict a room, leave it empty to allow
+  all — so a fresh install is usable, not locked shut.
+
+Harbor makes the cooperative path the easy, observable, budgeted one. It doesn't claim to be
+unbypassable OS-level isolation — that's a separate layer, on the roadmap, not in `0.1`.
 
 ---
 
