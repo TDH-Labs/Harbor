@@ -1,0 +1,24 @@
+node_modules/
+dist/
+*.tgz
+*.db
+*.db-wal
+*.db-shm
+.DS_Store
+
+# Internal build/phase notes — never part of the public release.
+PHASE*_NOTES.md
+
+# Operator-private de-personalization blocklist (personal room/workflow/vendor
+# names). Loaded by src/depersonalization.test.ts when present; never committed.
+.depers-blocklist.local.json
+
+# Artifacts the live machine's beacon watcher / workflow hooks generate inside
+# the build dir (not Harbor deliverables): AGENTS.md is a symlink to the home
+# beacon; the others are workflow scaffolding stubs. Excluded so they never enter
+# the shippable tree. (See PHASE1_NOTES — the build dir should ideally be removed
+# from the watcher's paths per BUILD_BRIEF §7.)
+/AGENTS.md
+/research.md
+/plan.md
+/scratchpad.md

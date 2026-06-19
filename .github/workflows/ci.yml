@@ -1,0 +1,69 @@
+name: CI
+
+# Phase 6 ship gate, in CI:
+#   1. test     — `bun test` (full suite) + `tsc --noEmit` on every push / PR.
+#   2. depers   — fails the build if author machine DNA appears in shipping code.
+#
+# The de-personalization gate uses GENERIC patterns only (no client or project
+# names), so the CI config itself stays free of confidential information.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  test:
+    name: Test + typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - name: Typecheck
+        run: bunx tsc --noEmit
+      - name: Test
+        run: bun test
+
+  depersonalization-gate:
+    name: De-personalization gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Self-test — gate must detect a planted path
+        run: |
+          # Verify the gate pattern actually fires before trusting a PASS.
+          printf 'const p = "/Users/x/sentinel.ts";\n' > /tmp/_gate_selftest.ts
+          FOUND=$(grep -rilE '/Users/[^/[:space:]]+/|/home/[^/[:space:]]+/' \
+            /tmp/_gate_selftest.ts 2>/dev/null || true)
+          rm -f /tmp/_gate_selftest.ts
+          if [ -z "$FOUND" ]; then
+            echo "Gate self-test FAILED — planted path was not detected."
+            exit 1
+          fi
+          echo "Gate self-test PASSED — planted paths detected correctly."
+
+      - name: Scan shipping source for absolute user-home paths
+        run: |
+          # Match /Users/<word>/ or /home/<word>/ in shipping source + docs.
+          # Test files are excluded: they carry NEGATIVE assertions
+          # (expect(x).not.toContain("/Users/")) that would self-trip the grep,
+          # and tests never ship (the files allowlist in package.json excludes
+          # them — see src/packaging.test.ts for the tarball proof).
+          FOUND=$(grep -rilE '/Users/[^/[:space:]]+/|/home/[^/[:space:]]+/' \
+            --include="*.ts" \
+            --include="*.md" \
+            --include="*.json" \
+            --include="*.toml" \
+            src integrations README.md \
+            2>/dev/null | grep -vE '\.test\.ts$' || true)
+          if [ -n "$FOUND" ]; then
+            echo "De-personalization gate FAILED — user-home paths found in:"
+            echo "$FOUND"
+            exit 1
+          fi
+          echo "De-personalization gate PASSED — no user-home paths in shipping source."

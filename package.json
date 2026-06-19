@@ -1,0 +1,74 @@
+{
+  "name": "harbor-tugboat",
+  "version": "1.0.0",
+  "description": "Agent control plane — scheduler, compaction, isolation, session tracking.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "agent",
+    "ai",
+    "mcp",
+    "scheduler",
+    "isolation",
+    "control-plane"
+  ],
+  "engines": {
+    "bun": ">=1.1.0"
+  },
+  "bin": {
+    "harbor": "./src/cli.ts"
+  },
+  "files": [
+    "src/**/*.ts",
+    "!src/**/*.test.ts",
+    "!src/test-setup.ts",
+    "!src/concurrency.worker.ts",
+    "integrations/**/*.ts",
+    "!integrations/**/*.test.ts",
+    "tsconfig.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "exports": {
+    ".": "./src/index.ts",
+    "./scheduler": "./src/scheduler.ts",
+    "./compaction": "./src/compaction.ts",
+    "./isolation": "./src/isolation.ts",
+    "./session": "./src/session.ts",
+    "./config": "./src/config.ts",
+    "./env": "./src/env.ts",
+    "./sync": "./src/sync.ts",
+    "./watch": "./src/watch.ts",
+    "./dashboard": "./src/dashboard.ts",
+    "./bench": "./src/bench.ts",
+    "./spawn": "./src/spawn.ts",
+    "./budget": "./src/budget.ts",
+    "./gate": "./src/gate.ts",
+    "./audit": "./src/audit.ts",
+    "./evict": "./src/evict.ts",
+    "./skills": "./src/skills.ts",
+    "./mcp": "./src/mcp.ts",
+    "./skill-create": "./src/skill-create.ts",
+    "./skill-install": "./src/skill-install.ts",
+    "./skill-assign": "./src/skill-assign.ts",
+    "./config-edit": "./src/config-edit.ts",
+    "./install": "./src/install.ts",
+    "./cli": "./src/cli.ts",
+    "./integrations/pi": "./integrations/pi.ts",
+    "./integrations/mcp-server": "./integrations/mcp-server.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "chokidar": "^5.0.0",
+    "citty": "^0.2.2",
+    "hono": "^4.12.26",
+    "smol-toml": "^1.3.1"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.1.14",
+    "typescript": "^5.7.2"
+  }
+}
