@@ -282,11 +282,24 @@ describe("Phase 4 skill / MCP tooling (acceptance criteria, in-process)", () => 
 
 describe("install command (emit-don't-mutate)", () => {
   test("install --for cursor emits a JSON snippet and writes nothing", async () => {
-    const r = await cli("install", "--for", "cursor");
+    // Root the default-config home at the temp dir so the assertion is soak-safe
+    // AND deterministic — emit resolves its default path from $HOME.
+    const savedHome = process.env.HOME;
+    process.env.HOME = dir;
+    let r: { code: number; out: string };
+    try {
+      r = await cli("install", "--for", "cursor");
+    } finally {
+      if (savedHome === undefined) delete process.env.HOME;
+      else process.env.HOME = savedHome;
+    }
     expect(r.code).toBe(0);
     expect(r.out).toContain('"mcpServers"');
     expect(r.out).toContain("harbor");
     expect(r.out).toContain("Re-run with --write");
+    // Emit must mutate NOTHING: assert the default config path was not written.
+    // (Asserting stdout alone would miss a stray write alongside the emit.)
+    expect(existsSync(join(dir, ".cursor", "mcp.json"))).toBe(false);
   });
 
   test("install with no/invalid --for exits non-zero", async () => {

@@ -158,6 +158,31 @@ describe("listSkillsTool", () => {
     expect(res.content[0]!.text).toContain("case-brief");
     expect(res.details?.count).toBe(2);
   });
+
+  // B1 — a restricted session must not enumerate another room's skills via the
+  // default scope or an explicit room override. Two rooms, distinct skills, marketing
+  // session: it sees only `campaign`, and `room='legal'` is denied (audited).
+  test("does not reveal another room's skills (default scope or explicit override)", async () => {
+    const env = makeEnv(
+      {
+        marketing: { skills: ["campaign"], capabilities: READ_CAPS, budget: 50000 },
+        legal: { skills: ["nda-review"], capabilities: READ_CAPS, budget: 50000 },
+      },
+      { campaign: skillMd("campaign"), "nda-review": skillMd("nda-review") },
+    );
+    const ctx = ctxFor(env, "marketing", "sess-mkt");
+
+    const own = await listSkillsTool(ctx);
+    expect(own.content[0]!.text).toContain("campaign");
+    expect(own.content[0]!.text).not.toContain("nda-review");
+
+    const cross = await listSkillsTool(ctx, "legal");
+    expect(cross.details?.error).toBe("access_denied");
+    expect(cross.content[0]!.text).not.toContain("nda-review");
+
+    const denials = auditRead(env, { room: "marketing" }).filter((e) => e.decision === "denied");
+    expect(denials.some((e) => e.capability === "list_skills" && e.resource === "legal")).toBe(true);
+  });
 });
 
 describe("piContext (env-var resolution)", () => {

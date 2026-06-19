@@ -30,6 +30,7 @@
  * which Pi/TypeBox accept at runtime.
  */
 import {
+  Capability,
   Environment,
   AgentSession,
   audit,
@@ -145,9 +146,21 @@ async function readSkillImpl(skillName: string): Promise<PiToolResult> {
   };
 }
 
-/** List the skills available to the session's room. */
+/** List the skills available to the session's room (or an authorized override). */
 async function listSkillsImpl(roomOverride?: string): Promise<PiToolResult> {
   const { env, session } = currentGateContext();
+  // B1 — gate the room override. A caller-supplied room that differs from the
+  // session's own is a cross-room enumeration; permit it only for an ADMIN
+  // session. Otherwise deny (audited): a restricted session must not be able to
+  // enumerate another room's skill list by passing room=<other>.
+  if (roomOverride && roomOverride !== session.room && !session.has(Capability.ADMIN)) {
+    const reason = `room '${session.room}' may not list skills for room '${roomOverride}'`;
+    audit.deny(session.sessionId, "list_skills", roomOverride, reason, { room: session.room, env });
+    return {
+      content: [{ type: "text", text: `Access denied: ${reason}.` }],
+      details: { error: "access_denied", room: roomOverride },
+    };
+  }
   const room = roomOverride ?? session.room;
   const skills = listSkills(env, room);
   if (skills.length === 0) {

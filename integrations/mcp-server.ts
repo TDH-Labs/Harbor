@@ -34,6 +34,7 @@
  * result — the stdio loop keeps running.
  */
 import {
+  Capability,
   Environment,
   audit,
   checkBudget,
@@ -205,6 +206,17 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
   }
 
   async function handle(request: JsonRpcRequest): Promise<JsonRpcResponse | null> {
+    // B2 — reject a non-object frame (null, array, scalar) before touching ANY
+    // field. `JSON.parse("null")` is valid JSON that parses to null and slips past
+    // the transport's parse try/catch; the old `request.id` deref then threw and
+    // killed the read loop (a one-line DoS — every frame after it was dropped).
+    // Per JSON-RPC an invalid request gets a -32600 with a null id; the loop
+    // survives and processes the next frame.
+    const frame = request as unknown;
+    if (frame === null || typeof frame !== "object" || Array.isArray(frame)) {
+      return errorResponse(null, ERR_INVALID_REQUEST, "invalid request: expected a JSON-RPC object");
+    }
+
     const id = request.id ?? null;
     const method = request.method;
 
@@ -215,36 +227,42 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
       return errorResponse(id, ERR_INVALID_REQUEST, "missing method");
     }
 
-    // Notifications (no id) get no response.
+    // A notification is a request with no `id`. Per JSON-RPC the server MUST NOT
+    // reply to one — for ANY method, not just unknown ones. (The old code only
+    // suppressed the reply in the default case, so a `ping`/`tools/list` sent as a
+    // notification wrongly drew a response.)
     const isNotification = request.id === undefined || request.id === null;
 
     switch (method) {
       case "initialize":
-        return ok(id, {
-          protocolVersion: MCP_PROTOCOL_VERSION,
-          capabilities: { tools: { listChanged: false } },
-          serverInfo: SERVER_INFO,
-          instructions:
-            "Harbor gates skill access by room and token budget. Use list_skills to " +
-            "discover skills, then read_skill to load one. Denials and budget limits " +
-            "are enforced server-side and surfaced as tool errors.",
-        });
+        return isNotification
+          ? null
+          : ok(id, {
+              protocolVersion: MCP_PROTOCOL_VERSION,
+              capabilities: { tools: { listChanged: false } },
+              serverInfo: SERVER_INFO,
+              instructions:
+                "Harbor gates skill access by room and token budget. Use list_skills to " +
+                "discover skills, then read_skill to load one. Denials and budget limits " +
+                "are enforced server-side and surfaced as tool errors.",
+            });
 
       case "notifications/initialized":
       case "initialized":
         return null; // client → server notification, no reply
 
       case "ping":
-        return ok(id, {});
+        return isNotification ? null : ok(id, {});
 
       case "tools/list":
-        return ok(id, { tools: TOOL_DEFINITIONS });
+        return isNotification ? null : ok(id, { tools: TOOL_DEFINITIONS });
 
       case "tools/call": {
         const params = request.params ?? {};
         const name = typeof params.name === "string" ? params.name : "";
         const args = (params.arguments as Record<string, unknown>) ?? {};
-        if (!name) return errorResponse(id, ERR_INVALID_PARAMS, "tools/call: missing tool name");
+        if (!name)
+          return isNotification ? null : errorResponse(id, ERR_INVALID_PARAMS, "tools/call: missing tool name");
         // Per-request gate context — the concurrency boundary. Resolving and
         // binding happen together so the whole tool chain (including its awaits)
         // carries this session's context and only this session's.
@@ -252,10 +270,14 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
         try {
           ctx = resolveContext(request);
         } catch (err) {
-          return errorResponse(id, ERR_INTERNAL, `context resolution failed: ${messageOf(err)}`);
+          return isNotification
+            ? null
+            : errorResponse(id, ERR_INTERNAL, `context resolution failed: ${messageOf(err)}`);
         }
+        // Run the tool for its side effects even as a notification, but per
+        // JSON-RPC return no response when there is no id.
         const result = await runWithGateContext(ctx, () => safeDispatch(dispatchTool, name, args));
-        return ok(id, result);
+        return isNotification ? null : ok(id, result);
       }
 
       default:
@@ -319,9 +341,19 @@ async function readSkillImpl(skillName: string): Promise<ToolResult> {
   return text(detail.content);
 }
 
-/** List the skills in the session's room (or an explicit room override). */
+/** List the skills in the session's room (or an authorized room override). */
 async function listSkillsImpl(roomOverride?: string): Promise<ToolResult> {
   const { env, session } = currentGateContext();
+  // B1 — gate the room override. A caller-supplied room that differs from the
+  // session's own is a cross-room enumeration; permit it only for an ADMIN
+  // session. Otherwise deny (audited): a restricted session must not be able to
+  // enumerate another room's skill list by passing room=<other>. Without this
+  // guard `list_skills(room='legal')` from a marketing session leaks legal's pool.
+  if (roomOverride && roomOverride !== session.room && !session.has(Capability.ADMIN)) {
+    const reason = `room '${session.room}' may not list skills for room '${roomOverride}'`;
+    audit.deny(session.sessionId, "list_skills", roomOverride, reason, { room: session.room, env });
+    return errorResult(`access denied: ${reason}.`);
+  }
   const room = roomOverride ?? session.room;
   const skills = listSkills(env, room);
   if (skills.length === 0) {

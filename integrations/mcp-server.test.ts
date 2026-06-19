@@ -133,6 +133,22 @@ describe("MCP protocol", () => {
     const res = await server.handle({ jsonrpc: "2.0", id: 4, method: "ping" });
     expect(res!.result).toEqual({});
   });
+
+  // Item 3 — a known method sent WITHOUT an id is a notification; per JSON-RPC it
+  // must not draw a response. The bug suppressed replies only for unknown methods.
+  test("a known method as a notification (no id) gets no response", async () => {
+    const server = serverFor(makeEnv({}), "general", "s1");
+    expect(await server.handle({ jsonrpc: "2.0", method: "ping" })).toBeNull();
+    expect(await server.handle({ jsonrpc: "2.0", method: "tools/list" })).toBeNull();
+  });
+
+  // B2 (direct) — a non-object frame is an invalid request, never a crash.
+  test("a null frame is an invalid-request error, not a thrown deref", async () => {
+    const server = serverFor(makeEnv({}), "general", "s1");
+    const res = await server.handle(null as unknown as JsonRpcRequest);
+    expect(res!.error?.code).toBe(-32600);
+    expect(res!.id).toBeNull();
+  });
 });
 
 // ── read_skill gating ──────────────────────────────────────────────────────--
@@ -230,6 +246,42 @@ describe("list_skills", () => {
     expect(txt).toContain("case-brief");
     expect(txt).toContain("Review an NDA");
   });
+
+  // B1 — a restricted session must not enumerate another room's skills, whether by
+  // the default scope (no override) or by passing room=<other>. Two-room pool with
+  // DISTINCT skills so "list everything" and "list the other room" are both
+  // detectable. Seeding the marketing session in a room that owns `campaign` only.
+  test("does not reveal another room's skills (default scope or explicit override)", async () => {
+    const env = makeEnv({
+      rooms: {
+        marketing: { skills: ["campaign"], capabilities: READ_CAPS, budget: 100000 },
+        legal: { skills: ["nda-review", "case-brief"], capabilities: READ_CAPS, budget: 100000 },
+      },
+      skills: {
+        campaign: skillMd("campaign", "Plan a campaign"),
+        "nda-review": skillMd("nda-review", "Review an NDA"),
+        "case-brief": skillMd("case-brief", "Brief a case"),
+      },
+    });
+    const server = serverFor(env, "marketing", "sess-mkt");
+
+    // Default scope sees only marketing's own skill, never legal's.
+    const own = await call(server, "list_skills");
+    expect(toolText(own)).toContain("campaign");
+    expect(toolText(own)).not.toContain("nda-review");
+    expect(toolText(own)).not.toContain("case-brief");
+
+    // The cross-room override is denied — legal's pool stays hidden.
+    const cross = await call(server, "list_skills", { room: "legal" });
+    expect(isError(cross)).toBe(true);
+    expect(toolText(cross).toLowerCase()).toContain("denied");
+    expect(toolText(cross)).not.toContain("nda-review");
+    expect(toolText(cross)).not.toContain("case-brief");
+
+    // The denial is persisted to the audit log under the caller's room.
+    const denials = auditRead(env, { room: "marketing" }).filter((e) => e.decision === "denied");
+    expect(denials.some((e) => e.capability === "list_skills" && e.resource === "legal")).toBe(true);
+  });
 });
 
 describe("budget_status", () => {
@@ -301,6 +353,27 @@ describe("runStdioServer", () => {
     await runStdioServer(server, input, (line) => out.push(line));
     expect(out.length).toBe(2);
     expect((JSON.parse(out[0]!) as JsonRpcResponse).error?.code).toBe(-32700);
+    expect((JSON.parse(out[1]!) as JsonRpcResponse).result).toEqual({});
+  });
+
+  // B2 — `null\n` is valid JSON that parses to `null`, so it slips past the parse
+  // guard. The old handler dereferenced `request.id` on it and threw, killing the
+  // read loop so every later frame was dropped. The loop must survive: the null
+  // frame draws an invalid-request error and the following `ping` still responds.
+  test("a null frame is rejected without killing the loop; the next request still responds", async () => {
+    const env = makeEnv({ rooms: { general: { skills: [], capabilities: READ_CAPS } } });
+    const server = serverFor(env, "general", "s1");
+    const input = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("null\n"));
+        controller.enqueue(new TextEncoder().encode('{"jsonrpc":"2.0","id":7,"method":"ping"}\n'));
+        controller.close();
+      },
+    });
+    const out: string[] = [];
+    await runStdioServer(server, input, (line) => out.push(line));
+    expect(out.length).toBe(2);
+    expect((JSON.parse(out[0]!) as JsonRpcResponse).error?.code).toBe(-32600);
     expect((JSON.parse(out[1]!) as JsonRpcResponse).result).toEqual({});
   });
 });
