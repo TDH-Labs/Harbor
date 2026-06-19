@@ -245,4 +245,4 @@ export type {
 } from "./install.ts";
 
 // ── CLI command tree (extensible by later phases) ────────────────────────────-
-export { main as cli, commonArgs, envFromArgs } from "./cli.ts";
+export { main as cli, commonArgs, envFromArgs, setupTree } from "./cli.ts";

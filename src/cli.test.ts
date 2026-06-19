@@ -114,6 +114,22 @@ describe("end-to-end (subprocess) smokes", () => {
     expect(r.out + r.err).toContain("scheduler");
   });
 
+  test("--version prints the package version (citty version path)", () => {
+    const r = run("--version");
+    expect(r.code).toBe(0);
+    expect((r.out + r.err).trim()).toMatch(/^\d+\.\d+\.\d+$/);
+  });
+
+  test("setup builds the directory tree under --root through a real process", () => {
+    const r = run("setup", "--root", dir);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("setup:");
+    for (const sub of ["workspace", "rooms", "data", "archive", ".agent-env"]) {
+      expect(existsSync(join(dir, sub))).toBe(true);
+    }
+    expect(readFileSync(join(dir, "AGENTS.md"), "utf8")).toContain("<!-- agent-env:sync -->");
+  });
+
   test("init writes agent_map.md + a stamped AGENTS.md through a real process", () => {
     const r = run("init", "--root", dir);
     expect(r.code).toBe(0);
@@ -141,7 +157,7 @@ describe("end-to-end (subprocess) smokes", () => {
 describe("--help renders for every subcommand", () => {
   const commands = [
     "sync", "watch", "start", "stop", "dashboard", "bench",
-    "scheduler", "compaction", "isolation", "session", "check", "init",
+    "scheduler", "compaction", "isolation", "session", "check", "init", "setup",
     "skills-list", "mcp-check", "mcp-gen", "mcp-merge",
     "skill-create", "skill-install", "skill-assign",
   ];

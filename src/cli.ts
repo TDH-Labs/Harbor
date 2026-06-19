@@ -1,3 +1,4 @@
+#!/usr/bin/env bun
 /**
  * cli.ts — Unified Harbor CLI (citty).
  *
@@ -14,8 +15,10 @@
  * always resolved from `--config`, `--root`, or `os.homedir()` defaults.
  */
 import { type ArgsDef, type CommandDef, defineCommand, runMain } from "citty";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { basename } from "node:path";
+
+import pkg from "../package.json" with { type: "json" };
 
 import { Config } from "./config.ts";
 import { CompactionEngine } from "./compaction.ts";
@@ -545,6 +548,64 @@ const initCmd = defineCommand({
   },
 });
 
+/**
+ * Build the standard directory skeleton an Environment derives from config.
+ * Mirrors the Python prototype's `create_tree` (cli.py:create_tree) — the
+ * five-layer tree plus the state/skills/logs/sessions/archive dirs every core
+ * module writes into. `mkdir -p`, so it is idempotent and safe to re-run.
+ * Returns the directories that did not exist before this call.
+ */
+export function setupTree(env: Environment): string[] {
+  const dirs = [
+    env.root,
+    env.workspace,
+    env.rooms,
+    env.dataDir,
+    env.stateDir,
+    env.skillsDir,
+    env.logsDir,
+    env.sessionsDir,
+    env.archiveDir,
+  ];
+  const created: string[] = [];
+  for (const d of dirs) {
+    if (!existsSync(d)) created.push(d);
+    mkdirSync(d, { recursive: true });
+  }
+  return created;
+}
+
+const setupCmd = defineCommand({
+  meta: { name: "setup", description: "Build the directory tree from config and generate beacons" },
+  args: { ...commonArgs },
+  run({ args }) {
+    const env = envFromArgs(args);
+    const created = setupTree(env);
+    // Seed agent_map.md if absent (init may already have written a richer one),
+    // then generate beacons so a freshly-built tree is immediately usable.
+    const seed = [
+      "# Agent Map",
+      "",
+      "## Rooms",
+      "",
+      "| Room | Path | Purpose |",
+      "|------|------|---------|",
+      "",
+      "## Projects",
+      "",
+      "| Project | Path | Status |",
+      "|---------|------|--------|",
+      "",
+    ].join("\n");
+    const wroteMap = !existsSync(env.agentMap) && writeIfChanged(env.agentMap, seed);
+    runGenerate(env);
+    console.log(
+      `setup: created ${created.length} dir(s) under ${env.root}` +
+        `${wroteMap ? ", seeded agent_map.md" : ""}, generated beacons`,
+    );
+  },
+});
+
 // ── hypervisor: spawn / budget / gate / audit (Phase 3) ─────────────────────────
 
 const spawnCmd = defineCommand({
@@ -954,7 +1015,11 @@ const installCmd = defineCommand({
 // ── Root command ──────────────────────────────────────────────────────────────
 
 export const main: CommandDef = defineCommand({
-  meta: { name: "harbor", description: "Agent control plane — scheduler, compaction, isolation, sessions." },
+  meta: {
+    name: "harbor",
+    version: pkg.version,
+    description: "Agent control plane — scheduler, compaction, isolation, sessions.",
+  },
   subCommands: {
     sync: syncCmd,
     watch: watchCmd,
@@ -972,6 +1037,7 @@ export const main: CommandDef = defineCommand({
     audit: auditCmd,
     check: checkCmd,
     init: initCmd,
+    setup: setupCmd,
     "skills-list": skillsListCmd,
     "mcp-check": mcpCheckCmd,
     "mcp-gen": mcpGenCmd,
