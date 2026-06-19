@@ -2,8 +2,15 @@
 
 > *Tugboat pulls you into Harbor.*
 
-> Distributed on npm as **`harbor-tugboat`** (the package/import name); the CLI command it
-> installs is **`harbor`**.
+> ## ⚠️ Alpha — `0.1.0`. Unproven; expect breakage.
+> Feature-complete and green in CI, but **not yet validated in real-world use**. Expect bugs
+> and **breaking changes between versions** — don't build anything on it yet. During alpha,
+> install from a release tarball or straight from this repo
+> (`bun add github:TDH-Labs/Harbor`); a published npm release comes at beta. Found something
+> off? Please [open an issue](../../issues) — that's exactly what this phase is for.
+
+> Distributed (eventually) on npm as **`harbor-tugboat`** (the package/import name); the CLI
+> command it installs is **`harbor`**.
 
 **An agent control plane** — scheduler, compaction, isolation, and session tracking for
 AI coding agents, with a universal MCP integration so any MCP-capable agent (Claude Code,
