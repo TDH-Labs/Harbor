@@ -2,19 +2,15 @@
 
 > *Tugboat pulls you into Harbor.*
 
-> ## ⚠️ Alpha — `0.1.0`. Unproven; expect breakage.
-> Feature-complete and green in CI, but **not yet validated in real-world use**. Expect bugs
-> and **breaking changes between versions** — don't build anything on it yet. During alpha,
-> install from a release tarball or straight from this repo
-> (`bun add github:TDH-Labs/Harbor`); a published npm release comes at beta. Found something
-> off? Please [open an issue](../../issues) — that's exactly what this phase is for.
+> **⚠️ Alpha (`0.1.0`) — unproven, expect breakage.** Feature-complete and green in CI, but
+> not yet validated in real-world use. Expect bugs and breaking changes between versions —
+> don't build on it yet. Found something off? [Open an issue](../../issues).
 
-> Distributed (eventually) on npm as **`harbor-tugboat`** (the package/import name); the CLI
-> command it installs is **`harbor`**.
+**An agent control plane** — scheduler, compaction, isolation, and session tracking for AI
+coding agents, with a universal MCP integration so any MCP-capable agent (Claude Code, Cursor,
+OpenCode, Codex, Gemini CLI, Goose) routes its skill access through one gate.
 
-**An agent control plane** — scheduler, compaction, isolation, and session tracking for
-AI coding agents, with a universal MCP integration so any MCP-capable agent (Claude Code,
-Cursor, OpenCode, Codex, Gemini CLI, Goose) routes its skill access through one gate.
+The npm package and import name is **`harbor-tugboat`**; the command it installs is **`harbor`**.
 
 Harbor gives you:
 
@@ -35,25 +31,24 @@ runner, and single-binary compilation.
 
 ## Install
 
+Alpha is **not on npm yet** — install from the release tarball or straight from the repo.
+The npm commands light up at beta.
+
 ```bash
-# Run without installing (npx resolves the package name)
-npx harbor-tugboat --help
+# Alpha (now) — from the release tarball
+npm i -g ./harbor-tugboat-0.1.0.tgz
 
-# Or install globally — this installs the `harbor` command
-npm install -g harbor-tugboat
+# …or straight from the repo
+bun add github:TDH-Labs/Harbor
 
-# Or add to a project
-bun add harbor-tugboat
+# Beta (once published to npm)
+npm install -g harbor-tugboat   # installs the `harbor` command
+npx harbor-tugboat --help       # or run without installing
 ```
 
-The npm package (and import specifier) is **`harbor-tugboat`**; the command it installs is
-**`harbor`**. So you install `harbor-tugboat` but run `harbor` — e.g. after a global install,
-`harbor --help`. (`npx harbor-tugboat …` runs the same command without installing.)
-
-Harbor runs on **Bun ≥ 1.1**. The `harbor` binary is a Bun program; `npx harbor-tugboat` and
-the global install both launch it through Bun.
-
-A standalone, dependency-free binary is also available — see [Single binary](#single-binary).
+You install **`harbor-tugboat`** but run **`harbor`**. It needs **Bun ≥ 1.1** — the binary is a
+Bun program. A standalone, dependency-free binary is also available (see
+[Single binary](#single-binary)).
 
 ---
 
@@ -62,20 +57,18 @@ A standalone, dependency-free binary is also available — see [Single binary](#
 From a clean machine, three commands stand up a working environment:
 
 ```bash
-npx harbor-tugboat init     # seed agent_map.md + generate the AI beacons (AGENTS.md, CLAUDE.md, .cursorrules)
-npx harbor-tugboat setup    # build the directory tree from config, generate beacons
-npx harbor-tugboat check    # read-only health check — reports what's wired and what's missing
+harbor init     # seed agent_map.md + generate the AI beacons (AGENTS.md, CLAUDE.md, .cursorrules)
+harbor setup    # build the directory tree from config, generate beacons
+harbor check    # read-only health check — reports what's wired and what's missing
 ```
-
-(Installed globally, these are just `harbor init`, `harbor setup`, `harbor check`.)
 
 By default the environment root is your home directory and state lives under
 `~/.agent-env/`. To stand one up somewhere else (e.g. a scratch dir), pass `--root`:
 
 ```bash
-npx harbor-tugboat init  --root /tmp/my-env
-npx harbor-tugboat setup --root /tmp/my-env
-npx harbor-tugboat check --root /tmp/my-env
+harbor init  --root /tmp/my-env
+harbor setup --root /tmp/my-env
+harbor check --root /tmp/my-env
 ```
 
 `setup` creates the standard tree (idempotent — safe to re-run):
