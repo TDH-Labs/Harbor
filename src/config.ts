@@ -79,6 +79,9 @@ export interface RawConfig {
   skills: {
     rooms: Record<string, RawRoom>;
     skill_category_to_room: Record<string, string>;
+    /** Optional per-skill sub-domain hint (e.g. "litigation"), used to group a
+     *  room's skills_index.md into sub-sections. Bare label or "room/label". */
+    skill_subdomain: Record<string, string>;
     default_room: string;
   };
   budgets: {
@@ -164,6 +167,7 @@ export const DEFAULTS: RawConfig = {
   skills: {
     rooms: {},
     skill_category_to_room: {},
+    skill_subdomain: {},
     // Neutral catch-all; de-personalized from the prototype's machine-specific default.
     default_room: "general",
   },
@@ -372,6 +376,10 @@ export class Config {
   }
   get skillCategoryToRoom(): Record<string, string> {
     return { ...(this.data.skills.skill_category_to_room ?? {}) };
+  }
+  /** Per-skill sub-domain hint map (skill → "label" or "room/label"). */
+  get skillSubdomains(): Record<string, string> {
+    return { ...(this.data.skills.skill_subdomain ?? {}) };
   }
   get skillDefaultRoom(): string {
     return this.data.skills.default_room ?? "general";

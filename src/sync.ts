@@ -382,9 +382,23 @@ export function generateProjectAgentsMd(env: Environment, projectName: string): 
   ].join("\n");
 }
 
-/** Generate a room's skills_index.md from all skills assigned to the room
+/**
+ * Strip an optional "room/" prefix from a sub-domain hint, returning the bare
+ * label. "legal/litigation" → "litigation"; "litigation" → "litigation".
+ */
+function subdomainLabel(hint: string): string {
+  const slash = hint.indexOf("/");
+  return (slash >= 0 ? hint.slice(slash + 1) : hint).trim();
+}
+
+/**
+ * Generate a room's skills_index.md from all skills assigned to the room
  * (explicit config list + category mappings), so the index matches what
- * `harbor skills-list --room <room>` reports. */
+ * `harbor skills-list --room <room>` reports. When per-skill sub-domain hints
+ * are configured (`[skills.skill_subdomain]`), skills are grouped under `##`
+ * sub-sections sorted alphabetically; hint-less skills fall under "## other"
+ * (rendered last). With no hints configured the output is a flat list.
+ */
 export function generateRoomIndex(env: Environment, room: string): string {
   const { assignments } = computeAssignments(env);
   const skills = Object.entries(assignments)
@@ -394,8 +408,32 @@ export function generateRoomIndex(env: Environment, room: string): string {
   const lines = [`# ${room} — Skills Index`, ""];
   if (skills.length === 0) {
     lines.push("_No skills configured for this room._", "");
-  } else {
+    return lines.join("\n");
+  }
+
+  const hints = env.config.skillSubdomains;
+  const grouped: Record<string, string[]> = {};
+  for (const s of skills) {
+    const hint = hints[s];
+    const group = hint ? subdomainLabel(hint) || "other" : "other";
+    (grouped[group] ??= []).push(s);
+  }
+  const groups = Object.keys(grouped);
+
+  // No hints at all → preserve the flat list (back-compat).
+  if (groups.length === 1 && groups[0] === "other") {
     for (const s of skills) lines.push(`- ${s}`);
+    lines.push("");
+    return lines.join("\n");
+  }
+
+  // "other" sorts last; the rest alphabetically.
+  const ordered = groups.sort((a, b) =>
+    a === "other" ? 1 : b === "other" ? -1 : a.localeCompare(b),
+  );
+  for (const g of ordered) {
+    lines.push(`## ${g}`, "");
+    for (const s of (grouped[g] as string[]).sort()) lines.push(`- ${s}`);
     lines.push("");
   }
   return lines.join("\n");

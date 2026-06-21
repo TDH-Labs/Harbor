@@ -7,7 +7,7 @@ import { parse as parseToml } from "smol-toml";
 
 import { Config } from "./config.ts";
 import { Environment } from "./env.ts";
-import { addSkillToRoom, ConfigEditError, reloadEnv } from "./config-edit.ts";
+import { addSkillToRoom, ConfigEditError, reloadEnv, setSkillSubdomains } from "./config-edit.ts";
 
 let dir: string;
 let configPath: string;
@@ -70,6 +70,29 @@ describe("addSkillToRoom", () => {
   test("throws when the environment has no config file", () => {
     const e = new Environment(dir, Config.defaults(), null);
     expect(() => addSkillToRoom(e, "x", "ops")).toThrow(/no config file/);
+  });
+});
+
+describe("setSkillSubdomains", () => {
+  test("merges hints into [skills.skill_subdomain] and reloads", () => {
+    const e = writeConfig(BASE.replace("PLACEHOLDER", dir));
+    const res = setSkillSubdomains(e, { existing: "ops/runbooks", other: "ops/oncall" });
+    expect(res.changed).toBe(true);
+    const data = parseToml(readFileSync(configPath, "utf8")) as any;
+    expect(data.skills.skill_subdomain).toEqual({ existing: "ops/runbooks", other: "ops/oncall" });
+    expect(reloadEnv(e).config.skillSubdomains.existing).toBe("ops/runbooks");
+  });
+
+  test("is idempotent — re-applying the same map does not rewrite", () => {
+    const e = writeConfig(BASE.replace("PLACEHOLDER", dir));
+    setSkillSubdomains(e, { existing: "ops/runbooks" });
+    const again = setSkillSubdomains(reloadEnv(e), { existing: "ops/runbooks" });
+    expect(again.changed).toBe(false);
+  });
+
+  test("throws without a config file", () => {
+    const e = new Environment(dir, Config.defaults(), null);
+    expect(() => setSkillSubdomains(e, { a: "b" })).toThrow(/no config file/);
   });
 });
 

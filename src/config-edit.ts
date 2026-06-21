@@ -95,6 +95,34 @@ export function addSkillToRoom(env: Environment, skill: string, room: string): E
 }
 
 /**
+ * Merge `map` (skill → sub-domain hint) into `[skills.skill_subdomain]` in the
+ * environment's config.toml in a single structured write. Existing entries are
+ * overwritten by `map`; entries absent from `map` are left untouched. Returns
+ * `changed:false` when the merge is already satisfied. Throws when there is no
+ * config file.
+ */
+export function setSkillSubdomains(env: Environment, map: Record<string, string>): EditResult {
+  const path = env.configPath;
+  if (!path) {
+    throw new ConfigEditError("no config file path available (environment built from defaults)");
+  }
+  const data = parseToml(readFileSync(path, "utf8")) as TomlTable;
+  data.skills ??= {};
+  const existing = (data.skills.skill_subdomain ?? {}) as Record<string, string>;
+  let changed = false;
+  for (const [skill, hint] of Object.entries(map)) {
+    if (existing[skill] !== hint) {
+      existing[skill] = hint;
+      changed = true;
+    }
+  }
+  if (!changed) return { changed: false, path };
+  data.skills.skill_subdomain = existing;
+  writeFileSync(path, stringifyToml(data) + "\n");
+  return { changed: true, path };
+}
+
+/**
  * Re-read an environment's config.toml into a fresh {@link Environment} on the
  * same root. Use after a mutation so in-memory config reflects what's on disk
  * (e.g. before regenerating room indexes). Returns the same env unchanged when

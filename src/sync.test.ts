@@ -112,6 +112,54 @@ describe("beacon generation", () => {
     const idx = generateRoomIndex(e, "legal");
     expect(idx.indexOf("case-brief")).toBeLessThan(idx.indexOf("nda-review"));
   });
+
+  test("room index is a flat list when no sub-domain hints are configured", () => {
+    const e = env({ legal: { skills: ["nda-review", "case-brief"] } });
+    const idx = generateRoomIndex(e, "legal");
+    expect(idx).not.toContain("## "); // no sub-sections
+    expect(idx).toContain("- case-brief");
+  });
+
+  test("room index groups skills under sub-domain headers when hints exist", () => {
+    const cfg = new Config(
+      deepMerge(DEFAULTS, {
+        skills: {
+          rooms: { legal: { skills: ["nda-review", "deposition-prep", "kyc-doc-parse"] } },
+          skill_subdomain: {
+            "nda-review": "legal/contracts",
+            "deposition-prep": "litigation",
+            "kyc-doc-parse": "kyc",
+          },
+        },
+      }),
+    );
+    const idx = generateRoomIndex(new Environment(dir, cfg), "legal");
+    expect(idx).toContain("## contracts");
+    expect(idx).toContain("## litigation");
+    expect(idx).toContain("## kyc");
+    // "room/label" prefix is stripped to the bare label
+    expect(idx).not.toContain("legal/contracts");
+    // grouped membership
+    const contractsIdx = idx.indexOf("## contracts");
+    const litigationIdx = idx.indexOf("## litigation");
+    expect(idx.indexOf("- nda-review")).toBeGreaterThan(contractsIdx);
+    expect(idx.indexOf("- deposition-prep")).toBeGreaterThan(litigationIdx);
+  });
+
+  test("hint-less skills fall under '## other', rendered last", () => {
+    const cfg = new Config(
+      deepMerge(DEFAULTS, {
+        skills: {
+          rooms: { legal: { skills: ["nda-review", "loose-skill"] } },
+          skill_subdomain: { "nda-review": "contracts" },
+        },
+      }),
+    );
+    const idx = generateRoomIndex(new Environment(dir, cfg), "legal");
+    expect(idx).toContain("## other");
+    expect(idx.indexOf("## contracts")).toBeLessThan(idx.indexOf("## other"));
+    expect(idx.indexOf("- loose-skill")).toBeGreaterThan(idx.indexOf("## other"));
+  });
 });
 
 describe("discovery", () => {
