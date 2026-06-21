@@ -43,6 +43,34 @@ import { computeAssignments } from "./skills.ts";
 /** Ownership marker appended to every home-level beacon. */
 export const SYNC_STAMP = "<!-- agent-env:sync -->";
 
+/**
+ * Always-read guardrail emitted into the home AGENTS.md and CLAUDE.md: how to
+ * correctly extend a Harbor environment. Because the beacon is the one surface
+ * every agent reads first, putting the install rules here makes them
+ * guaranteed-read — preventing the common contamination failure (npx-global
+ * install / manual pool dumps / cross-agent symlinks). The full step-by-step
+ * lives in the progressively-loaded `extending-harbor` skill this block points
+ * at; only the damage-preventing rules are always-on. Commands are home-agnostic
+ * so this is a static block.
+ */
+export const EXTEND_GUARDRAIL: string[] = [
+  "## Extending This Environment",
+  "",
+  "This machine runs **Harbor**. To add skills, MCP servers, or tools, go through",
+  "Harbor — never install globally or edit the skill pool by hand.",
+  "",
+  "- **Add a skill:** `harbor skill-install <source> --room <room>`. NEVER",
+  "  `npx skills add -g`, manual copies into the pool, or symlinks into agents'",
+  "  auto-load dirs — that leaks one skill into every agent and breaks routing.",
+  "- **Route an existing skill to a room:** `harbor skill-assign`.",
+  "- **Add an MCP server / wire an agent:** `harbor install --for <agent>`",
+  "  (prints the config; add `--write` to apply it with a backup).",
+  "- **After any change:** run `harbor sync` to regenerate beacons + room indexes.",
+  "- Don't hand-edit `config.toml` when a command owns it; don't fight the watcher.",
+  "",
+  "Full procedures: read the `extending-harbor` skill first.",
+];
+
 // ── Markdown table parsing ───────────────────────────────────────────────────
 
 export interface TableRow {
@@ -267,6 +295,8 @@ export function generateHomeAgentsMd(
     "2. **Identify your task's room** from the room index",
     `3. **Read the room rules:** \`cat ${home}/rooms/<domain>/room_rules.md\``,
     "",
+    ...EXTEND_GUARDRAIL,
+    "",
     "## Room Index",
     "",
     "| Room | Path | Purpose |",
@@ -304,6 +334,8 @@ export function generateHomeClaudeMd(env: Environment): string {
     "- **Workspace-first:** active work happens in `~/workspace/<project>/`",
     "- **Room rules are mandatory** — each domain has its own `room_rules.md`",
     "",
+    ...EXTEND_GUARDRAIL,
+    "",
     SYNC_STAMP,
     "",
   ].join("\n");
@@ -321,6 +353,8 @@ export function generateCursorrules(env: Environment, rooms: TableRow[]): string
     "4. Work in the project workspace.",
     "",
     roomNames.length ? `Rooms: ${roomNames.join(", ")}` : "Rooms: (none configured)",
+    "",
+    "Extending Harbor: use `harbor skill-install` / `harbor install --for <agent>` — never npx-global; read the `extending-harbor` skill; run `harbor sync` after.",
     "",
     SYNC_STAMP,
     "",

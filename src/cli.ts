@@ -15,8 +15,8 @@
  * always resolved from `--config`, `--root`, or `os.homedir()` defaults.
  */
 import { type ArgsDef, type CommandDef, defineCommand, runMain } from "citty";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { basename } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { basename, join } from "node:path";
 
 import pkg from "../package.json" with { type: "json" };
 
@@ -549,6 +549,87 @@ const initCmd = defineCommand({
 });
 
 /**
+ * The bundled `extending-harbor` skill, seeded into the pool on `setup`. It is
+ * the full step-by-step the beacon's always-read guardrail block points at:
+ * how to add/route skills, add MCP servers, and reconcile — and the
+ * anti-patterns (npx-global install, manual pool dumps, cross-agent symlinks)
+ * that contaminate a Harbor environment. Bundling it as a string keeps the
+ * package self-contained (no extra files in the npm allowlist) and makes every
+ * `harbor setup` produce a machine that can teach an agent how to extend it.
+ */
+export const EXTENDING_HARBOR_SKILL = `---
+name: extending-harbor
+description: How to correctly add skills, MCP servers, and tools to a machine running Harbor. Read this before installing or routing anything — it prevents polluting the shared skill pool or leaking skills across agents.
+---
+
+# Extending a Harbor Environment
+
+This machine runs Harbor, an agent control plane. Skills, MCP servers, and rooms
+are managed through the \`harbor\` CLI. Going around it — \`npx skills add -g\`,
+copying files into the pool, symlinking into an agent's auto-load directory —
+breaks Harbor's routing and leaks one skill into every agent. Always use the
+commands below.
+
+## Add a skill
+
+    harbor skill-install <source> --room <room>
+
+\`<source>\` is a directory or a SKILL.md file. \`--room\` routes it so only that
+room's agents see it; omit it to let Harbor auto-route by content.
+
+NEVER do any of these:
+- \`npx skills add -g <pkg>\` — dumps the skill flat in the pool and symlinks it
+  into every agent's auto-load dir (the exact contamination this skill prevents).
+- Manually \`cp\`/\`mv\` a skill into the pool (\`~/.agents/skills/\`).
+- Hand-symlink a skill into an agent's directory.
+
+## Route an existing pool skill to a room
+
+    harbor skill-assign                 # report suggested routing
+    harbor skill-assign --auto          # apply best-match routing
+    harbor skill-assign --room <room>   # assign orphans to one room
+
+If the room isn't in config yet but exists on disk
+(\`~/rooms/<room>/room_rules.md\`), these create its config entry automatically.
+
+## Add an MCP server / wire an agent
+
+    harbor install --for <agent>          # print the config block (writes nothing)
+    harbor install --for <agent> --write  # apply it (backs up the existing file)
+
+Supported <agent>: claude-code, cursor, opencode, codex, gemini, goose, pi.
+For a per-room MCP server, add it to the room's config and run \`harbor mcp-gen\`.
+
+## After ANY change
+
+    harbor sync
+
+Regenerates the beacons (AGENTS.md / CLAUDE.md / .cursorrules) and every room's
+skills_index.md so the environment reflects what you changed. Skipping this
+leaves agents reading stale routing.
+
+## Rules
+
+- Don't hand-edit \`config.toml\` when a command owns the section (skill-install,
+  skill-assign, install all write it structurally).
+- Don't stop or fight the watcher; it owns the beacons and re-syncs on change.
+- Verify your change landed: \`harbor skills-list --room <room>\` or \`harbor check\`.
+`;
+
+/**
+ * Seed the bundled {@link EXTENDING_HARBOR_SKILL} into the pool if absent.
+ * Idempotent — never overwrites an existing copy (an operator may have edited
+ * it). Returns true when it wrote the file.
+ */
+export function seedExtendingHarborSkill(env: Environment): boolean {
+  const p = join(env.skillsDir, "extending-harbor", "SKILL.md");
+  if (existsSync(p)) return false;
+  mkdirSync(join(env.skillsDir, "extending-harbor"), { recursive: true });
+  writeFileSync(p, EXTENDING_HARBOR_SKILL);
+  return true;
+}
+
+/**
  * Build the standard directory skeleton an Environment derives from config.
  * Mirrors the Python prototype's `create_tree` (cli.py:create_tree) — the
  * five-layer tree plus the state/skills/logs/sessions/archive dirs every core
@@ -581,6 +662,7 @@ const setupCmd = defineCommand({
   run({ args }) {
     const env = envFromArgs(args);
     const created = setupTree(env);
+    const seededSkill = seedExtendingHarborSkill(env);
     // Seed agent_map.md if absent (init may already have written a richer one),
     // then generate beacons so a freshly-built tree is immediately usable.
     const seed = [
@@ -601,7 +683,8 @@ const setupCmd = defineCommand({
     runGenerate(env);
     console.log(
       `setup: created ${created.length} dir(s) under ${env.root}` +
-        `${wroteMap ? ", seeded agent_map.md" : ""}, generated beacons`,
+        `${wroteMap ? ", seeded agent_map.md" : ""}` +
+        `${seededSkill ? ", seeded extending-harbor skill" : ""}, generated beacons`,
     );
   },
 });

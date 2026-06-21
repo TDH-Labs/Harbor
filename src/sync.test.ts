@@ -14,6 +14,7 @@ import {
   ensureWorkspaceDir,
   fullSync,
   generateHomeAgentsMd,
+  generateHomeClaudeMd,
   generateProjectAgentsMd,
   generateRoomIndex,
   isProjectDir,
@@ -89,6 +90,21 @@ describe("beacon generation", () => {
     const out = generateProjectAgentsMd(env(), "myproj");
     expect(out).toContain("# myproj");
     expect(out).not.toContain(SYNC_STAMP);
+  });
+
+  test("home beacons carry the always-read extend guardrail", () => {
+    const agents = generateHomeAgentsMd(env(), [], []);
+    const claude = generateHomeClaudeMd(env());
+    for (const beacon of [agents, claude]) {
+      expect(beacon).toContain("## Extending This Environment");
+      expect(beacon).toContain("harbor skill-install");
+      expect(beacon).toContain("npx skills add -g"); // the named anti-pattern
+      expect(beacon).toContain("extending-harbor"); // points at the full skill
+    }
+  });
+
+  test("project AGENTS.md does NOT carry the guardrail (home-only, keeps stubs lean)", () => {
+    expect(generateProjectAgentsMd(env(), "p")).not.toContain("## Extending This Environment");
   });
 
   test("room index lists configured skills sorted", () => {

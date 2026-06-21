@@ -130,6 +130,19 @@ describe("end-to-end (subprocess) smokes", () => {
     expect(readFileSync(join(dir, "AGENTS.md"), "utf8")).toContain("<!-- agent-env:sync -->");
   });
 
+  test("setup seeds the extending-harbor skill into the pool", () => {
+    run("setup", "--root", dir);
+    const skill = join(dir, ".agents", "skills", "extending-harbor", "SKILL.md");
+    expect(existsSync(skill)).toBe(true);
+    const body = readFileSync(skill, "utf8");
+    expect(body).toContain("name: extending-harbor");
+    expect(body).toContain("harbor skill-install");
+    // Idempotent: a second setup does not re-seed or error.
+    const r2 = run("setup", "--root", dir);
+    expect(r2.code).toBe(0);
+    expect(r2.out).not.toContain("seeded extending-harbor skill");
+  });
+
   test("init writes agent_map.md + a stamped AGENTS.md through a real process", () => {
     const r = run("init", "--root", dir);
     expect(r.code).toBe(0);
