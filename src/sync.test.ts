@@ -9,6 +9,7 @@ import { Environment } from "./env.ts";
 import {
   SYNC_STAMP,
   discoverAll,
+  discoverRooms,
   discoverWorkspaceProjects,
   ensureWorkspaceDir,
   fullSync,
@@ -16,6 +17,7 @@ import {
   generateProjectAgentsMd,
   generateRoomIndex,
   isProjectDir,
+  mergeRoomsIntoMap,
   parseProjectTable,
   parseRoomTable,
   parseTable,
@@ -205,5 +207,67 @@ describe("writeIfChanged", () => {
     expect(writeIfChanged(p, "hello")).toBe(true);
     expect(writeIfChanged(p, "hello")).toBe(false);
     expect(writeIfChanged(p, "world")).toBe(true);
+  });
+});
+
+describe("discoverRooms", () => {
+  test("returns sorted room names that contain room_rules.md", () => {
+    mkdirSync(join(dir, "rooms", "devops"), { recursive: true });
+    mkdirSync(join(dir, "rooms", "legal"), { recursive: true });
+    mkdirSync(join(dir, "rooms", "empty"), { recursive: true }); // no room_rules.md
+    writeFileSync(join(dir, "rooms", "devops", "room_rules.md"), "# DevOps");
+    writeFileSync(join(dir, "rooms", "legal", "room_rules.md"), "# Legal");
+    expect(discoverRooms(env())).toEqual(["devops", "legal"]);
+  });
+
+  test("returns [] when rooms dir is absent", () => {
+    expect(discoverRooms(env())).toEqual([]);
+  });
+});
+
+describe("mergeRoomsIntoMap", () => {
+  test("adds rooms not yet in the table", () => {
+    const result = mergeRoomsIntoMap(SAMPLE_MAP, ["legal", "devops", "research"]);
+    const rows = parseRoomTable(result);
+    expect(rows.map((r) => r["Room"])).toContain("research");
+    expect(rows.find((r) => r["Room"] === "research")?.["Path"]).toBe("~/rooms/research/");
+    expect(rows).toHaveLength(3);
+  });
+
+  test("returns original string unchanged when all rooms already present", () => {
+    const result = mergeRoomsIntoMap(SAMPLE_MAP, ["legal", "devops"]);
+    expect(result).toBe(SAMPLE_MAP);
+  });
+
+  test("matches by dir name — backtick-wrapped paths are not duplicated", () => {
+    const map = SAMPLE_MAP.replace("~/rooms/legal", "`~/rooms/legal/`");
+    const result = mergeRoomsIntoMap(map, ["legal", "marketing"]);
+    const rows = parseRoomTable(result);
+    const names = rows.map((r) => r["Room"]);
+    expect(names.filter((n) => n === "legal")).toHaveLength(1); // no duplicate
+    expect(names).toContain("marketing");
+  });
+});
+
+describe("fullSync room discovery", () => {
+  test("merges filesystem rooms into agent_map.md on sync", () => {
+    const map = join(dir, "agent_map.md");
+    writeFileSync(map, SAMPLE_MAP);
+    mkdirSync(join(dir, "rooms", "research"), { recursive: true });
+    writeFileSync(join(dir, "rooms", "research", "room_rules.md"), "# Research");
+    fullSync(env());
+    const rows = parseRoomTable(readFileSync(map, "utf8"));
+    expect(rows.map((r) => r["Room"])).toContain("research");
+  });
+
+  test("does not duplicate existing rooms on repeated sync", () => {
+    const map = join(dir, "agent_map.md");
+    writeFileSync(map, SAMPLE_MAP);
+    mkdirSync(join(dir, "rooms", "legal"), { recursive: true });
+    writeFileSync(join(dir, "rooms", "legal", "room_rules.md"), "# Legal");
+    fullSync(env());
+    fullSync(env()); // idempotent
+    const rows = parseRoomTable(readFileSync(map, "utf8"));
+    expect(rows.filter((r) => r["Room"] === "legal")).toHaveLength(1);
   });
 });

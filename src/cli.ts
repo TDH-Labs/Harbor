@@ -542,7 +542,7 @@ const initCmd = defineCommand({
       "|---------|------|--------|",
       "",
     ].join("\n");
-    const wrote = writeIfChanged(env.agentMap, seed);
+    const wrote = !existsSync(env.agentMap) && writeIfChanged(env.agentMap, seed);
     runGenerate(env);
     console.log(`init: ${wrote ? "wrote" : "kept"} agent_map.md, generated beacons under ${env.root}`);
   },

@@ -137,6 +137,65 @@ export function isProjectDir(env: Environment, path: string): boolean {
   return env.config.projectSignatures.some((sig) => existsSync(join(path, sig)));
 }
 
+/** Immediate subdirs of `~/rooms/` that contain a `room_rules.md` — the room signature file. */
+export function discoverRooms(env: Environment): string[] {
+  if (!existsSync(env.rooms)) return [];
+  const out: string[] = [];
+  for (const name of readdirSync(env.rooms)) {
+    const p = join(env.rooms, name);
+    try {
+      if (statSync(p).isDirectory() && existsSync(join(p, "room_rules.md"))) out.push(name);
+    } catch {
+      // skip unreadable entries
+    }
+  }
+  return out.sort();
+}
+
+/** Normalize a Path cell to the room dir name: "`~/rooms/legal/`" → "legal". */
+function roomDir(path: string): string {
+  return path.replace(/`/g, "").replace(/\/$/, "").split("/").filter(Boolean).pop() ?? "";
+}
+
+/**
+ * Merge newly-discovered room directory names into an agent_map.md content string.
+ * Rooms already present (matched by directory name in the Path column) are left
+ * untouched; only missing rooms are appended to the room table. Returns the
+ * original string unchanged when there is nothing new to add.
+ */
+export function mergeRoomsIntoMap(content: string, roomNames: string[]): string {
+  const existingDirs = new Set(
+    parseRoomTable(content).map((r) => roomDir(r["Path"] ?? "")).filter(Boolean),
+  );
+  const newRooms = roomNames.filter((n) => !existingDirs.has(n));
+  if (newRooms.length === 0) return content;
+
+  const lines = content.split("\n");
+  let lastTableRow = -1;
+  let inRoomSection = false;
+  let inTable = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? "";
+    if (line === "## Rooms") { inRoomSection = true; continue; }
+    if (inRoomSection && line.startsWith("## ")) break;
+    if (inRoomSection && line.includes("| Room")) { inTable = true; continue; }
+    if (inTable) {
+      if (line.trim().startsWith("|")) { lastTableRow = i; }
+      else if (lastTableRow >= 0) break; // blank / non-pipe line after rows = end
+    }
+  }
+
+  if (lastTableRow === -1) return content; // no table found — bail
+
+  const newRows = newRooms.map((name) => `| ${name} | ~/rooms/${name}/ | |`);
+  return [
+    ...lines.slice(0, lastTableRow + 1),
+    ...newRows,
+    ...lines.slice(lastTableRow + 1),
+  ].join("\n");
+}
+
 /** Immediate subdirectories of `~/workspace` (any dir counts as a project). */
 export function discoverWorkspaceProjects(env: Environment): string[] {
   if (!existsSync(env.workspace)) return [];
@@ -395,11 +454,16 @@ export function ensureWorkspaceDir(env: Environment, projectDir: string): void {
 }
 
 /**
- * Full sync: discover projects, scaffold their workspace dirs, then regenerate
- * beacons. Returns the discovered project paths and the generation result.
+ * Full sync: discover rooms + projects, update agent_map.md, scaffold workspace
+ * dirs, then regenerate beacons.
  */
 export function fullSync(env: Environment): { projects: string[]; generate: GenerateResult } {
-  // Generate home beacons first so the project symlinks have a target.
+  // Merge any newly-discovered rooms (~/rooms/<name>/room_rules.md) into agent_map.md.
+  if (existsSync(env.agentMap)) {
+    const content = readFileSync(env.agentMap, "utf8");
+    writeIfChanged(env.agentMap, mergeRoomsIntoMap(content, discoverRooms(env)));
+  }
+
   const generate = runGenerate(env);
   const projects = discoverWorkspaceProjects(env);
   for (const dir of projects) ensureWorkspaceDir(env, dir);
