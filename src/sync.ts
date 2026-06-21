@@ -38,6 +38,7 @@ import {
 import { dirname, join } from "node:path";
 
 import type { Environment } from "./env.ts";
+import { computeAssignments } from "./skills.ts";
 
 /** Ownership marker appended to every home-level beacon. */
 export const SYNC_STAMP = "<!-- agent-env:sync -->";
@@ -347,9 +348,15 @@ export function generateProjectAgentsMd(env: Environment, projectName: string): 
   ].join("\n");
 }
 
-/** Generate a room's skills_index.md from the configured room skill list. */
+/** Generate a room's skills_index.md from all skills assigned to the room
+ * (explicit config list + category mappings), so the index matches what
+ * `harbor skills-list --room <room>` reports. */
 export function generateRoomIndex(env: Environment, room: string): string {
-  const skills = [...env.config.roomSkillSet(room)].sort();
+  const { assignments } = computeAssignments(env);
+  const skills = Object.entries(assignments)
+    .filter(([, r]) => r === room)
+    .map(([name]) => name)
+    .sort();
   const lines = [`# ${room} — Skills Index`, ""];
   if (skills.length === 0) {
     lines.push("_No skills configured for this room._", "");
