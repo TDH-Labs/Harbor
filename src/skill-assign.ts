@@ -18,10 +18,13 @@
  * Downstream contract: `assignOrphans(env, mode, options)` returns the
  * skill→room assignment map produced by the run.
  */
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import type { Config } from "./config.ts";
 import type { Environment } from "./env.ts";
-import { addSkillToRoom, reloadEnv } from "./config-edit.ts";
+import { addSkillToRoom, ensureRoomInConfig, reloadEnv } from "./config-edit.ts";
 import { computeAssignments, getAllSkillNames, getSkillDescription, findSkillDir } from "./skills.ts";
+import { discoverRooms } from "./sync.ts";
 
 /** Words too generic to carry a room signal. */
 const STOPWORDS = new Set([
@@ -65,22 +68,34 @@ function tokenize(text: string): string[] {
 }
 
 /**
- * Build per-room keyword weights from config: a room's own name and assigned
- * skill names are strong signals (weight 4); words from its description are
- * weaker (weight 2). Repeated words accumulate. Pure function of config —
- * deterministic and machine-agnostic.
+ * Build per-room keyword weights from config + filesystem discovery.
+ * Configured rooms (config.roomSkills) provide name + skill + description
+ * signals; rooms discovered from ~/rooms/ but not yet in config contribute
+ * name-only signals (weight 4) so --auto can route to them before they have
+ * an explicit config entry.
  */
-export function deriveRoomSignals(config: Config): Record<string, Map<string, number>> {
+export function deriveRoomSignals(
+  config: Config,
+  discoveredRooms: string[] = [],
+): Record<string, Map<string, number>> {
   const signals: Record<string, Map<string, number>> = {};
+  const add = (weights: Map<string, number>, tokens: string[], weight: number) => {
+    for (const t of tokens) weights.set(t, (weights.get(t) ?? 0) + weight);
+  };
   for (const [room, data] of Object.entries(config.roomSkills)) {
     const weights = new Map<string, number>();
-    const add = (tokens: string[], weight: number) => {
-      for (const t of tokens) weights.set(t, (weights.get(t) ?? 0) + weight);
-    };
-    add(tokenize(room), 4);
-    for (const skill of data.skills ?? []) add(tokenize(skill), 4);
-    add(tokenize(data.description ?? ""), 2);
+    add(weights, tokenize(room), 4);
+    for (const skill of data.skills ?? []) add(weights, tokenize(skill), 4);
+    add(weights, tokenize(data.description ?? ""), 2);
     signals[room] = weights;
+  }
+  // Seed name-only signals for rooms on disk but not yet in config.roomSkills.
+  for (const room of discoveredRooms) {
+    if (!(room in signals)) {
+      const weights = new Map<string, number>();
+      add(weights, tokenize(room), 4);
+      signals[room] = weights;
+    }
   }
   return signals;
 }
@@ -119,7 +134,7 @@ export function getOrphanSkills(env: Environment): OrphanSuggestion[] {
   // orphans by checking explicit + categorized assignment only.
   const { unassigned } = computeAssignments(env);
   const orphanSet = new Set(unassigned);
-  const signals = deriveRoomSignals(env.config);
+  const signals = deriveRoomSignals(env.config, discoverRooms(env));
 
   const out: OrphanSuggestion[] = [];
   for (const name of all) {
@@ -161,7 +176,11 @@ export function assignOrphans(
   if (mode === "room") {
     const room = options.room;
     if (!room) throw new Error("mode 'room' requires options.room");
-    if (!(room in env.config.roomSkills)) throw new Error(`room '${room}' not found in config`);
+    if (!(room in env.config.roomSkills)) {
+      const roomOnDisk = existsSync(join(env.rooms, room, "room_rules.md"));
+      if (!roomOnDisk) throw new Error(`room '${room}' not found in config or on disk`);
+      if (options.write ?? true) ensureRoomInConfig(env, room);
+    }
     for (const o of orphans) assigned[o.name] = room;
   } else {
     // auto
@@ -174,10 +193,13 @@ export function assignOrphans(
   const write = options.write ?? true;
   if (write) {
     for (const [skill, room] of Object.entries(assigned)) {
-      // Skip rooms not present in config (e.g. default_room that is not a
-      // configured room) — addSkillToRoom would throw; the skill simply stays
-      // an orphan, which the report surfaces.
-      if (room in env.config.roomSkills) {
+      // Ensure the room section exists (no-op if already there), then add the
+      // skill. Skip only the built-in default room when it has no config entry —
+      // writing it would create a misleading "curated" section for the catch-all.
+      const inConfig = room in env.config.roomSkills;
+      const isUnconfiguredDefault = !inConfig && room === env.config.skillDefaultRoom;
+      if (!isUnconfiguredDefault) {
+        if (!inConfig) ensureRoomInConfig(env, room);
         addSkillToRoom(env, skill, room);
       }
     }

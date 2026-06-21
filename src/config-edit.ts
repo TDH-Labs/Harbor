@@ -38,11 +38,36 @@ export interface EditResult {
 type TomlTable = Record<string, any>;
 
 /**
+ * Ensure `[skills.rooms.<room>]` exists in the environment's config.toml,
+ * creating it (with an empty skills list) if absent. Safe to call repeatedly —
+ * no-op when the section already exists. Throws when there is no config file.
+ */
+export function ensureRoomInConfig(env: Environment, room: string): EditResult {
+  const path = env.configPath;
+  if (!path) {
+    throw new ConfigEditError("no config file path available (environment built from defaults)");
+  }
+
+  const raw = readFileSync(path, "utf8");
+  const data = parseToml(raw) as TomlTable;
+
+  data.skills ??= {};
+  data.skills.rooms ??= {};
+  const rooms = data.skills.rooms as TomlTable;
+  if (room in rooms) return { changed: false, path };
+
+  rooms[room] = { skills: [] };
+  writeFileSync(path, stringifyToml(data) + "\n");
+  return { changed: true, path };
+}
+
+/**
  * Add `skill` to `[skills.rooms.<room>].skills` in the environment's config.toml.
  *
  * Throws {@link ConfigEditError} if no config file is associated with the
- * environment or the room section is absent (callers route by checking the room
- * exists first). Adding a skill already in the list is a no-op (`changed:false`).
+ * environment or the room section is absent. Use {@link ensureRoomInConfig}
+ * first when the room may not exist yet. Adding a skill already in the list is
+ * a no-op (`changed:false`).
  */
 export function addSkillToRoom(env: Environment, skill: string, room: string): EditResult {
   const path = env.configPath;

@@ -19,7 +19,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { Environment } from "./env.ts";
-import { addSkillToRoom, reloadEnv } from "./config-edit.ts";
+import { addSkillToRoom, ensureRoomInConfig, reloadEnv } from "./config-edit.ts";
 import { generateRoomIndexes } from "./skills.ts";
 import { deriveRoomSignals, scoreSkillForRooms } from "./skill-assign.ts";
 
@@ -95,8 +95,13 @@ export function install(
   if (!existsSync(source)) {
     throw new SkillInstallError(`source path does not exist: ${source}`);
   }
+  // Accept rooms that exist on disk (~/rooms/<name>/room_rules.md) even when
+  // not yet in config — create the entry automatically. Reject truly unknown
+  // rooms (not in config AND not on disk) with the original error.
   if (options.room && !(options.room in env.config.roomSkills)) {
-    throw new SkillInstallError(`room '${options.room}' not found in config`);
+    const roomOnDisk = existsSync(join(env.rooms, options.room, "room_rules.md"));
+    if (!roomOnDisk) throw new SkillInstallError(`room '${options.room}' not found in config`);
+    ensureRoomInConfig(env, options.room);
   }
 
   // Determine the description for routing (without copying anything yet).
@@ -120,14 +125,15 @@ export function install(
     installSingleFile(source, name, installedPath);
   }
 
-  // Route to room (only if it's a configured room — default may not be).
-  // ORDERING IS LOAD-BEARING: the config write, the reload, and the index
-  // regeneration are all synchronous and must complete before install() returns,
-  // so a caller that inspects the room index immediately after never races a
-  // pending write. Keep these calls synchronous — do not defer the index write to
-  // a microtask/background task. Pinned by skill-install.test.ts
-  // ("index write is synchronous and complete before install() returns").
-  if (room in env.config.roomSkills) {
+  // Route to room. addSkillToRoom creates the room section if absent, so any
+  // named room (explicit or auto-routed) can be written immediately.
+  // Skip only when room resolves to the built-in default (e.g. "general") and
+  // that default has no config section — writing it would create a misleading
+  // entry implying the default is curated.
+  // ORDERING IS LOAD-BEARING: config write → reload → index must be synchronous.
+  const isConfiguredRoom = room in env.config.roomSkills;
+  const isDefaultRoom = room === env.config.skillDefaultRoom && !isConfiguredRoom;
+  if (!isDefaultRoom) {
     addSkillToRoom(env, name, room);
     generateRoomIndexes(reloadEnv(env));
   } else {
