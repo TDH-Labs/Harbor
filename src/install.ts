@@ -395,8 +395,10 @@ function mergeGoose(
   ctx: { command: string; args: string[]; serverName: string },
 ): MergeOutcome {
   // Already installed? (a `<2-space>harbor:` key under extensions). Idempotent.
-  const presentRe = new RegExp(`^  ${ctx.serverName}:\\s*$`, "m");
-  if (presentRe.test(existing)) return { content: existing, action: "unchanged" };
+  // Line-equality (not a dynamic RegExp) so a server name with regex
+  // metacharacters can't mis-match — and there's no ReDoS surface.
+  const present = existing.split("\n").some((l) => l.trimEnd() === `  ${ctx.serverName}:`);
+  if (present) return { content: existing, action: "unchanged" };
 
   if (!existed || !existing.trim()) {
     return { content: renderGooseExtension(ctx.serverName, ctx.command, ctx.args, 0) + "\n", action: "created" };
