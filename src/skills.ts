@@ -154,7 +154,14 @@ export function getAllSkillNames(env: Environment): string[] {
   for (const name of safeReaddir(pool)) {
     const entry = join(pool, name);
     if (!isDirOrSymlink(entry)) continue;
-    names.add(name);
+    // A top-level entry counts as a skill only if it IS one — i.e. it has its
+    // own SKILL.md (existsSync follows symlinks, so a flat symlink-to-skill
+    // counts and a broken/dangling symlink does not). A real directory WITHOUT
+    // its own SKILL.md is a category container (e.g. `mattpocock-eng/` holding
+    // symlinks to room-local skills), not a skill — skip it as a name but still
+    // surface the nested skills it groups. Without this guard, category dirs
+    // were counted as phantom skills and dumped into the default room.
+    if (existsSync(join(entry, "SKILL.md"))) names.add(name);
     if (isRealDir(entry)) {
       for (const sub of safeReaddir(entry)) {
         if (existsSync(join(entry, sub, "SKILL.md"))) names.add(sub);

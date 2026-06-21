@@ -113,6 +113,27 @@ describe("pool discovery", () => {
   test("empty/missing pool yields no skills", () => {
     expect(getAllSkillNames(env())).toEqual([]);
   });
+
+  test("a category dir without its own SKILL.md is NOT a phantom skill", () => {
+    const pool = join(dir, ".agents", "skills");
+    // `category/` holds two real skills but has no SKILL.md of its own.
+    writeSkill("real-a", "name: real-a", join(pool, "category"));
+    writeSkill("real-b", "name: real-b", join(pool, "category"));
+    const names = getAllSkillNames(env());
+    expect(names).toContain("real-a");
+    expect(names).toContain("real-b");
+    expect(names).not.toContain("category"); // the container is not a skill
+  });
+
+  test("a broken/dangling symlink in the pool is not counted", () => {
+    const pool = join(dir, ".agents", "skills");
+    writeSkill("present", "name: present");
+    mkdirSync(pool, { recursive: true });
+    symlinkSync(join(dir, "does-not-exist"), join(pool, "dangling"));
+    const names = getAllSkillNames(env());
+    expect(names).toContain("present");
+    expect(names).not.toContain("dangling");
+  });
 });
 
 describe("room assignment", () => {
