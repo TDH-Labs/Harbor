@@ -2,7 +2,7 @@
 
 > *Tugboat pulls you into Harbor.*
 
-> **⚠️ Alpha (`0.1.0`) — unproven, expect breakage.** Feature-complete and green in CI, but
+> **⚠️ Alpha (`0.1.1`) — unproven, expect breakage.** Feature-complete and green in CI, but
 > not yet validated in real-world use. Expect bugs and breaking changes between versions —
 > don't build on it yet. Found something off? [Open an issue](../../issues).
 
@@ -36,7 +36,7 @@ The npm commands light up at beta.
 
 ```bash
 # Alpha (now) — from the release tarball
-npm i -g ./harbor-tugboat-0.1.0.tgz
+npm i -g ./harbor-tugboat-0.1.1.tgz
 
 # …or straight from the repo
 bun add github:TDH-Labs/Harbor

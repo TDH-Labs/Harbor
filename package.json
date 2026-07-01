@@ -1,6 +1,6 @@
 {
   "name": "harbor-tugboat",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Agent control plane — scheduler, compaction, isolation, session tracking.",
   "type": "module",
   "license": "MIT",
