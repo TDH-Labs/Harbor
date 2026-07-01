@@ -36,7 +36,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import {
   AccessDenied,
   AgentSession,
-  type Capability,
+  Capability,
 } from "./isolation.ts";
 import { Environment } from "./env.ts";
 import { deny, emitHypervisorEvent } from "./audit.ts";
@@ -48,6 +48,20 @@ const nowSec = (): number => Date.now() / 1000;
 
 /** Tools whose first argument is a skill name and so get room-skill allowlist gating. */
 const SKILL_GATED_TOOLS = new Set<string>(["read_skill", "read_skill_digest"]);
+
+/**
+ * Tools whose first argument is an optional ROOM OVERRIDE (list-shaped tools:
+ * "show me another room's pool"). A room override differing from the session's
+ * own room is a cross-room enumeration and is permitted only for an ADMIN
+ * session (REVIEW_06.md finding #5). This mirrors the guard `ab47ef7` (B1)
+ * added inside each integration's own `listSkillsImpl` — but hardens it AT THE
+ * PRIMITIVE instead of only inside those two hand-written functions, so a
+ * future caller that wires `gate('list_skills', (room) => listSkills(env,
+ * room))` directly inherits the check structurally instead of needing to
+ * reimplement it (and risking the exact hole B1 fixed reopening at a new call
+ * site with no test to catch it).
+ */
+const ROOM_OVERRIDE_GATED_TOOLS = new Set<string>(["list_skills"]);
 
 /** Ambient gate context: which session/environment wrapped calls run under. */
 export interface GateContext {
@@ -170,6 +184,33 @@ export function gate<A extends unknown[], R>(
         timestamp: nowSec(),
       });
       throw new AccessDenied(reason, { session, capability: tool, resource });
+    }
+
+    // 3. Room-override check for tools whose first arg is an optional room
+    // name to enumerate (e.g. `list_skills(room?)`). A caller may always see
+    // their own room; asking for a DIFFERENT room requires ADMIN.
+    if (ROOM_OVERRIDE_GATED_TOOLS.has(tool)) {
+      const override = args[0] as string | undefined;
+      if (override && override !== session.room && !session.has(Capability.ADMIN)) {
+        const reason = `room '${session.room}' may not access room '${override}' via '${tool}'`;
+        deny(session.sessionId, tool, override, reason, {
+          room: session.room,
+          agentId: session.agentId,
+          env,
+        });
+        emitHypervisorEvent({
+          kind: "gate",
+          event: "room_override_denied",
+          decision: "denied",
+          sessionId: session.sessionId,
+          room: session.room,
+          capability: tool,
+          resource: override,
+          reason,
+          timestamp: nowSec(),
+        });
+        throw new AccessDenied(reason, { session, capability: tool, resource: override });
+      }
     }
 
     emitHypervisorEvent({

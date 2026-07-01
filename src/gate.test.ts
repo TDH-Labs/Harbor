@@ -93,15 +93,72 @@ describe("gate", () => {
     expect(ran).toBe(false);
   });
 
-  test("non-skill tools gate on capability only (no room-skill allowlist)", async () => {
+  test("tools with no special gating pass their first arg through untouched", async () => {
     const e = env();
-    // marketing has list_skills; the first arg is NOT treated as a room-gated skill.
-    const listSkills = gate("list_skills", async (q: string) => `list:${q}`);
+    // Not in SKILL_GATED_TOOLS or ROOM_OVERRIDE_GATED_TOOLS — the arg is opaque.
+    // Session needs the capability explicitly since "some_other_tool" isn't a
+    // room-configured one (unlike "list_skills" in the env() helper below).
+    const someOtherTool = gate("some_other_tool", async (q: string) => `list:${q}`);
     const result = await runWithGateContext(
-      { env: e, session: createSession({ room: "marketing", env: e }) },
-      () => listSkills("anything"),
+      { env: e, session: createSession({ room: "marketing", env: e, capabilities: ["some_other_tool"] }) },
+      () => someOtherTool("anything"),
     );
     expect(result).toBe("list:anything");
+  });
+
+  // Regression for REVIEW_06.md finding #5: the B1 room-override guard (ab47ef7)
+  // lived only inside each integration's hand-written listSkillsImpl, so a NEW
+  // caller wiring gate('list_skills', ...) directly — with no reimplementation
+  // of that check — would reopen the identical hole. These prove the primitive
+  // itself now enforces it, independent of what the wrapped function does.
+  describe("list_skills room-override gating (hardened at the primitive)", () => {
+    test("a naive wrapped fn with ZERO internal guard is still blocked cross-room", async () => {
+      const e = env();
+      // Deliberately naive: unlike the real listSkillsImpl, this does no auth
+      // check of its own — exactly the "new caller" scenario the review warned
+      // would reopen B1 if the guard only lived in the integrations.
+      const naiveListSkills = gate("list_skills", async (room?: string) => `raw:${room}`);
+      const session = createSession({ room: "marketing", env: e });
+      await expect(
+        runWithGateContext({ env: e, session }, () => naiveListSkills("legal")),
+      ).rejects.toThrow(AccessDeniedError);
+    });
+
+    test("own room (explicit or omitted) is always allowed", async () => {
+      const e = env();
+      const naiveListSkills = gate("list_skills", async (room?: string) => `raw:${room}`);
+      const session = createSession({ room: "marketing", env: e });
+      expect(
+        await runWithGateContext({ env: e, session }, () => naiveListSkills("marketing")),
+      ).toBe("raw:marketing");
+      expect(
+        await runWithGateContext({ env: e, session }, () => naiveListSkills(undefined)),
+      ).toBe("raw:undefined");
+    });
+
+    test("an ADMIN session may override to a different room", async () => {
+      const e = env();
+      const naiveListSkills = gate("list_skills", async (room?: string) => `raw:${room}`);
+      const session = createSession({ room: "marketing", env: e, capabilities: ["list_skills", "admin"] });
+      expect(
+        await runWithGateContext({ env: e, session }, () => naiveListSkills("legal")),
+      ).toBe("raw:legal");
+    });
+
+    test("the cross-room denial is audited", async () => {
+      const e = env();
+      const naiveListSkills = gate("list_skills", async (room?: string) => `raw:${room}`);
+      const session = createSession({ room: "marketing", env: e });
+      await expect(
+        runWithGateContext({ env: e, session }, () => naiveListSkills("legal")),
+      ).rejects.toThrow(AccessDeniedError);
+      const denials = audit.recent({ env: e, limit: 10 });
+      expect(
+        denials.some(
+          (d) => d.capability === "list_skills" && d.resource === "legal" && d.decision === "denied",
+        ),
+      ).toBe(true);
+    });
   });
 
   test("currentGateContext returns the bound context inside a scope", () => {
