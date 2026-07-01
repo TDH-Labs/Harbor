@@ -12,6 +12,7 @@ import {
   generateMasterIndex,
   generateRoomIndexes,
   getAllSkillNames,
+  findSkillDir,
   getSkill,
   getSkillDescription,
   listSkills,
@@ -207,6 +208,20 @@ describe("listSkills / getSkill", () => {
 
     const r2 = listSkills(e, "r2");
     expect(r2.map((s) => s.name)).toEqual(["bb"]);
+  });
+
+  // Regression for the REVIEW_06.md NO-GO finding: findSkillDir/getSkill used
+  // to `join(pool, name)` and trust the result without checking it stayed
+  // inside the pool, so a `..`-bearing `name` walked out to an arbitrary
+  // directory on disk (an arbitrary-directory-read). A skill outside the pool
+  // entirely (not just outside the "flat" layer) must never be reachable.
+  test("getSkill/findSkillDir refuse a `..`-escaping name outside the pool", () => {
+    const secretDir = join(dir, "secret-room", "sensitive-skill");
+    mkdirSync(secretDir, { recursive: true });
+    writeFileSync(join(secretDir, "SKILL.md"), "---\nname: sensitive-skill\n---\n\n# secret\n");
+    const e = env({ rooms: { r: { description: "R", skills: [] } } });
+    expect(findSkillDir(e, "../secret-room/sensitive-skill")).toBeNull();
+    expect(getSkill(e, "../secret-room/sensitive-skill")).toBeNull();
   });
 
   test("getSkill returns full content; null for missing", () => {

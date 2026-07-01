@@ -80,13 +80,13 @@ id = "architect"
 purpose = "Grill the request into an unambiguous spec; own scope."
 archetype = "deepest-reasoning"      # capability requirement, not a model
 min_context = 100000
-rooms = ["superpowers"]              # beats this role works in
+rooms = ["core"]                     # beats this role works in
 
 [[roles]]
 id = "coder"
 purpose = "Implement against the spec."
 archetype = "strong-code"
-rooms = ["devops", "superpowers"]
+rooms = ["devops", "core"]
 
 [[roles]]
 id = "test_engineer"
@@ -98,7 +98,7 @@ rooms = ["devops"]
 id = "critic_oversight"
 purpose = "Final say on DONE; refuse on missing evidence."
 archetype = "deepest-reasoning"
-rooms = ["superpowers"]
+rooms = ["core"]
 
 # Gates are ENFORCED, not suggested. Each maps to a skill that can fail-stop.
 [[gates]]

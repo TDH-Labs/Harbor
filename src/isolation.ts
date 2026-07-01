@@ -27,7 +27,7 @@ import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 
 import { DEFAULT_CAPABILITIES } from "./config.ts";
 import { openDb } from "./db.ts";
@@ -194,7 +194,7 @@ export function checkMcpAccess(
   return session.roomMcpAllowed(env, mcpServer);
 }
 
-/** Data access: capability + the DB must live under `data/<room>/` (or ADMIN). */
+/** Data access: capability + the DB must resolve under `data/<room>/` (or ADMIN). */
 export function checkDataAccess(
   session: AgentSession,
   dbPath: string,
@@ -202,11 +202,12 @@ export function checkDataAccess(
 ): boolean {
   if (!session.has(Capability.DATA_READ)) return false;
   if (session.has(Capability.ADMIN)) return true;
-  const normalized = stripBase(dbPath, env);
-  return normalized.startsWith(`data/${session.room}/`);
+  const base = env ? env.root : homedir();
+  const roomRoot = join(base, "data", session.room);
+  return isPathWithin(resolve(base, dbPath), roomRoot);
 }
 
-/** File access: capability + the path must live under `workspace/<room>/` (or ADMIN). */
+/** File access: capability + the path must resolve under `workspace/<room>/` (or ADMIN). */
 export function checkFileAccess(
   session: AgentSession,
   filePath: string,
@@ -216,14 +217,24 @@ export function checkFileAccess(
   const cap = mode === "write" ? Capability.FILE_WRITE : Capability.FILE_READ;
   if (!session.has(cap)) return false;
   if (session.has(Capability.ADMIN)) return true;
-  const normalized = stripBase(filePath, env);
-  return normalized.startsWith(`workspace/${session.room}/`);
+  const base = env ? env.root : homedir();
+  const roomRoot = join(base, "workspace", session.room);
+  return isPathWithin(resolve(base, filePath), roomRoot);
 }
 
-function stripBase(p: string, env?: Environment): string {
-  const base = env ? env.root : homedir();
-  const stripped = p.startsWith(base) ? p.slice(base.length) : p;
-  return stripped.replace(/^\/+/, "");
+/**
+ * True iff `candidate` (already absolute) resolves to `root` itself or
+ * somewhere strictly inside it. Both sides are re-resolved so a caller-
+ * supplied `..` segment can't walk the check out of the room (the bug this
+ * replaces: a plain string `startsWith`/`slice` prefix check accepted
+ * unnormalized paths like `workspace/<room>/../<other-room>/secret.md`,
+ * which strips to a string that *starts with* the allowed prefix while
+ * actually resolving outside it).
+ */
+function isPathWithin(candidate: string, root: string): boolean {
+  const resolvedRoot = resolve(root);
+  const resolvedCandidate = resolve(candidate);
+  return resolvedCandidate === resolvedRoot || resolvedCandidate.startsWith(resolvedRoot + sep);
 }
 
 // ── Audit logging ────────────────────────────────────────────────────────────

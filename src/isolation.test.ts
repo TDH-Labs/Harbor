@@ -140,6 +140,33 @@ describe("data/file gating with ADMIN bypass", () => {
     expect(checkFileAccess(s, join(dir, "workspace/legal/draft.md"), "write", env)).toBe(false); // no file_write
     expect(checkFileAccess(s, join(dir, "workspace/marketing/x.md"), "read", env)).toBe(false);
   });
+
+  // Regression for the REVIEW_06.md NO-GO finding: an unnormalized `..` segment
+  // must not let a path-string prefix check pass while the path actually
+  // resolves outside the room. Both an absolute-with-`..` and a bare relative
+  // `..`-bearing input are covered — either shape used to slip past the old
+  // plain `startsWith`/`slice` check.
+  test("file access denies a `..`-escaping path even though it string-prefixes the allowed room", () => {
+    const env = envWithRooms({});
+    const s = new AgentSession({ room: "legal", capabilities: ["file_read"] });
+    const escaping = join(dir, "workspace/legal/../finance/secret.md");
+    expect(checkFileAccess(s, escaping, "read", env)).toBe(false);
+    // sanity: the same file, addressed directly, resolves to the same denial
+    expect(checkFileAccess(s, join(dir, "workspace/finance/secret.md"), "read", env)).toBe(false);
+  });
+
+  test("file access denies a bare relative `..`-escaping path", () => {
+    const env = envWithRooms({});
+    const s = new AgentSession({ room: "legal", capabilities: ["file_read"] });
+    expect(checkFileAccess(s, "workspace/legal/../finance/secret.md", "read", env)).toBe(false);
+  });
+
+  test("data access denies a `..`-escaping db path", () => {
+    const env = envWithRooms({});
+    const reader = new AgentSession({ room: "legal", capabilities: ["data_read"] });
+    const escaping = join(dir, "data/legal/../finance/books.db");
+    expect(checkDataAccess(reader, escaping, env)).toBe(false);
+  });
 });
 
 describe("audit log", () => {

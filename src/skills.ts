@@ -171,20 +171,39 @@ export function getAllSkillNames(env: Environment): string[] {
   return [...names].sort();
 }
 
-/** Locate a skill's directory across the flat and nested layouts, or null. */
+/**
+ * Locate a skill's directory across the flat and nested layouts, or null.
+ *
+ * `name` is caller/agent-supplied and must never be trusted to stay inside the
+ * pool: `join(pool, name)` normalizes `..` segments but happily walks the
+ * result outside `pool` (e.g. `name = "../../rooms/legal-private/secret-skill"`
+ * previously resolved and returned a directory well outside the shared skill
+ * pool — an arbitrary-directory read). Every candidate is resolved and checked
+ * against its intended parent before being accepted.
+ */
 export function findSkillDir(env: Environment, name: string): string | null {
   const pool = env.skillsDir;
   const flat = join(pool, name);
-  if (existsSync(flat)) return flat;
+  if (isWithinDir(flat, pool) && existsSync(flat)) return flat;
   if (existsSync(pool)) {
     for (const cat of safeReaddir(pool)) {
       const catDir = join(pool, cat);
       if (!isRealDir(catDir)) continue;
       const nested = join(catDir, name);
-      if (existsSync(nested)) return nested;
+      if (isWithinDir(nested, catDir) && existsSync(nested)) return nested;
     }
   }
   return null;
+}
+
+/** True iff resolved `candidate` is `parent` itself or strictly inside it. */
+function isWithinDir(candidate: string, parent: string): boolean {
+  const resolvedParent = resolvePath(parent);
+  const resolvedCandidate = resolvePath(candidate);
+  return (
+    resolvedCandidate === resolvedParent ||
+    resolvedCandidate.startsWith(resolvedParent + "/")
+  );
 }
 
 // ── Room assignment ────────────────────────────────────────────────────────--

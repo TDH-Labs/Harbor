@@ -59,7 +59,7 @@ jobs:
             --include="*.md" \
             --include="*.json" \
             --include="*.toml" \
-            src integrations README.md \
+            src integrations docs README.md \
             2>/dev/null | grep -vE '\.test\.ts$' || true)
           if [ -n "$FOUND" ]; then
             echo "De-personalization gate FAILED — user-home paths found in:"

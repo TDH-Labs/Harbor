@@ -9,6 +9,11 @@ dist/
 # Internal build/phase notes — never part of the public release.
 PHASE*_NOTES.md
 
+# Gate review sign-offs — may name real identities/emails (REVIEW_06.md's own
+# §5 does, e.g. the deploy identity). Never part of the public release; keep
+# local only, never `git add -A`/`git add .` this in.
+REVIEW_*.md
+
 # Operator-private de-personalization blocklist (personal room/workflow/vendor
 # names). Loaded by src/depersonalization.test.ts when present; never committed.
 .depers-blocklist.local.json
