@@ -406,16 +406,40 @@ function titleizeRoom(room: string): string {
     .join(" ");
 }
 
-/** Render one room's `skills_index.md` text (progressive-disclosure layout). */
+/**
+ * Strip an optional "room/" prefix from a sub-domain hint, returning the bare
+ * label. "legal/litigation" → "litigation"; "litigation" → "litigation".
+ */
+function subdomainLabel(hint: string): string {
+  const slash = hint.indexOf("/");
+  return (slash >= 0 ? hint.slice(slash + 1) : hint).trim();
+}
+
+/**
+ * Render one room's `skills_index.md` text (progressive-disclosure layout).
+ * When per-skill sub-domain hints are configured (`[skills.skill_subdomain]`),
+ * skills are grouped under `##` sub-sections sorted alphabetically ("other"
+ * last); with no hints configured, all skills render in a single flat table.
+ * This is the single source of truth for room index content — both `harbor
+ * sync` (via `generateRoomIndex` in sync.ts) and every skill-mutation command
+ * (`skill-install`, `skill-create`, `skill-room-add`, `skills-list`, via
+ * `generateRoomIndexes` below) render through this function, so the file
+ * never flips between two incompatible formats depending on which ran last.
+ */
 export function renderRoomIndex(
   env: Environment,
   room: string,
   description: string,
   skillsInRoom: string[],
 ): string {
+  const title = `${titleizeRoom(room)} Skills Index`;
+  if (skillsInRoom.length === 0) {
+    return [`# ${title}`, "", "_No skills configured for this room._", ""].join("\n");
+  }
+
   const poolTemplate = env.config.skillsDirTemplate.replace(/\/$/, "");
   const lines: string[] = [
-    `# ${titleizeRoom(room)} Skills Index`,
+    `# ${title}`,
     "",
     `> ${description}`,
     `> Skills in this room: ${skillsInRoom.length}`,
@@ -428,13 +452,43 @@ export function renderRoomIndex(
     `2. **Read** only that skill's SKILL.md: \`cat ${poolTemplate}/<name>/SKILL.md\``,
     "3. **Follow** the skill's instructions — it will tell you exactly what to do",
     "",
-    "| Skill | Description |",
-    "|-------|-------------|",
   ];
-  for (const name of [...skillsInRoom].sort()) {
-    const desc = getSkillDescription(findSkillDir(env, name) ?? join(env.skillsDir, name));
-    lines.push(`| ${name} | ${desc || "(see SKILL.md for details)"} |`);
+
+  const tableRows = (names: string[]): string[] =>
+    [...names].sort().map((name) => {
+      const desc = getSkillDescription(findSkillDir(env, name) ?? join(env.skillsDir, name));
+      return `| ${name} | ${desc || "(see SKILL.md for details)"} |`;
+    });
+
+  const hints = env.config.skillSubdomains;
+  const grouped: Record<string, string[]> = {};
+  for (const s of skillsInRoom) {
+    const hint = hints[s];
+    const group = hint ? subdomainLabel(hint) || "other" : "other";
+    (grouped[group] ??= []).push(s);
   }
+  const groups = Object.keys(grouped);
+
+  if (groups.length === 1 && groups[0] === "other") {
+    // No sub-domain hints configured — single flat table (back-compat).
+    lines.push("| Skill | Description |", "|-------|-------------|", ...tableRows(skillsInRoom));
+  } else {
+    // "other" sorts last; the rest alphabetically.
+    const ordered = groups.sort((a, b) =>
+      a === "other" ? 1 : b === "other" ? -1 : a.localeCompare(b),
+    );
+    for (const g of ordered) {
+      lines.push(
+        `## ${g}`,
+        "",
+        "| Skill | Description |",
+        "|-------|-------------|",
+        ...tableRows(grouped[g] as string[]),
+        "",
+      );
+    }
+  }
+
   lines.push(
     "",
     "## Adding Skills to This Room",

@@ -114,11 +114,12 @@ describe("beacon generation", () => {
     expect(idx.indexOf("case-brief")).toBeLessThan(idx.indexOf("nda-review"));
   });
 
-  test("room index is a flat list when no sub-domain hints are configured", () => {
+  test("room index is a flat table when no sub-domain hints are configured", () => {
     const e = env({ legal: { skills: ["nda-review", "case-brief"] } });
     const idx = generateRoomIndex(e, "legal");
-    expect(idx).not.toContain("## "); // no sub-sections
-    expect(idx).toContain("- case-brief");
+    // Only the two fixed section headings — no per-skill sub-domain grouping.
+    expect(idx.split("## ").length - 1).toBe(2);
+    expect(idx).toContain("| case-brief |");
   });
 
   test("room index groups skills under sub-domain headers when hints exist", () => {
@@ -143,8 +144,8 @@ describe("beacon generation", () => {
     // grouped membership
     const contractsIdx = idx.indexOf("## contracts");
     const litigationIdx = idx.indexOf("## litigation");
-    expect(idx.indexOf("- nda-review")).toBeGreaterThan(contractsIdx);
-    expect(idx.indexOf("- deposition-prep")).toBeGreaterThan(litigationIdx);
+    expect(idx.indexOf("| nda-review |")).toBeGreaterThan(contractsIdx);
+    expect(idx.indexOf("| deposition-prep |")).toBeGreaterThan(litigationIdx);
   });
 
   test("hint-less skills fall under '## other', rendered last", () => {
@@ -159,7 +160,7 @@ describe("beacon generation", () => {
     const idx = generateRoomIndex(new Environment(dir, cfg), "legal");
     expect(idx).toContain("## other");
     expect(idx.indexOf("## contracts")).toBeLessThan(idx.indexOf("## other"));
-    expect(idx.indexOf("- loose-skill")).toBeGreaterThan(idx.indexOf("## other"));
+    expect(idx.indexOf("| loose-skill |")).toBeGreaterThan(idx.indexOf("## other"));
   });
 });
 
