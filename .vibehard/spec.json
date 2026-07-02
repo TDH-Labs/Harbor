@@ -1,0 +1,24 @@
+{
+  "name": "Harbor",
+  "summary": "TypeScript agent control plane — scheduler, compaction, isolation, session tracking, and hypervisor primitives (spawn / budget / gate / audit / evict). Installed by other coding agents to gate their own permissions and resource use.",
+  "features": [
+    "Room-scoped capability isolation for agent sessions",
+    "Hypervisor primitives: spawn, budget, gate, audit, evict",
+    "Token-budget enforcement with atomic debit",
+    "Append-only audit log of capability denials",
+    "Skill pool organization and per-room index generation",
+    "MCP server + per-agent install config emission (6 agent targets + Pi)"
+  ],
+  "users": "AI coding agents (Claude Code, Cursor, opencode, Codex, Gemini, Goose) and the operator who installs Harbor on their machine",
+  "tenancy": "single-user",
+  "auth": "none",
+  "storesData": true,
+  "dataEntities": [
+    { "name": "session", "fields": ["sessionId", "room", "agentId", "createdAt"], "sensitive": false },
+    { "name": "audit_log", "fields": ["timestamp", "sessionId", "room", "capability", "resource", "decision", "reason"], "sensitive": false },
+    { "name": "budget", "fields": ["sessionId", "room", "tokenLimit", "tokensUsed"], "sensitive": false }
+  ],
+  "sensitiveData": ["none"],
+  "realUsers": true,
+  "maintained": true
+}

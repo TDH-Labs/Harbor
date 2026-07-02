@@ -59,7 +59,8 @@
   },
   "scripts": {
     "test": "bun test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build": "bun build --compile ./src/cli.ts --outfile dist/harbor"
   },
   "dependencies": {
     "@clack/prompts": "^1.6.0",
