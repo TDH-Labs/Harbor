@@ -11,6 +11,7 @@ import {
   discoverAll,
   discoverRooms,
   discoverWorkspaceProjects,
+  ensureSymlink,
   ensureWorkspaceDir,
   fullSync,
   generateHomeAgentsMd,
@@ -310,6 +311,43 @@ describe("mergeRoomsIntoMap", () => {
     const names = rows.map((r) => r["Room"]);
     expect(names.filter((n) => n === "legal")).toHaveLength(1); // no duplicate
     expect(names).toContain("marketing");
+  });
+
+  test("merges into a room table under a non-'## Rooms' heading (lenient detection)", () => {
+    // A hand-edited map whose section is titled differently must still get new
+    // rooms appended — parseRoomTable reads it, so merge must too.
+    const map = SAMPLE_MAP.replace("## Rooms", "## Room Directory");
+    const result = mergeRoomsIntoMap(map, ["legal", "devops", "research"]);
+    const rows = parseRoomTable(result);
+    expect(rows.map((r) => r["Room"])).toContain("research");
+    expect(rows).toHaveLength(3);
+    // The Projects table below must be untouched.
+    expect(parseProjectTable(result).map((r) => r["Project"])).toContain("harbor");
+  });
+});
+
+describe("ensureSymlink", () => {
+  test("replaces an existing real non-empty directory without throwing", () => {
+    const link = join(dir, "AGENTS.md");
+    // Simulate a stray real directory sitting where a symlink should go.
+    mkdirSync(join(link, "nested"), { recursive: true });
+    writeFileSync(join(link, "nested", "stray.txt"), "x");
+    const target = join(dir, "real-target.md");
+    writeFileSync(target, "# target");
+
+    expect(() => ensureSymlink(link, target)).not.toThrow();
+    expect(readlinkSync(link)).toBe(target);
+  });
+
+  test("replaces an existing symlink", () => {
+    const link = join(dir, "beacon.md");
+    const a = join(dir, "a.md");
+    const b = join(dir, "b.md");
+    writeFileSync(a, "a");
+    writeFileSync(b, "b");
+    ensureSymlink(link, a);
+    ensureSymlink(link, b);
+    expect(readlinkSync(link)).toBe(b);
   });
 });
 

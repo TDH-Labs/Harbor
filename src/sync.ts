@@ -200,22 +200,27 @@ export function mergeRoomsIntoMap(content: string, roomNames: string[]): string 
   if (newRooms.length === 0) return content;
 
   const lines = content.split("\n");
-  let lastTableRow = -1;
-  let inRoomSection = false;
-  let inTable = false;
 
+  // Locate the room table leniently — by its `| Room` header line, wherever it
+  // sits — matching parseRoomTable's own detection (it scans every line for
+  // "| Room" regardless of the section heading). The previous version required
+  // the exact literal `## Rooms` heading, so a hand-edited map whose section was
+  // titled e.g. `## Room Directory` was parsed fine for rendering but silently
+  // skipped here: mergeRoomsIntoMap returned the content unchanged and fullSync
+  // reported success while never persisting the newly-discovered rooms.
+  let headerRow = -1;
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i] ?? "";
-    if (line === "## Rooms") { inRoomSection = true; continue; }
-    if (inRoomSection && line.startsWith("## ")) break;
-    if (inRoomSection && line.includes("| Room")) { inTable = true; continue; }
-    if (inTable) {
-      if (line.trim().startsWith("|")) { lastTableRow = i; }
-      else if (lastTableRow >= 0) break; // blank / non-pipe line after rows = end
-    }
+    if ((lines[i] ?? "").includes("| Room")) { headerRow = i; break; }
   }
+  if (headerRow === -1) return content; // no room table found — bail
 
-  if (lastTableRow === -1) return content; // no table found — bail
+  // From the header, extend through the contiguous run of table rows (separator
+  // + data rows are all pipe lines); stop at the first blank/non-pipe line.
+  let lastTableRow = headerRow;
+  for (let i = headerRow + 1; i < lines.length; i++) {
+    if ((lines[i] ?? "").trim().startsWith("|")) lastTableRow = i;
+    else break;
+  }
 
   const newRows = newRooms.map((name) => `| ${name} | ~/rooms/${name}/ | |`);
   return [
@@ -458,7 +463,11 @@ export function writeIfChanged(path: string, content: string): boolean {
 /** Point `linkPath` at `target` as a symlink, replacing any existing entry. */
 export function ensureSymlink(linkPath: string, target: string): void {
   try {
-    if (lstatSync(linkPath)) rmSync(linkPath, { force: true });
+    // `recursive` so an existing *real* directory (not just a file/symlink) at
+    // linkPath is removed too — without it rmSync throws ENOTEMPTY, which the
+    // catch below swallows, and the unguarded symlinkSync then throws EEXIST and
+    // aborts the whole sync run instead of cleanly replacing the entry.
+    if (lstatSync(linkPath)) rmSync(linkPath, { recursive: true, force: true });
   } catch {
     // nothing there
   }
