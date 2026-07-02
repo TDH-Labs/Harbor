@@ -45,8 +45,17 @@ export interface SkillRecord {
   name: string;
   /** One-line description from SKILL.md frontmatter, or "" if none. */
   description: string;
-  /** Room this skill is assigned to (default room if otherwise unassigned). */
+  /**
+   * Primary room this skill displays under (default room if otherwise
+   * unassigned). A skill may be GRANTED in more than one room (config can list
+   * the same skill under several `[skills.rooms.*]` sections — the actual
+   * access check, `roomSkillAllowed`, reads each room's own list directly and
+   * is unaffected by this field). `room` picks one for single-room display
+   * contexts; see {@link SkillRecord.rooms} for the complete, accurate list.
+   */
   room: string;
+  /** EVERY room this skill is explicitly listed under in config (may be more than one). */
+  rooms: string[];
   /** Absolute path to the skill directory. */
   dir: string;
 }
@@ -208,11 +217,36 @@ function isWithinDir(candidate: string, parent: string): boolean {
 
 // ── Room assignment ────────────────────────────────────────────────────────--
 
-/** Reverse mapping skill → room from `config.skills.rooms[*].skills`. */
+/**
+ * Reverse mapping skill → room from `config.skills.rooms[*].skills`. A skill
+ * explicitly listed under more than one room's `skills` array resolves to
+ * whichever room is processed last (config object-key order) — a single
+ * "primary" pick for display contexts that need exactly one room. Use
+ * {@link explicitSkillRooms} for the complete, order-independent set of every
+ * room a skill is actually granted in.
+ */
 export function assignRooms(config: Config): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [room, data] of Object.entries(config.roomSkills)) {
     for (const skill of data.skills ?? []) out[skill] = room;
+  }
+  return out;
+}
+
+/**
+ * Every room each skill is explicitly listed under in config — the complete,
+ * order-independent picture `assignRooms`'s single-room map can't represent. A
+ * skill intentionally shared across rooms (e.g. `security-gate` in both
+ * `devops` and `legal`) appears in both entries here; `roomSkillAllowed`
+ * (isolation.ts) already grants access per-room directly from config and is
+ * unaffected either way — this is purely for accurate display/listing.
+ */
+export function explicitSkillRooms(config: Config): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const [room, data] of Object.entries(config.roomSkills)) {
+    for (const skill of data.skills ?? []) {
+      (out[skill] ??= []).push(room);
+    }
   }
   return out;
 }
@@ -309,12 +343,19 @@ export function computeAssignments(env: Environment): {
  */
 export function listSkills(env: Environment, room?: string): SkillRecord[] {
   const { assignments } = computeAssignments(env);
+  const explicitRooms = explicitSkillRooms(env.config);
   const out: SkillRecord[] = [];
   for (const name of getAllSkillNames(env)) {
     const assigned = assignments[name] ?? env.config.skillDefaultRoom;
-    if (room && assigned !== room) continue;
+    // A skill explicitly listed under several rooms must be visible from ANY
+    // of them, not just assignRooms()'s single "primary" pick — otherwise a
+    // skill genuinely shared across rooms (e.g. security-gate in both devops
+    // and legal) would be invisible to list_skills from one of them even
+    // though read_skill (roomSkillAllowed, isolation.ts) already grants it.
+    const rooms = explicitRooms[name] ?? [assigned];
+    if (room && !rooms.includes(room)) continue;
     const dir = findSkillDir(env, name) ?? join(env.skillsDir, name);
-    out.push({ name, description: getSkillDescription(dir), room: assigned, dir });
+    out.push({ name, description: getSkillDescription(dir), room: assigned, rooms, dir });
   }
   return out;
 }
@@ -328,6 +369,8 @@ export function getSkill(env: Environment, name: string): SkillDetail | null {
   const dir = findSkillDir(env, name);
   if (!dir) return null;
   const { assignments } = computeAssignments(env);
+  const assigned = assignments[name] ?? env.config.skillDefaultRoom;
+  const rooms = explicitSkillRooms(env.config)[name] ?? [assigned];
   const skillMd = join(dir, "SKILL.md");
   const hasMd = existsSync(skillMd);
   let content = "";
@@ -341,7 +384,8 @@ export function getSkill(env: Environment, name: string): SkillDetail | null {
   return {
     name,
     description: getSkillDescription(dir),
-    room: assignments[name] ?? env.config.skillDefaultRoom,
+    room: assigned,
+    rooms,
     dir,
     skillMd: hasMd ? skillMd : null,
     content,

@@ -172,7 +172,7 @@ describe("--help renders for every subcommand", () => {
     "sync", "watch", "start", "stop", "dashboard", "bench",
     "scheduler", "compaction", "isolation", "session", "check", "init", "setup",
     "skills-list", "mcp-check", "mcp-gen", "mcp-merge",
-    "skill-create", "skill-install", "skill-assign",
+    "skill-create", "skill-install", "skill-assign", "skill-room-add",
   ];
   const subCommands = (main as unknown as { subCommands: Record<string, unknown> }).subCommands;
   for (const cmd of commands) {
@@ -304,6 +304,39 @@ describe("Phase 4 skill / MCP tooling (acceptance criteria, in-process)", () => 
     const r = await cli("skills-list", "--config", cfg);
     expect(r.code).toBe(0);
     expect(r.out).toContain("no skills in pool");
+  });
+
+  test("skill-room-add grants an already-installed skill to a second room, additively", async () => {
+    const cfg = writeConfig();
+    const wip = join(dir, "wip3");
+    await cli("skill-create", "shared-skill", "--no-register", "--dir", wip, "--config", cfg);
+    const install1 = await cli("skill-install", join(wip, "shared-skill"), "--room", "research", "--config", cfg);
+    expect(install1.code).toBe(0);
+
+    const r = await cli("skill-room-add", "--skill", "shared-skill", "--room", "devops", "--config", cfg);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("Granted 'shared-skill' in: devops");
+
+    const toml = readFileSync(cfg, "utf8");
+    expect(toml).toMatch(/\[skills\.rooms\.research\][\s\S]*?skills = \[.*"shared-skill".*\]/);
+    expect(toml).toMatch(/\[skills\.rooms\.devops\][\s\S]*?skills = \[.*"shared-skill".*\]/);
+  });
+
+  test("skill-room-add is idempotent and reports no-op on a repeat grant", async () => {
+    const cfg = writeConfig();
+    const wip = join(dir, "wip4");
+    await cli("skill-create", "solo-skill", "--no-register", "--dir", wip, "--config", cfg);
+    await cli("skill-install", join(wip, "solo-skill"), "--room", "research", "--config", cfg);
+
+    const first = await cli("skill-room-add", "--skill", "solo-skill", "--room", "research", "--config", cfg);
+    expect(first.code).toBe(0);
+    expect(first.out).toContain("already granted in 'research' — no change");
+  });
+
+  test("skill-room-add fails for a skill that isn't in the pool", async () => {
+    const cfg = writeConfig();
+    const r = await cli("skill-room-add", "--skill", "ghost", "--room", "research", "--config", cfg);
+    expect(r.code).not.toBe(0);
   });
 });
 

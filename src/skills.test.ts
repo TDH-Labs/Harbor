@@ -9,6 +9,7 @@ import {
   assignCategorizedSkills,
   assignRooms,
   computeAssignments,
+  explicitSkillRooms,
   generateMasterIndex,
   generateRoomIndexes,
   getAllSkillNames,
@@ -208,6 +209,58 @@ describe("listSkills / getSkill", () => {
 
     const r2 = listSkills(e, "r2");
     expect(r2.map((s) => s.name)).toEqual(["bb"]);
+  });
+
+  // A skill can be explicitly granted in MORE than one room (isolation.ts's
+  // roomSkillAllowed already checks each room's own config list directly, so
+  // this was always safe to enforce — the gap was purely in these display/
+  // listing functions, which used assignRooms()'s single "last room wins"
+  // pick and would make a genuinely-shared skill invisible from one of its
+  // granted rooms).
+  test("a skill explicitly listed in two rooms is visible from BOTH via listSkills", () => {
+    writeSkill("shared", 'name: shared\ndescription: "Shared skill"');
+    const e = env({
+      rooms: {
+        devops: { description: "Devops", skills: ["shared"] },
+        legal: { description: "Legal", skills: ["shared"] },
+      },
+    });
+    expect(listSkills(e, "devops").map((s) => s.name)).toEqual(["shared"]);
+    expect(listSkills(e, "legal").map((s) => s.name)).toEqual(["shared"]);
+    expect(listSkills(e, "devops").find((s) => s.name === "shared")?.rooms.sort()).toEqual([
+      "devops",
+      "legal",
+    ]);
+  });
+
+  test("getSkill reports every explicit room, not just the primary pick", () => {
+    writeSkill("shared", 'name: shared\ndescription: "Shared skill"');
+    const e = env({
+      rooms: {
+        devops: { description: "Devops", skills: ["shared"] },
+        legal: { description: "Legal", skills: ["shared"] },
+      },
+    });
+    const detail = getSkill(e, "shared");
+    expect(detail?.rooms.sort()).toEqual(["devops", "legal"]);
+  });
+
+  test("a single-room skill's `rooms` is just [that room]", () => {
+    writeSkill("solo", 'name: solo\ndescription: "Solo skill"');
+    const e = env({ rooms: { devops: { description: "Devops", skills: ["solo"] } } });
+    expect(getSkill(e, "solo")?.rooms).toEqual(["devops"]);
+    expect(listSkills(e).find((s) => s.name === "solo")?.rooms).toEqual(["devops"]);
+  });
+
+  test("explicitSkillRooms returns every room per skill, unaffected by config key order", () => {
+    writeSkill("shared", 'name: shared\ndescription: "Shared skill"');
+    const e = env({
+      rooms: {
+        legal: { description: "Legal", skills: ["shared"] },
+        devops: { description: "Devops", skills: ["shared"] },
+      },
+    });
+    expect(explicitSkillRooms(e.config).shared?.sort()).toEqual(["devops", "legal"]);
   });
 
   // Regression for the REVIEW_06.md NO-GO finding: findSkillDir/getSkill used

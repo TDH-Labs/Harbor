@@ -50,6 +50,8 @@ import {
 import { scaffold } from "./skill-create.ts";
 import { install } from "./skill-install.ts";
 import { assignOrphans, assignOrphansAndReload, getOrphanSkills } from "./skill-assign.ts";
+import { addSkillToAnotherRoom, listConfiguredRooms, roomsForSkill } from "./skill-room-add.ts";
+import { canPrompt, pickRooms } from "./room-picker.ts";
 import { AGENT_IDS, applyConfig, emitSnippet, type AgentId } from "./install.ts";
 
 // ── Environment resolution ────────────────────────────────────────────────────
@@ -956,10 +958,11 @@ const skillInstallCmd = defineCommand({
     // positionals). Forms: `<source>` (name = basename) or `<name> <source>`.
     name: { type: "string", description: "Skill slug (else derived from the source path)" },
     source: { type: "string", description: "Source directory or SKILL.md file" },
-    room: { type: "string", description: "Target room (else auto-routed by score)" },
+    room: { type: "string", description: "Target room; may repeat for several. Else prompts interactively (or auto-routes by score with --auto / non-interactively)" },
+    auto: { type: "boolean", description: "Auto-route by score, no prompt (for scripting/CI)" },
     "dry-run": { type: "boolean", description: "Report source/destination/room only" },
   },
-  run({ args }) {
+  async run({ args }) {
     const env = envFromArgs(args);
     const positionals = ((args as Record<string, unknown>)._ as string[] | undefined) ?? [];
     let name = args.name;
@@ -979,9 +982,43 @@ const skillInstallCmd = defineCommand({
       return;
     }
     name = name ?? basename(source.replace(/\/+$/, "")).replace(/\.md$/, "");
+    const dryRun = Boolean(args["dry-run"]);
+    const explicitRoom = args.room;
+
+    // Interactive room picker: only when nothing already decided the room and
+    // a human is actually there to ask. --room/--auto/--dry-run/non-TTY all
+    // keep the prior silent single-room behavior unchanged (never hang a
+    // scripted/CI/piped invocation waiting for input that can't arrive).
+    if (!explicitRoom && !args.auto && !dryRun && canPrompt()) {
+      const peek = install(env, name, source, { dryRun: true }); // side-effect-free room suggestion
+      const rooms = listConfiguredRooms(env);
+      const picked = await pickRooms(rooms, {
+        message: `Which room(s) should '${name}' be installed into?`,
+        suggested: [peek.room],
+      });
+      if (picked === null) {
+        console.log("Cancelled.");
+        return;
+      }
+      if (picked.length === 0) {
+        console.error("skill-install: at least one room is required");
+        process.exitCode = 1;
+        return;
+      }
+      const [primary, ...extra] = picked as [string, ...string[]];
+      const res = install(env, name, source, { room: primary });
+      console.log(`✓ Installed ${res.name} → ${res.installedPath}`);
+      console.log(`✓ Routed to room: ${res.room}`);
+      for (const room of extra) {
+        const r = addSkillToAnotherRoom(env, name, room);
+        console.log(`✓ Also granted in: ${r.room}${r.roomCreated ? " (room created)" : ""}`);
+      }
+      return;
+    }
+
     const res = install(env, name, source, {
-      ...(args.room ? { room: args.room } : {}),
-      dryRun: Boolean(args["dry-run"]),
+      ...(explicitRoom ? { room: explicitRoom } : {}),
+      dryRun,
     });
     if (res.dryRun) {
       console.log(`Would install: ${res.name}`);
@@ -1024,6 +1061,66 @@ const skillAssignCmd = defineCommand({
     for (const o of res.orphans) {
       const sugg = o.scores.slice(0, 3).map((s) => `${s.room}(${s.score})`).join(", ") || "(no clear match)";
       console.log(`  ${o.name}\n    ${o.description.slice(0, 80)}\n    → ${sugg}\n`);
+    }
+  },
+});
+
+const skillRoomAddCmd = defineCommand({
+  meta: {
+    name: "skill-room-add",
+    description: "Grant an already-installed skill access to another room (additive; a room created after the skill exists is fine)",
+  },
+  args: {
+    ...commonArgs,
+    skill: { type: "string", description: "Skill name (must already be in the pool)" },
+    room: { type: "string", description: "Room to grant; may repeat for several. Else prompts interactively" },
+  },
+  async run({ args }) {
+    const env = envFromArgs(args);
+    const positionals = ((args as Record<string, unknown>)._ as string[] | undefined) ?? [];
+    const skill = args.skill ?? positionals[0];
+    const room = args.room ?? positionals[1];
+    if (!skill) {
+      console.error("skill-room-add: a skill name is required");
+      process.exitCode = 1;
+      return;
+    }
+
+    if (!room) {
+      if (!canPrompt()) {
+        console.error("skill-room-add: --room is required in a non-interactive context");
+        process.exitCode = 1;
+        return;
+      }
+      const already = roomsForSkill(env, skill);
+      const rooms = listConfiguredRooms(env);
+      const picked = await pickRooms(rooms, {
+        message:
+          `Grant '${skill}' access to which additional room(s)?` +
+          (already.length ? ` (already in: ${already.join(", ")})` : ""),
+        disabledRooms: already,
+      });
+      if (picked === null) {
+        console.log("Cancelled.");
+        return;
+      }
+      if (picked.length === 0) {
+        console.error("skill-room-add: at least one room is required");
+        process.exitCode = 1;
+        return;
+      }
+      for (const r of picked) {
+        const result = addSkillToAnotherRoom(env, skill, r);
+        console.log(`✓ Granted '${skill}' in: ${result.room}${result.roomCreated ? " (room created)" : ""}`);
+      }
+      return;
+    }
+
+    const result = addSkillToAnotherRoom(env, skill, room);
+    if (!result.changed) {
+      console.log(`'${skill}' is already granted in '${room}' — no change.`);
+    } else {
+      console.log(`✓ Granted '${skill}' in: ${result.room}${result.roomCreated ? " (room created)" : ""}`);
     }
   },
 });
@@ -1128,6 +1225,7 @@ export const main: CommandDef = defineCommand({
     "skill-create": skillCreateCmd,
     "skill-install": skillInstallCmd,
     "skill-assign": skillAssignCmd,
+    "skill-room-add": skillRoomAddCmd,
     "mcp-server": mcpServerCmd,
     install: installCmd,
   },
