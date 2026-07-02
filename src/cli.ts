@@ -38,7 +38,7 @@ import { spawn } from "./spawn.ts";
 import { checkBudget, spendBudget, BudgetExceededError } from "./budget.ts";
 import { gate, runWithGateContext, AccessDeniedError } from "./gate.ts";
 import { audit } from "./audit.ts";
-import { listSkills, generateRoomIndexes } from "./skills.ts";
+import { listSkills, generateRoomIndexes, findSkillDir } from "./skills.ts";
 import {
   generateRoomConfig,
   generateRoomConfigs,
@@ -950,6 +950,22 @@ const skillCreateCmd = defineCommand({
   },
 });
 
+// citty's ArgType has no repeatable/array flag — a re-declared `--room` just
+// overwrites the previous value, it doesn't accumulate. Multi-room selection
+// on the non-interactive path is exposed instead as a single comma-separated
+// `--room a,b,c`, shared by skill-install and skill-room-add below. Splitting
+// on `,` can never fragment a legitimate room name: isValidRoomName (see
+// config-edit.ts) already forbids commas in a valid slug, and every value
+// here is validated downstream by install()/addSkillToAnotherRoom() before
+// it touches config or disk.
+function parseRooms(value: string | undefined): string[] {
+  if (!value) return [];
+  return value
+    .split(",")
+    .map((r) => r.trim())
+    .filter((r) => r.length > 0);
+}
+
 const skillInstallCmd = defineCommand({
   meta: { name: "skill-install", description: "Install a skill into the pool and route it to a room" },
   args: {
@@ -958,7 +974,7 @@ const skillInstallCmd = defineCommand({
     // positionals). Forms: `<source>` (name = basename) or `<name> <source>`.
     name: { type: "string", description: "Skill slug (else derived from the source path)" },
     source: { type: "string", description: "Source directory or SKILL.md file" },
-    room: { type: "string", description: "Target room; may repeat for several. Else prompts interactively (or auto-routes by score with --auto / non-interactively)" },
+    room: { type: "string", description: "Target room, or comma-separated for several (first is primary). Else prompts interactively (or auto-routes by score with --auto / non-interactively)" },
     auto: { type: "boolean", description: "Auto-route by score, no prompt (for scripting/CI)" },
     "dry-run": { type: "boolean", description: "Report source/destination/room only" },
   },
@@ -983,41 +999,50 @@ const skillInstallCmd = defineCommand({
     }
     name = name ?? basename(source.replace(/\/+$/, "")).replace(/\.md$/, "");
     const dryRun = Boolean(args["dry-run"]);
-    const explicitRoom = args.room;
+    const explicitRooms = parseRooms(args.room);
 
     // Interactive room picker: only when nothing already decided the room and
     // a human is actually there to ask. --room/--auto/--dry-run/non-TTY all
     // keep the prior silent single-room behavior unchanged (never hang a
     // scripted/CI/piped invocation waiting for input that can't arrive).
-    if (!explicitRoom && !args.auto && !dryRun && canPrompt()) {
-      const peek = install(env, name, source, { dryRun: true }); // side-effect-free room suggestion
+    if (explicitRooms.length === 0 && !args.auto && !dryRun && canPrompt()) {
       const rooms = listConfiguredRooms(env);
-      const picked = await pickRooms(rooms, {
-        message: `Which room(s) should '${name}' be installed into?`,
-        suggested: [peek.room],
-      });
-      if (picked === null) {
-        console.log("Cancelled.");
+      // No configured rooms to choose from yet (e.g. the very first install):
+      // pickRooms([]) returns [] with no prompt shown, which used to hit the
+      // "at least one room is required" error below and block the install
+      // entirely. Fall through instead to the same default-room path the
+      // non-interactive branch uses — install() already handles a room-less
+      // call via routeRoom's fallback to the configured default room.
+      if (rooms.length > 0) {
+        const peek = install(env, name, source, { dryRun: true }); // side-effect-free room suggestion
+        const picked = await pickRooms(rooms, {
+          message: `Which room(s) should '${name}' be installed into?`,
+          suggested: rooms.some((r) => r.room === peek.room) ? [peek.room] : [],
+        });
+        if (picked === null) {
+          console.log("Cancelled.");
+          return;
+        }
+        if (picked.length === 0) {
+          console.error("skill-install: at least one room is required");
+          process.exitCode = 1;
+          return;
+        }
+        const [primary, ...extra] = picked as [string, ...string[]];
+        const res = install(env, name, source, { room: primary });
+        console.log(`✓ Installed ${res.name} → ${res.installedPath}`);
+        console.log(`✓ Routed to room: ${res.room}`);
+        for (const room of extra) {
+          const r = addSkillToAnotherRoom(env, name, room);
+          console.log(`✓ Also granted in: ${r.room}${r.roomCreated ? " (room created)" : ""}`);
+        }
         return;
       }
-      if (picked.length === 0) {
-        console.error("skill-install: at least one room is required");
-        process.exitCode = 1;
-        return;
-      }
-      const [primary, ...extra] = picked as [string, ...string[]];
-      const res = install(env, name, source, { room: primary });
-      console.log(`✓ Installed ${res.name} → ${res.installedPath}`);
-      console.log(`✓ Routed to room: ${res.room}`);
-      for (const room of extra) {
-        const r = addSkillToAnotherRoom(env, name, room);
-        console.log(`✓ Also granted in: ${r.room}${r.roomCreated ? " (room created)" : ""}`);
-      }
-      return;
     }
 
+    const [primaryRoom, ...extraRooms] = explicitRooms;
     const res = install(env, name, source, {
-      ...(explicitRoom ? { room: explicitRoom } : {}),
+      ...(primaryRoom ? { room: primaryRoom } : {}),
       dryRun,
     });
     if (res.dryRun) {
@@ -1025,9 +1050,14 @@ const skillInstallCmd = defineCommand({
       console.log(`  from: ${res.source}`);
       console.log(`  to:   ${res.installedPath}`);
       console.log(`  room: ${res.room}`);
+      for (const room of extraRooms) console.log(`  also: ${room}`);
     } else {
       console.log(`✓ Installed ${res.name} → ${res.installedPath}`);
       console.log(`✓ Routed to room: ${res.room}`);
+      for (const room of extraRooms) {
+        const r = addSkillToAnotherRoom(env, name, room);
+        console.log(`✓ Also granted in: ${r.room}${r.roomCreated ? " (room created)" : ""}`);
+      }
     }
   },
 });
@@ -1073,28 +1103,45 @@ const skillRoomAddCmd = defineCommand({
   args: {
     ...commonArgs,
     skill: { type: "string", description: "Skill name (must already be in the pool)" },
-    room: { type: "string", description: "Room to grant; may repeat for several. Else prompts interactively" },
+    room: { type: "string", description: "Room(s) to grant, comma-separated for several. Else prompts interactively" },
   },
   async run({ args }) {
     const env = envFromArgs(args);
     const positionals = ((args as Record<string, unknown>)._ as string[] | undefined) ?? [];
     const skill = args.skill ?? positionals[0];
-    const room = args.room ?? positionals[1];
+    const rooms = parseRooms(args.room ?? positionals[1]);
     if (!skill) {
       console.error("skill-room-add: a skill name is required");
       process.exitCode = 1;
       return;
     }
 
-    if (!room) {
+    if (rooms.length === 0) {
       if (!canPrompt()) {
         console.error("skill-room-add: --room is required in a non-interactive context");
         process.exitCode = 1;
         return;
       }
+      // Fail fast on a mistyped/uninstalled skill BEFORE the interactive
+      // prompt — addSkillToAnotherRoom checks this too, but only after the
+      // full picker interaction, which is a wasted round-trip for the
+      // operator on a simple typo.
+      if (!findSkillDir(env, skill)) {
+        console.error(`skill-room-add: skill '${skill}' not found in the pool`);
+        process.exitCode = 1;
+        return;
+      }
       const already = roomsForSkill(env, skill);
-      const rooms = listConfiguredRooms(env);
-      const picked = await pickRooms(rooms, {
+      const configured = listConfiguredRooms(env);
+      // Every configured room already granted ⇒ every picker option would be
+      // disabled, but pickRooms' underlying prompt requires a selection —
+      // an unwinnable prompt the operator could only escape via Ctrl+C.
+      // Short-circuit before it can be shown.
+      if (configured.length > 0 && configured.every((r) => already.includes(r.room))) {
+        console.log(`'${skill}' is already granted in every configured room (${already.join(", ")}) — nothing to do.`);
+        return;
+      }
+      const picked = await pickRooms(configured, {
         message:
           `Grant '${skill}' access to which additional room(s)?` +
           (already.length ? ` (already in: ${already.join(", ")})` : ""),
@@ -1116,11 +1163,13 @@ const skillRoomAddCmd = defineCommand({
       return;
     }
 
-    const result = addSkillToAnotherRoom(env, skill, room);
-    if (!result.changed) {
-      console.log(`'${skill}' is already granted in '${room}' — no change.`);
-    } else {
-      console.log(`✓ Granted '${skill}' in: ${result.room}${result.roomCreated ? " (room created)" : ""}`);
+    for (const r of rooms) {
+      const result = addSkillToAnotherRoom(env, skill, r);
+      if (!result.changed) {
+        console.log(`'${skill}' is already granted in '${r}' — no change.`);
+      } else {
+        console.log(`✓ Granted '${skill}' in: ${result.room}${result.roomCreated ? " (room created)" : ""}`);
+      }
     }
   },
 });

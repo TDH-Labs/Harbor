@@ -167,6 +167,39 @@ describe("data/file gating with ADMIN bypass", () => {
     const escaping = join(dir, "data/legal/../finance/books.db");
     expect(checkDataAccess(reader, escaping, env)).toBe(false);
   });
+
+  // Regression for a fail-open the `..`-traversal fix itself introduced:
+  // join(base, "workspace"/"data", "") collapses to the SHARED parent
+  // (`${base}/workspace`), which contains every room, so an unrooted
+  // session was granted access to ALL rooms — the exact opposite of the old
+  // string-prefix check, which matched no real path for room="" and denied
+  // everything. An unrooted session must be denied, never treated as
+  // "every room."
+  test("file access denies a session with an empty room, across every room", () => {
+    const env = envWithRooms({});
+    const s = new AgentSession({ room: "", capabilities: ["file_read"] });
+    expect(checkFileAccess(s, join(dir, "workspace/legal/draft.md"), "read", env)).toBe(false);
+    expect(checkFileAccess(s, join(dir, "workspace/finance/books.md"), "read", env)).toBe(false);
+    expect(checkFileAccess(s, join(dir, "workspace/marketing/x.md"), "read", env)).toBe(false);
+  });
+
+  test("data access denies a session with an empty room, across every room", () => {
+    const env = envWithRooms({});
+    const reader = new AgentSession({ room: "", capabilities: ["data_read"] });
+    expect(checkDataAccess(reader, join(dir, "data/legal/cases.db"), env)).toBe(false);
+    expect(checkDataAccess(reader, join(dir, "data/finance/books.db"), env)).toBe(false);
+  });
+
+  // ADMIN is the one intended bypass — the empty-room guard must sit AFTER
+  // the ADMIN check, not before it, or an admin session with no particular
+  // room (a plausible system/bootstrap session shape) would be wrongly
+  // denied instead of granted its explicit escalation.
+  test("ADMIN with an empty room still bypasses room-scoping (guard ordering)", () => {
+    const env = envWithRooms({});
+    const admin = new AgentSession({ room: "", capabilities: ["file_read", "data_read", "admin"] });
+    expect(checkFileAccess(admin, join(dir, "workspace/finance/secret.md"), "read", env)).toBe(true);
+    expect(checkDataAccess(admin, join(dir, "data/finance/books.db"), env)).toBe(true);
+  });
 });
 
 describe("audit log", () => {

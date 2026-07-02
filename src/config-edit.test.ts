@@ -7,7 +7,15 @@ import { parse as parseToml } from "smol-toml";
 
 import { Config } from "./config.ts";
 import { Environment } from "./env.ts";
-import { addSkillToRoom, ConfigEditError, reloadEnv, setSkillSubdomains } from "./config-edit.ts";
+import {
+  addSkillToRoom,
+  ConfigEditError,
+  ensureRoomInConfig,
+  isValidRoomName,
+  reloadEnv,
+  setSkillSubdomains,
+  validateRoomName,
+} from "./config-edit.ts";
 
 let dir: string;
 let configPath: string;
@@ -38,7 +46,36 @@ description = "Empty"
 skills = []
 `;
 
+describe("isValidRoomName / validateRoomName", () => {
+  test("accepts simple slugs", () => {
+    expect(isValidRoomName("ops")).toBe(true);
+    expect(isValidRoomName("legal-2")).toBe(true);
+    expect(isValidRoomName("dev_ops")).toBe(true);
+  });
+
+  // A room name becomes both a directory segment and a TOML section key —
+  // `..` or `/` in either position is the same escape class isolation.ts
+  // was hardened against.
+  test("rejects `..` segments and path separators", () => {
+    expect(isValidRoomName("..")).toBe(false);
+    expect(isValidRoomName("../finance")).toBe(false);
+    expect(isValidRoomName("ops/../finance")).toBe(false);
+    expect(isValidRoomName("a/b")).toBe(false);
+    expect(isValidRoomName("")).toBe(false);
+  });
+
+  test("validateRoomName throws ConfigEditError for an invalid name, is silent for a valid one", () => {
+    expect(() => validateRoomName("../finance")).toThrow(ConfigEditError);
+    expect(() => validateRoomName("ops")).not.toThrow();
+  });
+});
+
 describe("addSkillToRoom", () => {
+  test("rejects a `..`-bearing room name before touching config", () => {
+    const e = writeConfig(BASE.replace("PLACEHOLDER", dir));
+    expect(() => addSkillToRoom(e, "x", "../escape")).toThrow(ConfigEditError);
+  });
+
   test("appends to a populated list and round-trips through smol-toml", () => {
     const e = writeConfig(BASE.replace("PLACEHOLDER", dir));
     const res = addSkillToRoom(e, "newone", "ops");

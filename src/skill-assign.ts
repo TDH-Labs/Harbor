@@ -22,7 +22,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { Config } from "./config.ts";
 import type { Environment } from "./env.ts";
-import { addSkillToRoom, ensureRoomInConfig, reloadEnv } from "./config-edit.ts";
+import { addSkillToRoom, ensureRoomInConfig, isValidRoomName, reloadEnv } from "./config-edit.ts";
 import { computeAssignments, getAllSkillNames, getSkillDescription, findSkillDir } from "./skills.ts";
 import { discoverRooms } from "./sync.ts";
 
@@ -177,6 +177,15 @@ export function assignOrphans(
     const room = options.room;
     if (!room) throw new Error("mode 'room' requires options.room");
     if (!(room in env.config.roomSkills)) {
+      // Same room-name-flows-into-a-path/TOML-key class fixed in
+      // skill-install.ts/skill-room-add.ts: validate BEFORE the disk probe,
+      // not just eventually via ensureRoomInConfig's own internal guard —
+      // otherwise an unvalidated `..`-bearing room reaches existsSync first.
+      if (!isValidRoomName(room)) {
+        throw new Error(
+          `invalid room name '${room}' — room names may only contain letters, digits, hyphens, and underscores`,
+        );
+      }
       const roomOnDisk = existsSync(join(env.rooms, room, "room_rules.md"));
       if (!roomOnDisk) throw new Error(`room '${room}' not found in config or on disk`);
       if (options.write ?? true) ensureRoomInConfig(env, room);

@@ -34,6 +34,7 @@ import { isAbsolute, join, resolve as resolvePath } from "node:path";
 
 import type { Config } from "./config.ts";
 import { Environment } from "./env.ts";
+import { isPathWithin } from "./path-safety.ts";
 
 /** Max length of a one-line description before truncation (prototype: 100). */
 const DESC_MAX = 100;
@@ -193,26 +194,16 @@ export function getAllSkillNames(env: Environment): string[] {
 export function findSkillDir(env: Environment, name: string): string | null {
   const pool = env.skillsDir;
   const flat = join(pool, name);
-  if (isWithinDir(flat, pool) && existsSync(flat)) return flat;
+  if (isPathWithin(flat, pool) && existsSync(flat)) return flat;
   if (existsSync(pool)) {
     for (const cat of safeReaddir(pool)) {
       const catDir = join(pool, cat);
       if (!isRealDir(catDir)) continue;
       const nested = join(catDir, name);
-      if (isWithinDir(nested, catDir) && existsSync(nested)) return nested;
+      if (isPathWithin(nested, catDir) && existsSync(nested)) return nested;
     }
   }
   return null;
-}
-
-/** True iff resolved `candidate` is `parent` itself or strictly inside it. */
-function isWithinDir(candidate: string, parent: string): boolean {
-  const resolvedParent = resolvePath(parent);
-  const resolvedCandidate = resolvePath(candidate);
-  return (
-    resolvedCandidate === resolvedParent ||
-    resolvedCandidate.startsWith(resolvedParent + "/")
-  );
 }
 
 // ── Room assignment ────────────────────────────────────────────────────────--
@@ -220,16 +211,24 @@ function isWithinDir(candidate: string, parent: string): boolean {
 /**
  * Reverse mapping skill → room from `config.skills.rooms[*].skills`. A skill
  * explicitly listed under more than one room's `skills` array resolves to
- * whichever room is processed last (config object-key order) — a single
- * "primary" pick for display contexts that need exactly one room. Use
+ * whichever room is LAST in {@link explicitSkillRooms}'s per-skill array — a
+ * single "primary" pick for display contexts that need exactly one room.
+ * Derived from {@link explicitSkillRooms} via {@link lastRoomWins} rather
+ * than an independent walk of `config.roomSkills`, so the "primary" pick
+ * here and the full list there can never disagree about which room a
+ * multi-room skill's primary is — they're computed from the same array, not
+ * two passes that merely happen to agree on iteration order. Use
  * {@link explicitSkillRooms} for the complete, order-independent set of every
  * room a skill is actually granted in.
  */
 export function assignRooms(config: Config): Record<string, string> {
+  return lastRoomWins(explicitSkillRooms(config));
+}
+
+/** `assignRooms`/`computeAssignments`'s shared "last-listed room wins" rule. */
+function lastRoomWins(explicit: Record<string, string[]>): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const [room, data] of Object.entries(config.roomSkills)) {
-    for (const skill of data.skills ?? []) out[skill] = room;
-  }
+  for (const [skill, rooms] of Object.entries(explicit)) out[skill] = rooms[rooms.length - 1]!;
   return out;
 }
 
@@ -317,14 +316,19 @@ export function assignCategorizedSkills(env: Environment): Record<string, string
 /**
  * Compute the final skill → room mapping: explicit room lists first, then
  * categorized/symlink assignments, then everything still unassigned falls to the
- * configured default room. Returns the mapping and the list that fell to default.
+ * configured default room. Returns the mapping, the list that fell to default,
+ * and the complete explicit-rooms picture ({@link explicitSkillRooms}) computed
+ * once here and returned rather than left for callers (listSkills/getSkill) to
+ * re-derive with a second walk of `config.roomSkills`.
  */
 export function computeAssignments(env: Environment): {
   assignments: Record<string, string>;
   unassigned: string[];
+  explicitRooms: Record<string, string[]>;
 } {
   const all = getAllSkillNames(env);
-  const assignments = assignRooms(env.config);
+  const explicitRooms = explicitSkillRooms(env.config);
+  const assignments = lastRoomWins(explicitRooms);
   const categorized = assignCategorizedSkills(env);
   for (const [skill, room] of Object.entries(categorized)) {
     if (!(skill in assignments)) assignments[skill] = room;
@@ -332,7 +336,7 @@ export function computeAssignments(env: Environment): {
   const unassigned = all.filter((s) => !(s in assignments));
   const defaultRoom = env.config.skillDefaultRoom;
   for (const skill of unassigned) assignments[skill] = defaultRoom;
-  return { assignments, unassigned };
+  return { assignments, unassigned, explicitRooms };
 }
 
 // ── Listing + loading ──────────────────────────────────────────────────────--
@@ -342,8 +346,7 @@ export function computeAssignments(env: Environment): {
  * only skills assigned to that room are returned. Sorted by name.
  */
 export function listSkills(env: Environment, room?: string): SkillRecord[] {
-  const { assignments } = computeAssignments(env);
-  const explicitRooms = explicitSkillRooms(env.config);
+  const { assignments, explicitRooms } = computeAssignments(env);
   const out: SkillRecord[] = [];
   for (const name of getAllSkillNames(env)) {
     const assigned = assignments[name] ?? env.config.skillDefaultRoom;
@@ -368,9 +371,9 @@ export function listSkills(env: Environment, room?: string): SkillRecord[] {
 export function getSkill(env: Environment, name: string): SkillDetail | null {
   const dir = findSkillDir(env, name);
   if (!dir) return null;
-  const { assignments } = computeAssignments(env);
+  const { assignments, explicitRooms } = computeAssignments(env);
   const assigned = assignments[name] ?? env.config.skillDefaultRoom;
-  const rooms = explicitSkillRooms(env.config)[name] ?? [assigned];
+  const rooms = explicitRooms[name] ?? [assigned];
   const skillMd = join(dir, "SKILL.md");
   const hasMd = existsSync(skillMd);
   let content = "";

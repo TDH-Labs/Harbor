@@ -89,6 +89,24 @@ describe("addSkillToAnotherRoom", () => {
     const e = envWithConfig({ devops: { description: "Devops", skills: [] } });
     expect(() => addSkillToAnotherRoom(e, "ghost-skill", "devops")).toThrow(SkillRoomAddError);
   });
+
+  // A room name flows into join(env.rooms, room, "room_rules.md") and into a
+  // TOML section key — unsanitized input is the same `..`-escape class
+  // isolation.ts was hardened against. Must be rejected before either the
+  // disk probe or the config write, for both a config-known and a
+  // config-unknown skill.
+  test("rejects a `..`-bearing room name before probing disk or writing config", () => {
+    const e = envWithConfig({ devops: { description: "Devops", skills: ["security-gate"] } });
+    poolSkill(e, "security-gate");
+    expect(() => addSkillToAnotherRoom(e, "security-gate", "../escape")).toThrow(SkillRoomAddError);
+    expect(() => addSkillToAnotherRoom(e, "security-gate", "../escape")).toThrow(/invalid room name/);
+  });
+
+  test("rejects a `/`-bearing room name", () => {
+    const e = envWithConfig({ devops: { description: "Devops", skills: ["security-gate"] } });
+    poolSkill(e, "security-gate");
+    expect(() => addSkillToAnotherRoom(e, "security-gate", "a/b")).toThrow(SkillRoomAddError);
+  });
 });
 
 describe("roomsForSkill / listConfiguredRooms", () => {

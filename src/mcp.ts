@@ -25,6 +25,7 @@ import { join } from "node:path";
 
 import type { RawMcpServer } from "./config.ts";
 import type { Environment } from "./env.ts";
+import { isValidRoomName } from "./config-edit.ts";
 
 // ── Types ──────────────────────────────────────────────────────────────────--
 
@@ -285,9 +286,15 @@ function buildEntry(server: RawMcpServer): McpServerEntry {
 
 /**
  * Write `rooms/<room>/.room-mcp.json` for a single room, or return null when the
- * room declares no MCP servers. Mirrors `room_mcp.generate_room_mcp_servers`.
+ * room declares no MCP servers (or `room` isn't a valid slug — see
+ * {@link isValidRoomName}; harmless in practice today since an invalid name can
+ * never be a `config.roomSkills` key, but guarded explicitly rather than left
+ * to that incidental protection — the same room-name/path-join pattern is
+ * validated at every other write site in this codebase). Mirrors
+ * `room_mcp.generate_room_mcp_servers`.
  */
 export function generateRoomConfig(env: Environment, room: string): string | null {
+  if (!isValidRoomName(room)) return null;
   const servers = env.config.roomSkills[room]?.mcp?.servers ?? [];
   if (servers.length === 0) return null;
   const config = roomMcpConfig(servers);

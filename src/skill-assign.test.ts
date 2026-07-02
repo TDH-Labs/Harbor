@@ -150,4 +150,14 @@ describe("assignOrphans", () => {
     const e = envWithConfig({ catchall: { description: "Everything", skills: [] } });
     expect(() => assignOrphans(e, "room", { room: "ghost" })).toThrow(/not found/);
   });
+
+  // Same room-name-flows-into-a-path/TOML-key class as skill-install.ts and
+  // skill-room-add.ts: a `..`-bearing room must be rejected before the
+  // existsSync(join(env.rooms, room, "room_rules.md")) disk probe, not left
+  // to eventually fail (or not) downstream.
+  test("room mode rejects a `..`-bearing room name before probing disk", () => {
+    writeSkill("one", "anything");
+    const e = envWithConfig({ catchall: { description: "Everything", skills: [] } });
+    expect(() => assignOrphans(e, "room", { room: "../escape" })).toThrow(/invalid room name/);
+  });
 });

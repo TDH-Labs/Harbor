@@ -27,11 +27,12 @@ import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve, sep } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 import { DEFAULT_CAPABILITIES } from "./config.ts";
 import { openDb } from "./db.ts";
 import type { Environment } from "./env.ts";
+import { isPathWithin } from "./path-safety.ts";
 
 // ── Capabilities ─────────────────────────────────────────────────────────────
 
@@ -202,6 +203,11 @@ export function checkDataAccess(
 ): boolean {
   if (!session.has(Capability.DATA_READ)) return false;
   if (session.has(Capability.ADMIN)) return true;
+  // An unrooted session must be denied, not granted the shared parent: with no
+  // guard, join(base, "data", "") collapses to `${base}/data`, and isPathWithin
+  // then treats EVERY room's data as "within" that root — a room="" session
+  // reads/writes every room's data. ADMIN (above) is the only intended bypass.
+  if (!session.room) return false;
   const base = env ? env.root : homedir();
   const roomRoot = join(base, "data", session.room);
   return isPathWithin(resolve(base, dbPath), roomRoot);
@@ -217,24 +223,14 @@ export function checkFileAccess(
   const cap = mode === "write" ? Capability.FILE_WRITE : Capability.FILE_READ;
   if (!session.has(cap)) return false;
   if (session.has(Capability.ADMIN)) return true;
+  // Same collapse as checkDataAccess above: join(base, "workspace", "") is
+  // `${base}/workspace`, which contains every room — deny an unrooted session
+  // outright instead of letting it fall through to a room-root that isn't
+  // actually scoped to any room.
+  if (!session.room) return false;
   const base = env ? env.root : homedir();
   const roomRoot = join(base, "workspace", session.room);
   return isPathWithin(resolve(base, filePath), roomRoot);
-}
-
-/**
- * True iff `candidate` (already absolute) resolves to `root` itself or
- * somewhere strictly inside it. Both sides are re-resolved so a caller-
- * supplied `..` segment can't walk the check out of the room (the bug this
- * replaces: a plain string `startsWith`/`slice` prefix check accepted
- * unnormalized paths like `workspace/<room>/../<other-room>/secret.md`,
- * which strips to a string that *starts with* the allowed prefix while
- * actually resolving outside it).
- */
-function isPathWithin(candidate: string, root: string): boolean {
-  const resolvedRoot = resolve(root);
-  const resolvedCandidate = resolve(candidate);
-  return resolvedCandidate === resolvedRoot || resolvedCandidate.startsWith(resolvedRoot + sep);
 }
 
 // ── Audit logging ────────────────────────────────────────────────────────────

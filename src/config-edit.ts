@@ -27,6 +27,38 @@ export class ConfigEditError extends Error {
   }
 }
 
+/**
+ * A room name may only be a simple slug — letters, digits, hyphen, underscore
+ * — never a path separator or a `..` segment. A room name becomes BOTH a
+ * directory segment (`env.rooms/<room>/room_rules.md`) and a TOML section key
+ * (`[skills.rooms.<room>]`); unsanitized input at either of those two entry
+ * points is the identical `..`-escape / injection class the isolation
+ * boundary was hardened against elsewhere.
+ *
+ * `isValidRoomName` is the shared predicate — callers with their own error
+ * type (skill-install.ts, skill-room-add.ts) check it before touching the
+ * filesystem/config with an unvalidated room string, so the failure is a
+ * clear domain error, not a path escaping into an existsSync probe.
+ * `validateRoomName` (throwing {@link ConfigEditError}) is additionally
+ * called INSIDE the config-write primitives below, so every caller — current
+ * and future, including ones that forget to check first — is protected
+ * structurally, the same "harden at the primitive" pattern gate.ts's
+ * ROOM_OVERRIDE_GATED_TOOLS uses for list_skills.
+ */
+const ROOM_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+
+export function isValidRoomName(room: string): boolean {
+  return ROOM_NAME_RE.test(room);
+}
+
+export function validateRoomName(room: string): void {
+  if (!isValidRoomName(room)) {
+    throw new ConfigEditError(
+      `invalid room name '${room}' — room names may only contain letters, digits, hyphens, and underscores`,
+    );
+  }
+}
+
 /** Result of a config mutation. */
 export interface EditResult {
   /** True if the file was changed (false when the edit was already satisfied). */
@@ -43,6 +75,7 @@ type TomlTable = Record<string, any>;
  * no-op when the section already exists. Throws when there is no config file.
  */
 export function ensureRoomInConfig(env: Environment, room: string): EditResult {
+  validateRoomName(room);
   const path = env.configPath;
   if (!path) {
     throw new ConfigEditError("no config file path available (environment built from defaults)");
@@ -70,6 +103,7 @@ export function ensureRoomInConfig(env: Environment, room: string): EditResult {
  * a no-op (`changed:false`).
  */
 export function addSkillToRoom(env: Environment, skill: string, room: string): EditResult {
+  validateRoomName(room);
   const path = env.configPath;
   if (!path) {
     throw new ConfigEditError("no config file path available (environment built from defaults)");

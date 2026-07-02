@@ -127,6 +127,17 @@ describe("install (directory source)", () => {
     const src = srcSkill("y", "A skill");
     expect(() => install(e, "y", src, { room: "ghost" })).toThrow(/not found/);
   });
+
+  // Same room-name-flows-into-a-path/TOML-key class as skill-room-add.ts —
+  // an explicit room not yet in config must be validated before the
+  // room_rules.md disk probe, not just eventually rejected by a downstream
+  // write.
+  test("rejects a `..`-bearing unknown room name", () => {
+    const e = envWithConfig({ research: { description: "Research", skills: [] } });
+    const src = srcSkill("z", "A skill");
+    expect(() => install(e, "z", src, { room: "../escape" })).toThrow(SkillInstallError);
+    expect(() => install(e, "z", src, { room: "../escape" })).toThrow(/invalid room name/);
+  });
 });
 
 describe("install (single-file source)", () => {

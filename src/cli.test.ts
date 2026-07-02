@@ -338,6 +338,66 @@ describe("Phase 4 skill / MCP tooling (acceptance criteria, in-process)", () => 
     const r = await cli("skill-room-add", "--skill", "ghost", "--room", "research", "--config", cfg);
     expect(r.code).not.toBe(0);
   });
+
+  // citty has no repeatable --room flag; a comma-separated value is the
+  // documented way to target several rooms in one non-interactive call.
+  test("skill-install --room a,b installs to the primary room and grants the rest", async () => {
+    const cfg = writeConfig();
+    const wip = join(dir, "wip-multi");
+    await cli("skill-create", "multi-room-skill", "--no-register", "--dir", wip, "--config", cfg);
+    const r = await cli(
+      "skill-install",
+      join(wip, "multi-room-skill"),
+      "--room",
+      "research,devops",
+      "--config",
+      cfg,
+    );
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("Routed to room: research");
+    expect(r.out).toContain("Also granted in: devops");
+
+    const toml = readFileSync(cfg, "utf8");
+    expect(toml).toMatch(/\[skills\.rooms\.research\][\s\S]*?skills = \[.*"multi-room-skill".*\]/);
+    expect(toml).toMatch(/\[skills\.rooms\.devops\][\s\S]*?skills = \[.*"multi-room-skill".*\]/);
+  });
+
+  test("skill-install --room a,b --dry-run reports the primary room and lists the rest as 'also', changing nothing", async () => {
+    const cfg = writeConfig();
+    const wip = join(dir, "wip-multi-dry");
+    await cli("skill-create", "dry-multi", "--no-register", "--dir", wip, "--config", cfg);
+    const r = await cli(
+      "skill-install",
+      join(wip, "dry-multi"),
+      "--room",
+      "research,devops",
+      "--dry-run",
+      "--config",
+      cfg,
+    );
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("room: research");
+    expect(r.out).toContain("also: devops");
+    expect(readFileSync(cfg, "utf8")).not.toContain("dry-multi");
+  });
+
+  // Also proves comma-list parsing tolerates a space after the comma and a
+  // trailing comma (both silently trimmed/dropped, not treated as room
+  // names in their own right).
+  test("skill-room-add --room a,b grants multiple rooms in one call, with independent per-room idempotency", async () => {
+    const cfg = writeConfig();
+    const wip = join(dir, "wip-radd-multi");
+    await cli("skill-create", "radd-multi", "--no-register", "--dir", wip, "--config", cfg);
+    await cli("skill-install", join(wip, "radd-multi"), "--room", "devops", "--config", cfg);
+
+    const r = await cli("skill-room-add", "--skill", "radd-multi", "--room", "devops, research,", "--config", cfg);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("already granted in 'devops' — no change");
+    expect(r.out).toContain("Granted 'radd-multi' in: research");
+
+    const toml = readFileSync(cfg, "utf8");
+    expect(toml).toMatch(/\[skills\.rooms\.research\][\s\S]*?skills = \[.*"radd-multi".*\]/);
+  });
 });
 
 // ── Phase 5: agent integrations ───────────────────────────────────────────────

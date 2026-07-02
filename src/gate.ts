@@ -60,6 +60,22 @@ const SKILL_GATED_TOOLS = new Set<string>(["read_skill", "read_skill_digest"]);
  * room))` directly inherits the check structurally instead of needing to
  * reimplement it (and risking the exact hole B1 fixed reopening at a new call
  * site with no test to catch it).
+ *
+ * HARD REQUIREMENT for any tool name added to this set: the gate below reads
+ * `args[0]` UNCONDITIONALLY as the room-override string the instant a tool
+ * name is in this set (see the `override = args[0] as string | undefined`
+ * cast a few lines down) — there is no further check that `args[0]` actually
+ * *is* a room name. A tool whose first parameter is anything else (a skill
+ * name, an id, a flag, an options object) must NOT be added here: its first
+ * argument would be silently reinterpreted as a room to enumerate, which
+ * either wrongly denies a legitimate call (the value doesn't match the
+ * session's room and isn't ADMIN) or — worse — wrongly allows one, if the
+ * value happens to coincidentally equal the caller's own room string. Only
+ * add a tool once its wrapped function's signature is confirmed to be
+ * `(room?: string, ...)`, matching the two real callers today:
+ * `integrations/mcp-server.ts` and `integrations/pi.ts`, both wiring
+ * `gate("list_skills", listSkillsImpl)` where `listSkillsImpl(roomOverride?:
+ * string)`.
  */
 const ROOM_OVERRIDE_GATED_TOOLS = new Set<string>(["list_skills"]);
 

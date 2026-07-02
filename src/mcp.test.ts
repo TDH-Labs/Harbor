@@ -197,6 +197,20 @@ describe("roomMcpConfig + generateRoomConfig(s)", () => {
     expect(generateRoomConfig(e, "empty")).toBeNull();
   });
 
+  // Defense-in-depth: config.roomSkills only ever gets an invalid key via a
+  // hand-edited/corrupted config.toml (TOML happily accepts a quoted
+  // `[skills.rooms."../escape"]` section — every WRITE path in this codebase
+  // validates the key first, but nothing stops a file edited outside it).
+  // Built directly via the in-memory Config constructor (bypassing the write
+  // path) specifically to prove that scenario — servers present under an
+  // invalid key — is still refused, not just the already-covered
+  // no-such-key/no-servers case.
+  test("generateRoomConfig returns null for an invalid room name even if that key has servers, writing nothing", () => {
+    const e = env({ "../escape": { description: "Escape", skills: [], mcp: { servers: [fsServer] } } });
+    expect(generateRoomConfig(e, "../escape")).toBeNull();
+    expect(existsSync(join(e.rooms, "..", "escape", ".room-mcp.json"))).toBe(false);
+  });
+
   test("generateRoomConfigs covers all rooms; roomsWithMcp lists only those with servers", () => {
     const e = env({
       ops: { description: "Ops", skills: [], mcp: { servers: [fsServer] } },

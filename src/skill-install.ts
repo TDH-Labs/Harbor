@@ -19,7 +19,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { Environment } from "./env.ts";
-import { addSkillToRoom, ensureRoomInConfig, reloadEnv } from "./config-edit.ts";
+import { addSkillToRoom, ensureRoomInConfig, isValidRoomName, reloadEnv } from "./config-edit.ts";
 import { generateRoomIndexes } from "./skills.ts";
 import { deriveRoomSignals, scoreSkillForRooms } from "./skill-assign.ts";
 
@@ -99,6 +99,11 @@ export function install(
   // not yet in config — create the entry automatically. Reject truly unknown
   // rooms (not in config AND not on disk) with the original error.
   if (options.room && !(options.room in env.config.roomSkills)) {
+    if (!isValidRoomName(options.room)) {
+      throw new SkillInstallError(
+        `invalid room name '${options.room}' — room names may only contain letters, digits, hyphens, and underscores`,
+      );
+    }
     const roomOnDisk = existsSync(join(env.rooms, options.room, "room_rules.md"));
     if (!roomOnDisk) throw new SkillInstallError(`room '${options.room}' not found in config`);
     ensureRoomInConfig(env, options.room);

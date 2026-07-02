@@ -190,6 +190,19 @@ describe("room assignment", () => {
     expect(assignments.orphan).toBe("home");
     expect(unassigned).toEqual(["orphan"]);
   });
+
+  test("computeAssignments also returns explicitRooms, matching explicitSkillRooms(env.config)", () => {
+    writeSkill("shared", "name: shared");
+    const e = env({
+      rooms: {
+        devops: { description: "Devops", skills: ["shared"] },
+        legal: { description: "Legal", skills: ["shared"] },
+      },
+    });
+    const { explicitRooms } = computeAssignments(e);
+    expect(explicitRooms).toEqual(explicitSkillRooms(e.config));
+    expect(explicitRooms.shared).toEqual(["devops", "legal"]);
+  });
 });
 
 describe("listSkills / getSkill", () => {
@@ -243,6 +256,30 @@ describe("listSkills / getSkill", () => {
     });
     const detail = getSkill(e, "shared");
     expect(detail?.rooms.sort()).toEqual(["devops", "legal"]);
+  });
+
+  // computeAssignments derives `assignments` (the primary-room pick) from the
+  // SAME explicitSkillRooms() array getSkill/listSkills use for `rooms`, via
+  // lastRoomWins — so `room` is always literally `rooms[rooms.length - 1]`,
+  // not just two independent walks that happen to agree on iteration order.
+  // Unsorted on purpose: this pins the raw (config key insertion) order the
+  // "last room wins" rule is documented to use.
+  test("a multi-room skill's primary `room` is always the last entry of its `rooms`, by construction", () => {
+    writeSkill("shared", 'name: shared\ndescription: "Shared skill"');
+    const e = env({
+      rooms: {
+        devops: { description: "Devops", skills: ["shared"] },
+        legal: { description: "Legal", skills: ["shared"] },
+      },
+    });
+    const detail = getSkill(e, "shared")!;
+    expect(detail.rooms).toEqual(["devops", "legal"]);
+    expect(detail.room).toBe(detail.rooms[detail.rooms.length - 1]!);
+    expect(detail.room).toBe("legal");
+
+    const listed = listSkills(e).find((s) => s.name === "shared")!;
+    expect(listed.rooms).toEqual(["devops", "legal"]);
+    expect(listed.room).toBe(listed.rooms[listed.rooms.length - 1]!);
   });
 
   test("a single-room skill's `rooms` is just [that room]", () => {

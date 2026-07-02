@@ -20,7 +20,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 import type { Environment } from "./env.ts";
-import { addSkillToRoom, ensureRoomInConfig, reloadEnv } from "./config-edit.ts";
+import { addSkillToRoom, ensureRoomInConfig, isValidRoomName, reloadEnv } from "./config-edit.ts";
 import { explicitSkillRooms, findSkillDir, generateRoomIndexes } from "./skills.ts";
 
 export class SkillRoomAddError extends Error {
@@ -49,6 +49,11 @@ export interface RoomAddResult {
  * index is load-bearing — see skill-install.ts).
  */
 export function addSkillToAnotherRoom(env: Environment, skill: string, room: string): RoomAddResult {
+  if (!isValidRoomName(room)) {
+    throw new SkillRoomAddError(
+      `invalid room name '${room}' — room names may only contain letters, digits, hyphens, and underscores`,
+    );
+  }
   if (!findSkillDir(env, skill)) {
     throw new SkillRoomAddError(`skill '${skill}' not found in the pool`);
   }
