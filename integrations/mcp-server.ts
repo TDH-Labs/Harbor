@@ -50,12 +50,19 @@ import {
   type GateContext,
   createSession,
 } from "harbor-tugboat";
+import pkg from "../package.json" with { type: "json" };
 
 /** MCP protocol revision this server implements (verified at build time). */
 export const MCP_PROTOCOL_VERSION = "2025-06-18";
 
-/** Server identity returned in the `initialize` handshake. */
-export const SERVER_INFO = { name: "harbor", title: "Harbor", version: "0.1.0" } as const;
+/**
+ * Server identity returned in the `initialize` handshake. `version` reads
+ * package.json directly (same source `cli.ts`'s `--version` uses) rather than
+ * a second hardcoded literal — two independent copies of the same value drift
+ * the moment one gets bumped and the other doesn't, which is exactly what
+ * happened here (this stayed "0.1.0" through the 0.1.1 release).
+ */
+export const SERVER_INFO = { name: "harbor", title: "Harbor", version: pkg.version } as const;
 
 // ── JSON-RPC envelopes ───────────────────────────────────────────────────────
 
