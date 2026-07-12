@@ -1,8 +1,9 @@
-import { describe, expect, test } from "bun:test";
-import { homedir } from "node:os";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { Config } from "./config.ts";
+import { Config, DEFAULT_CONFIG_PATH, fileExists } from "./config.ts";
 import { Environment } from "./env.ts";
 
 describe("Environment.resolve", () => {
@@ -68,6 +69,45 @@ describe("Environment.load", () => {
   test("loading from a Config instance leaves configPath null", () => {
     const e = Environment.load(Config.defaults());
     expect(e.configPath).toBeNull();
+  });
+
+  // Regression for a real bug: Config.load(null) silently falls back to
+  // DEFAULT_CONFIG_PATH when it exists, and read-path commands (skills-list,
+  // sync, ...) worked fine off that fallback — but Environment.load() used
+  // to leave configPath null in this exact case regardless, so every
+  // write-path command (skill-room-add, ensureRoomInConfig, ...) refused
+  // with "environment built from defaults" even though a real config file
+  // had just been loaded from. Can't safely test the "a default config
+  // exists" branch through a temp dir — DEFAULT_CONFIG_PATH resolves once
+  // from the real os.homedir() at module-load time, not injectable — so this
+  // asserts the invariant the fix establishes (both code paths agree on
+  // whether the default file is in play) rather than one hardcoded outcome,
+  // which holds regardless of the state of the machine running the test.
+  test("configPath tracks the same DEFAULT_CONFIG_PATH fallback Config.load(null) itself uses", () => {
+    const e = Environment.load();
+    if (fileExists(DEFAULT_CONFIG_PATH)) {
+      expect(e.configPath).toBe(DEFAULT_CONFIG_PATH);
+    } else {
+      expect(e.configPath).toBeNull();
+    }
+  });
+
+  describe("an explicit --config path", () => {
+    let dir: string;
+    beforeEach(() => {
+      dir = mkdtempSync(join(tmpdir(), "harbor-env-"));
+    });
+    afterEach(() => {
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    test("wins over the DEFAULT_CONFIG_PATH fallback, whether or not a default config exists", () => {
+      const explicitPath = join(dir, "explicit-config.toml");
+      writeFileSync(explicitPath, `[paths]\nhome = "${dir}"\n`);
+      const e = Environment.load(explicitPath);
+      expect(e.configPath).toBe(explicitPath);
+      expect(e.configPath).not.toBe(DEFAULT_CONFIG_PATH);
+    });
   });
 
   test("watchPaths resolves every template against the root", () => {

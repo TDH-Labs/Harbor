@@ -25,7 +25,7 @@ import { join } from "node:path";
 
 import type { RawMcpServer } from "./config.ts";
 import type { Environment } from "./env.ts";
-import { isValidRoomName } from "./config-edit.ts";
+import { addMcpServerToRoom, ensureRoomInConfig, isValidRoomName, type McpServerSpec } from "./config-edit.ts";
 
 // ── Types ──────────────────────────────────────────────────────────────────--
 
@@ -282,6 +282,44 @@ function buildEntry(server: RawMcpServer): McpServerEntry {
   const envVars = extractEnvVars(server);
   if (Object.keys(envVars).length > 0) entry.env = envVars;
   return entry;
+}
+
+export interface AddServerResult {
+  room: string;
+  server: string;
+  /** True if the room's config section didn't exist yet and was created. */
+  roomCreated: boolean;
+  /** False if this exact server definition was already present (no-op). */
+  changed: boolean;
+}
+
+/**
+ * Add (or update) a third-party MCP server entry for a room — the sanctioned,
+ * structural counterpart to hand-editing `[[skills.rooms.<room>.mcp.servers]]`
+ * that "harbor install --for <agent>" never covered (that command only wires
+ * Harbor's OWN meta-server into an agent, never a third-party server into a
+ * room). Same room-creation contract as {@link addSkillToAnotherRoom} in
+ * skill-room-add.ts: a room already in config, or present on disk
+ * (`rooms/<room>/room_rules.md`) but not yet in config, both work — a room
+ * that's neither is rejected with a clear error rather than an unsanctioned
+ * config.toml edit being the only path forward.
+ */
+export function addServerToRoom(env: Environment, room: string, server: McpServerSpec): AddServerResult {
+  if (!isValidRoomName(room)) {
+    throw new Error(
+      `invalid room name '${room}' — room names may only contain letters, digits, hyphens, and underscores`,
+    );
+  }
+  const roomInConfig = room in env.config.roomSkills;
+  const roomOnDisk = existsSync(join(env.rooms, room, "room_rules.md"));
+  if (!roomInConfig && !roomOnDisk) {
+    throw new Error(`room '${room}' not found in config or on disk`);
+  }
+  const roomCreated = !roomInConfig;
+  if (roomCreated) ensureRoomInConfig(env, room);
+
+  const { changed } = addMcpServerToRoom(env, room, server);
+  return { room, server: server.name, roomCreated, changed };
 }
 
 /**

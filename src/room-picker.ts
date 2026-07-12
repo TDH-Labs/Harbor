@@ -56,3 +56,16 @@ export async function pickRooms(
   if (clack.isCancel(selected)) return null;
   return selected;
 }
+
+/**
+ * Prompt for a yes/no confirmation before a destructive action (e.g.
+ * skill-remove's pool deletion). Throws if called when {@link canPrompt} is
+ * false — check that first, same contract as {@link pickRooms}.
+ */
+export async function confirmAction(message: string): Promise<boolean> {
+  if (!canPrompt()) {
+    throw new Error("confirmAction: not an interactive terminal (check canPrompt() first)");
+  }
+  const answer = await clack.confirm({ message });
+  return clack.isCancel(answer) ? false : answer;
+}

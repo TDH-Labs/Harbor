@@ -8,11 +8,13 @@ import { parse as parseToml } from "smol-toml";
 import { Config } from "./config.ts";
 import { Environment } from "./env.ts";
 import {
+  addMcpServerToRoom,
   addSkillToRoom,
   ConfigEditError,
   ensureRoomInConfig,
   isValidRoomName,
   reloadEnv,
+  removeSkillFromRoom,
   setSkillSubdomains,
   validateRoomName,
 } from "./config-edit.ts";
@@ -107,6 +109,105 @@ describe("addSkillToRoom", () => {
   test("throws when the environment has no config file", () => {
     const e = new Environment(dir, Config.defaults(), null);
     expect(() => addSkillToRoom(e, "x", "ops")).toThrow(/no config file/);
+  });
+});
+
+describe("addMcpServerToRoom", () => {
+  test("rejects a `..`-bearing room name before touching config", () => {
+    const e = writeConfig(BASE.replace("PLACEHOLDER", dir));
+    expect(() => addMcpServerToRoom(e, "../escape", { name: "x", command: "echo" })).toThrow(ConfigEditError);
+  });
+
+  test("appends a server to a room with no mcp table yet, round-trips through smol-toml", () => {
+    const e = writeConfig(BASE.replace("PLACEHOLDER", dir));
+    const res = addMcpServerToRoom(e, "ops", {
+      name: "agentphone",
+      command: "npx",
+      args: ["-y", "agentphone-mcp"],
+      env: { API_KEY: "abc" },
+    });
+    expect(res.changed).toBe(true);
+    const cfg = parseToml(readFileSync(configPath, "utf8")) as any;
+    const servers = cfg.skills.rooms.ops.mcp.servers;
+    expect(servers).toHaveLength(1);
+    expect(servers[0]).toEqual({
+      name: "agentphone",
+      command: "npx",
+      args: ["-y", "agentphone-mcp"],
+      env: { API_KEY: "abc" },
+    });
+  });
+
+  test("appends alongside an existing server, without disturbing it", () => {
+    const e = writeConfig(BASE.replace("PLACEHOLDER", dir));
+    addMcpServerToRoom(e, "ops", { name: "first", command: "echo" });
+    const res = addMcpServerToRoom(e, "ops", { name: "second", command: "bun" });
+    expect(res.changed).toBe(true);
+    const cfg = parseToml(readFileSync(configPath, "utf8")) as any;
+    const names = cfg.skills.rooms.ops.mcp.servers.map((s: any) => s.name);
+    expect(names).toEqual(["first", "second"]);
+  });
+
+  test("is idempotent — re-adding a byte-identical entry is a no-op", () => {
+    const e = writeConfig(BASE.replace("PLACEHOLDER", dir));
+    addMcpServerToRoom(e, "ops", { name: "agentphone", command: "npx", args: ["-y"] });
+    const res = addMcpServerToRoom(e, "ops", { name: "agentphone", command: "npx", args: ["-y"] });
+    expect(res.changed).toBe(false);
+  });
+
+  test("upserts — a same-name entry with a different definition replaces it in place", () => {
+    const e = writeConfig(BASE.replace("PLACEHOLDER", dir));
+    addMcpServerToRoom(e, "ops", { name: "agentphone", command: "npx", args: ["-y"] });
+    const res = addMcpServerToRoom(e, "ops", { name: "agentphone", command: "npx", args: ["-y", "--verbose"] });
+    expect(res.changed).toBe(true);
+    const cfg = parseToml(readFileSync(configPath, "utf8")) as any;
+    const servers = cfg.skills.rooms.ops.mcp.servers;
+    expect(servers).toHaveLength(1); // replaced, not duplicated
+    expect(servers[0].args).toEqual(["-y", "--verbose"]);
+  });
+
+  test("throws for an unknown room", () => {
+    const e = writeConfig(BASE.replace("PLACEHOLDER", dir));
+    expect(() => addMcpServerToRoom(e, "ghost", { name: "x", command: "echo" })).toThrow(ConfigEditError);
+  });
+
+  test("throws when the environment has no config file", () => {
+    const e = new Environment(dir, Config.defaults(), null);
+    expect(() => addMcpServerToRoom(e, "ops", { name: "x", command: "echo" })).toThrow(/no config file/);
+  });
+});
+
+describe("removeSkillFromRoom", () => {
+  test("rejects a `..`-bearing room name before touching config", () => {
+    const e = writeConfig(BASE.replace("PLACEHOLDER", dir));
+    expect(() => removeSkillFromRoom(e, "existing", "../escape")).toThrow(ConfigEditError);
+  });
+
+  test("removes a skill from a populated list, leaves the rest untouched", () => {
+    const e = writeConfig(BASE.replace("PLACEHOLDER", dir));
+    addSkillToRoom(e, "second", "ops");
+    const res = removeSkillFromRoom(e, "existing", "ops");
+    expect(res.changed).toBe(true);
+    const cfg = parseToml(readFileSync(configPath, "utf8")) as any;
+    expect(cfg.skills.rooms.ops.skills).toEqual(["second"]);
+  });
+
+  test("is idempotent — removing a skill not in the list is a no-op", () => {
+    const e = writeConfig(BASE.replace("PLACEHOLDER", dir));
+    const res = removeSkillFromRoom(e, "not-there", "ops");
+    expect(res.changed).toBe(false);
+    const cfg = parseToml(readFileSync(configPath, "utf8")) as any;
+    expect(cfg.skills.rooms.ops.skills).toEqual(["existing"]);
+  });
+
+  test("throws for an unknown room", () => {
+    const e = writeConfig(BASE.replace("PLACEHOLDER", dir));
+    expect(() => removeSkillFromRoom(e, "existing", "ghost")).toThrow(ConfigEditError);
+  });
+
+  test("throws when the environment has no config file", () => {
+    const e = new Environment(dir, Config.defaults(), null);
+    expect(() => removeSkillFromRoom(e, "existing", "ops")).toThrow(/no config file/);
   });
 });
 

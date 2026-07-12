@@ -149,7 +149,7 @@ export function install(
 }
 
 /** Wrap a single SKILL.md file into `<pool>/<name>/SKILL.md`, adding frontmatter if absent. */
-function installSingleFile(source: string, name: string, installedPath: string): void {
+export function installSingleFile(source: string, name: string, installedPath: string): void {
   const tmp = mkdtempSync(join(tmpdir(), "harbor-install-"));
   const staged = join(tmp, name);
   mkdirSync(staged, { recursive: true });

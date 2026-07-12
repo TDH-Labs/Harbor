@@ -13,7 +13,7 @@
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 
-import { Config } from "./config.ts";
+import { Config, DEFAULT_CONFIG_PATH, fileExists } from "./config.ts";
 
 /** Root directory plus every path derived from it, backed by a {@link Config}. */
 export class Environment {
@@ -47,7 +47,14 @@ export class Environment {
       cfgFile = null;
     } else {
       cfg = Config.load(config ?? null);
-      cfgFile = config ?? null;
+      // Config.load(null) silently falls back to DEFAULT_CONFIG_PATH when it
+      // exists — read-path commands (skills-list, sync, mcp-check, ...) work
+      // fine off that fallback and never notice. Write-path commands
+      // (skill-room-add, ensureRoomInConfig, ...) require configPath to be
+      // non-null, so without mirroring the same fallback here they saw
+      // "environment built from defaults" and refused to write, even though
+      // a real config file was right there and had already been loaded from.
+      cfgFile = config ?? (fileExists(DEFAULT_CONFIG_PATH) ? DEFAULT_CONFIG_PATH : null);
     }
     const rootPath =
       root != null ? root : resolveHome(cfg.homeTemplate);

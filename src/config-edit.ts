@@ -128,6 +128,102 @@ export function addSkillToRoom(env: Environment, skill: string, room: string): E
   return { changed: true, path };
 }
 
+/** A third-party MCP server entry, as written into `[[skills.rooms.<room>.mcp.servers]]`. */
+export interface McpServerSpec {
+  name: string;
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+}
+
+/**
+ * Add or update a third-party MCP server entry under
+ * `[[skills.rooms.<room>.mcp.servers]]` in the environment's config.toml —
+ * the structural, sanctioned way to do what previously required a hand-edit.
+ *
+ * Upsert by `server.name`: a room's server list holds at most one entry per
+ * name. No existing entry with that name → appended. An existing entry that's
+ * byte-for-byte identical → no-op (`changed:false`), matching every other
+ * mutation in this file. An existing entry that differs → replaced — this
+ * command IS the update path too, there's no separate `mcp-update`.
+ *
+ * Throws {@link ConfigEditError} if no config file is associated with the
+ * environment or the room section is absent (use {@link ensureRoomInConfig}
+ * first when the room may not exist yet — the same precondition
+ * {@link addSkillToRoom} has).
+ */
+export function addMcpServerToRoom(env: Environment, room: string, server: McpServerSpec): EditResult {
+  validateRoomName(room);
+  const path = env.configPath;
+  if (!path) {
+    throw new ConfigEditError("no config file path available (environment built from defaults)");
+  }
+
+  const raw = readFileSync(path, "utf8");
+  const data = parseToml(raw) as TomlTable;
+
+  const rooms = data?.skills?.rooms as TomlTable | undefined;
+  if (!rooms || typeof rooms !== "object" || !(room in rooms)) {
+    throw new ConfigEditError(`room section '[skills.rooms.${room}]' not found in config`);
+  }
+
+  const roomTable = rooms[room] as TomlTable;
+  roomTable.mcp ??= {};
+  const mcpTable = roomTable.mcp as TomlTable;
+  const servers: TomlTable[] = Array.isArray(mcpTable.servers) ? mcpTable.servers : [];
+
+  const idx = servers.findIndex((s) => s.name === server.name);
+  if (idx >= 0 && JSON.stringify(servers[idx]) === JSON.stringify(server)) {
+    return { changed: false, path };
+  }
+
+  const nextServers = [...servers];
+  if (idx >= 0) {
+    nextServers[idx] = server;
+  } else {
+    nextServers.push(server);
+  }
+  mcpTable.servers = nextServers;
+
+  writeFileSync(path, stringifyToml(data) + "\n");
+  return { changed: true, path };
+}
+
+/**
+ * Remove `skill` from `[skills.rooms.<room>].skills` in the environment's
+ * config.toml, if present.
+ *
+ * Throws {@link ConfigEditError} if no config file is associated with the
+ * environment or the room section is absent. Removing a skill not currently
+ * in the list is a no-op (`changed:false`) — symmetric with
+ * {@link addSkillToRoom}.
+ */
+export function removeSkillFromRoom(env: Environment, skill: string, room: string): EditResult {
+  validateRoomName(room);
+  const path = env.configPath;
+  if (!path) {
+    throw new ConfigEditError("no config file path available (environment built from defaults)");
+  }
+
+  const raw = readFileSync(path, "utf8");
+  const data = parseToml(raw) as TomlTable;
+
+  const rooms = data?.skills?.rooms as TomlTable | undefined;
+  if (!rooms || typeof rooms !== "object" || !(room in rooms)) {
+    throw new ConfigEditError(`room section '[skills.rooms.${room}]' not found in config`);
+  }
+
+  const roomTable = rooms[room] as TomlTable;
+  const skills: string[] = Array.isArray(roomTable.skills) ? roomTable.skills : [];
+  if (!skills.includes(skill)) {
+    return { changed: false, path };
+  }
+  roomTable.skills = skills.filter((s) => s !== skill);
+
+  writeFileSync(path, stringifyToml(data) + "\n");
+  return { changed: true, path };
+}
+
 /**
  * Merge `map` (skill → sub-domain hint) into `[skills.skill_subdomain]` in the
  * environment's config.toml in a single structured write. Existing entries are

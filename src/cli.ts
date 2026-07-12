@@ -40,6 +40,7 @@ import { gate, runWithGateContext, AccessDeniedError } from "./gate.ts";
 import { audit } from "./audit.ts";
 import { listSkills, generateRoomIndexes, findSkillDir } from "./skills.ts";
 import {
+  addServerToRoom,
   generateRoomConfig,
   generateRoomConfigs,
   mergeConfigs,
@@ -51,7 +52,8 @@ import { scaffold } from "./skill-create.ts";
 import { install } from "./skill-install.ts";
 import { assignOrphans, assignOrphansAndReload, getOrphanSkills } from "./skill-assign.ts";
 import { addSkillToAnotherRoom, listConfiguredRooms, roomsForSkill } from "./skill-room-add.ts";
-import { canPrompt, pickRooms } from "./room-picker.ts";
+import { update as updateSkill, removeSkill } from "./skill-update.ts";
+import { canPrompt, confirmAction, pickRooms } from "./room-picker.ts";
 import { AGENT_IDS, applyConfig, emitSnippet, type AgentId } from "./install.ts";
 
 // ── Environment resolution ────────────────────────────────────────────────────
@@ -579,6 +581,28 @@ commands below.
 \`<source>\` is a directory or a SKILL.md file. \`--room\` routes it so only that
 room's agents see it; omit it to let Harbor auto-route by content.
 
+To scaffold a brand-new skill first (TDD harness, placeholder content), fill
+it in, then register it once ready:
+
+    harbor skill-create <name> --no-register --dir <working-dir>
+    # ...edit <working-dir>/<name>/SKILL.md...
+    harbor skill-install <working-dir>/<name> --room <room>
+
+Passing \`--room\` to \`skill-create\` WITHOUT \`--no-register\` copies the
+placeholder into the pool and routes it immediately — \`--dir\` only changes
+*where the working copy is written*, it does not stage or defer that. Always
+pair \`--dir\` with \`--no-register\` for a genuine scaffold-then-fill workflow.
+
+To overwrite an already-registered skill's content in place (e.g. filling in
+a scaffold you registered too early):
+
+    harbor skill-update <name> --source <file-or-dir>
+
+To unregister/delete a skill:
+
+    harbor skill-remove <name> --room <room>   # unregister from one room only
+    harbor skill-remove <name>                 # unregister everywhere + delete pool files
+
 NEVER do any of these:
 - \`npx skills add -g <pkg>\` — dumps the skill flat in the pool and symlinks it
   into every agent's auto-load dir (the exact contamination this skill prevents).
@@ -594,13 +618,25 @@ NEVER do any of these:
 If the room isn't in config yet but exists on disk
 (\`~/rooms/<room>/room_rules.md\`), these create its config entry automatically.
 
-## Add an MCP server / wire an agent
+## Wire Harbor's OWN meta-server into an agent
 
     harbor install --for <agent>          # print the config block (writes nothing)
     harbor install --for <agent> --write  # apply it (backs up the existing file)
 
-Supported <agent>: claude-code, cursor, opencode, codex, gemini, goose, pi.
-For a per-room MCP server, add it to the room's config and run \`harbor mcp-gen\`.
+Supported <agent>: claude-code, cursor, opencode, codex, gemini, goose, pi,
+orchestrator. This wires Harbor's own \`read_skill\`/\`list_skills\`/etc. server —
+it does NOT add a third-party MCP server (AgentPhone, Composio, ...); there is
+no \`--command\`/\`--args\`/\`--env\` path through \`install\` for that.
+
+## Add a THIRD-PARTY MCP server to a room
+
+    harbor mcp-add --room <room> --name <name> --command <cmd> \\
+      [--args a,b,c] [--env KEY=VALUE,KEY2=$VAR2]
+    harbor mcp-gen --room <room>   # regenerate that room's .room-mcp.json
+
+This is the sanctioned command for the thing \`harbor install\` above does NOT
+do — it writes \`[[skills.rooms.<room>.mcp.servers]]\` structurally. Never hand-
+edit that array in config.toml.
 
 ## After ANY change
 
@@ -613,7 +649,7 @@ leaves agents reading stale routing.
 ## Rules
 
 - Don't hand-edit \`config.toml\` when a command owns the section (skill-install,
-  skill-assign, install all write it structurally).
+  skill-assign, skill-remove, mcp-add, install all write it structurally).
 - Don't stop or fight the watcher; it owns the beacons and re-syncs on change.
 - Verify your change landed: \`harbor skills-list --room <room>\` or \`harbor check\`.
 `;
@@ -874,6 +910,55 @@ const mcpCheckCmd = defineCommand({
   },
 });
 
+const mcpAddCmd = defineCommand({
+  meta: {
+    name: "mcp-add",
+    description: "Add or update a third-party MCP server for a room (the structural alternative to hand-editing config.toml)",
+  },
+  args: {
+    ...commonArgs,
+    room: { type: "string", description: "Target room (existing in config, or on disk — see skill-room-add)" },
+    name: { type: "string", description: "Server entry name" },
+    command: { type: "string", description: "Server command" },
+    args: { type: "string", description: "Comma-separated command args" },
+    env: { type: "string", description: "Comma-separated KEY=VALUE env vars" },
+  },
+  run({ args }) {
+    const env = envFromArgs(args);
+    const room = args.room;
+    const name = args.name;
+    const command = args.command;
+    if (!room || !name || !command) {
+      console.error("mcp-add: --room, --name, and --command are all required");
+      process.exitCode = 1;
+      return;
+    }
+    const serverArgs = parseCommaList(args.args);
+    const envVars = parseEnvPairs(args.env);
+
+    let result;
+    try {
+      result = addServerToRoom(env, room, {
+        name,
+        command,
+        ...(serverArgs.length > 0 ? { args: serverArgs } : {}),
+        ...(Object.keys(envVars).length > 0 ? { env: envVars } : {}),
+      });
+    } catch (err) {
+      console.error(`mcp-add: ${err instanceof Error ? err.message : String(err)}`);
+      process.exitCode = 1;
+      return;
+    }
+
+    if (!result.changed) {
+      console.log(`'${name}' is already configured in '${room}' with this exact definition — no change.`);
+    } else {
+      console.log(`✓ Added '${name}' to room: ${room}${result.roomCreated ? " (room created)" : ""}`);
+      console.log(`  Run 'harbor mcp-gen --room ${room}' to regenerate its .room-mcp.json.`);
+    }
+  },
+});
+
 const mcpGenCmd = defineCommand({
   meta: { name: "mcp-gen", description: "Generate per-room .room-mcp.json configs" },
   args: { ...commonArgs, room: { type: "string", description: "Generate for one room" } },
@@ -931,10 +1016,21 @@ const skillCreateCmd = defineCommand({
   args: {
     ...commonArgs,
     name: { type: "positional", required: true, description: "Skill slug" },
-    room: { type: "string", description: "Target room (required to register)" },
+    room: {
+      type: "string",
+      description: "Target room — passing this registers the skill (copies into the pool + routes) immediately, unless --no-register",
+    },
     description: { type: "string", description: "One-line description" },
-    "no-register": { type: "boolean", description: "Scaffold only; do not register" },
-    dir: { type: "string", description: "Working directory (default ./skills-in-progress)" },
+    "no-register": {
+      type: "boolean",
+      description: "Scaffold only — never copy into the pool, even with --room. Follow up with skill-install once the content is ready",
+    },
+    dir: {
+      type: "string",
+      description:
+        "Working copy location (default: <data dir>/skills-in-progress). Does NOT defer or stage registration — " +
+        "that's controlled solely by --room/--no-register; use --no-register if you want to edit here before anything touches the pool",
+    },
   },
   run({ args }) {
     const env = envFromArgs(args);
@@ -958,12 +1054,27 @@ const skillCreateCmd = defineCommand({
 // config-edit.ts) already forbids commas in a valid slug, and every value
 // here is validated downstream by install()/addSkillToAnotherRoom() before
 // it touches config or disk.
-function parseRooms(value: string | undefined): string[] {
+function parseCommaList(value: string | undefined): string[] {
   if (!value) return [];
   return value
     .split(",")
     .map((r) => r.trim())
     .filter((r) => r.length > 0);
+}
+
+/** `--room` is the one caller with its own name for this same parsing. */
+const parseRooms = parseCommaList;
+
+/** Parse `--env KEY1=VAL1,KEY2=VAL2` into a plain object. Segments without a
+ * `=` (or with an empty key) are dropped rather than producing a bad entry. */
+function parseEnvPairs(value: string | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const pair of parseCommaList(value)) {
+    const eq = pair.indexOf("=");
+    if (eq <= 0) continue;
+    out[pair.slice(0, eq).trim()] = pair.slice(eq + 1);
+  }
+  return out;
 }
 
 const skillInstallCmd = defineCommand({
@@ -1174,6 +1285,100 @@ const skillRoomAddCmd = defineCommand({
   },
 });
 
+const skillUpdateCmd = defineCommand({
+  meta: {
+    name: "skill-update",
+    description: "Overwrite an already-installed skill's pool content in place (room grants untouched)",
+  },
+  args: {
+    ...commonArgs,
+    name: { type: "string", description: "Skill name (must already be in the pool)" },
+    source: { type: "string", description: "Source directory or SKILL.md file" },
+    "dry-run": { type: "boolean", description: "Report the planned overwrite only" },
+  },
+  run({ args }) {
+    const env = envFromArgs(args);
+    const positionals = ((args as Record<string, unknown>)._ as string[] | undefined) ?? [];
+    const name = args.name ?? positionals[0];
+    const source = args.source ?? positionals[1];
+    if (!name || !source) {
+      console.error("skill-update: a skill name and a source path are both required");
+      process.exitCode = 1;
+      return;
+    }
+    let res;
+    try {
+      res = updateSkill(env, name, source, { dryRun: Boolean(args["dry-run"]) });
+    } catch (err) {
+      console.error(`skill-update: ${err instanceof Error ? err.message : String(err)}`);
+      process.exitCode = 1;
+      return;
+    }
+    if (res.dryRun) {
+      console.log(`Would overwrite: ${res.installedPath}`);
+      console.log(`  from: ${res.source}`);
+    } else {
+      console.log(`✓ Updated ${res.name} ← ${res.source}`);
+    }
+  },
+});
+
+const skillRemoveCmd = defineCommand({
+  meta: {
+    name: "skill-remove",
+    description:
+      "Unregister a skill from one room (--room), or fully remove it — unregister everywhere + delete pool files",
+  },
+  args: {
+    ...commonArgs,
+    name: { type: "string", description: "Skill name" },
+    room: { type: "string", description: "Only unregister from this room; omit for full removal" },
+    yes: { type: "boolean", description: "Skip the confirmation prompt (required to proceed non-interactively)" },
+  },
+  async run({ args }) {
+    const env = envFromArgs(args);
+    const positionals = ((args as Record<string, unknown>)._ as string[] | undefined) ?? [];
+    const name = args.name ?? positionals[0];
+    if (!name) {
+      console.error("skill-remove: a skill name is required");
+      process.exitCode = 1;
+      return;
+    }
+    const room = args.room;
+    const isFullRemoval = !room;
+
+    if (!args.yes) {
+      const message = isFullRemoval
+        ? `Fully remove '${name}' — unregister from every room and delete its pool files?`
+        : `Unregister '${name}' from '${room}'? (pool files and other room grants are untouched)`;
+      if (!canPrompt()) {
+        console.error(`skill-remove: pass --yes to confirm in a non-interactive context (${message})`);
+        process.exitCode = 1;
+        return;
+      }
+      if (!(await confirmAction(message))) {
+        console.log("Cancelled.");
+        return;
+      }
+    }
+
+    let res;
+    try {
+      res = removeSkill(env, name, room ? { room } : {});
+    } catch (err) {
+      console.error(`skill-remove: ${err instanceof Error ? err.message : String(err)}`);
+      process.exitCode = 1;
+      return;
+    }
+    if (res.roomsUnregistered.length === 0 && !res.poolDeleted) {
+      console.log(`'${name}' was not registered in '${room}' — no change.`);
+      return;
+    }
+    for (const r of res.roomsUnregistered) console.log(`✓ Unregistered from: ${r}`);
+    if (res.poolDeleted) console.log(`✓ Deleted pool files for '${name}'`);
+  },
+});
+
 // ── Agent integrations (Phase 5) ──────────────────────────────────────────────
 
 const mcpServerCmd = defineCommand({
@@ -1274,12 +1479,15 @@ export const main: CommandDef = defineCommand({
     setup: setupCmd,
     "skills-list": skillsListCmd,
     "mcp-check": mcpCheckCmd,
+    "mcp-add": mcpAddCmd,
     "mcp-gen": mcpGenCmd,
     "mcp-merge": mcpMergeCmd,
     "skill-create": skillCreateCmd,
     "skill-install": skillInstallCmd,
     "skill-assign": skillAssignCmd,
     "skill-room-add": skillRoomAddCmd,
+    "skill-update": skillUpdateCmd,
+    "skill-remove": skillRemoveCmd,
     "mcp-server": mcpServerCmd,
     install: installCmd,
   },

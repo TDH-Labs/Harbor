@@ -240,7 +240,7 @@ function readToml(path: string): Record<string, unknown> {
   }
 }
 
-function fileExists(path: string): boolean {
+export function fileExists(path: string): boolean {
   try {
     readFileSync(path);
     return true;

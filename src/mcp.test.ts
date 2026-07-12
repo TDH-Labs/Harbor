@@ -1,11 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+import { parse as parseToml } from "smol-toml";
 
 import { Config, DEFAULTS, deepMerge } from "./config.ts";
 import { Environment } from "./env.ts";
 import {
+  addServerToRoom,
   checkCommand,
   checkEnvVars,
   extractEnvVars,
@@ -254,5 +257,70 @@ describe("mergeConfigs", () => {
     const merged = mergeConfigs(twoRooms(), ["books", "ghost"], { output: out });
     expect(Object.keys(merged.mcpServers)).toEqual(["books-shared"]);
     expect(JSON.parse(readFileSync(out, "utf8")).mcpServers["books-shared"]).toBeDefined();
+  });
+});
+
+describe("addServerToRoom", () => {
+  // Unlike env() above (an in-memory Config with no configPath), this needs a
+  // real file on disk — addServerToRoom writes back to it, the same
+  // file-backed pattern config-edit.test.ts / skill-room-add.test.ts use.
+  function envWithConfig(rooms: Record<string, { description: string; skills: string[] }>): Environment {
+    const configPath = join(dir, "config.toml");
+    const toml = [
+      "[paths]",
+      `home = "${dir}"`,
+      'skills_dir = "~/.agents/skills"',
+      'state_dir = "~/.agent-env"',
+      "",
+      "[skills]",
+      'default_room = "general"',
+      "",
+      ...Object.entries(rooms).flatMap(([name, data]) => [
+        `[skills.rooms.${name}]`,
+        `description = "${data.description}"`,
+        `skills = [${data.skills.map((s) => `"${s}"`).join(", ")}]`,
+        "",
+      ]),
+    ].join("\n");
+    writeFileSync(configPath, toml);
+    return new Environment(dir, Config.load(configPath), configPath);
+  }
+
+  test("adds a server to a room already in config", () => {
+    const e = envWithConfig({ devops: { description: "Devops", skills: [] } });
+    const r = addServerToRoom(e, "devops", { name: "agentphone", command: "npx", args: ["-y", "agentphone-mcp"] });
+    expect(r).toMatchObject({ room: "devops", server: "agentphone", roomCreated: false, changed: true });
+    const cfg = parseToml(readFileSync(join(dir, "config.toml"), "utf8")) as any;
+    expect(cfg.skills.rooms.devops.mcp.servers[0].name).toBe("agentphone");
+  });
+
+  test("creates the room's config section when it exists on disk but not in config yet", () => {
+    const e = envWithConfig({ devops: { description: "Devops", skills: [] } });
+    mkdirSync(join(e.rooms, "legal"), { recursive: true });
+    writeFileSync(join(e.rooms, "legal", "room_rules.md"), "# Legal room\n");
+
+    const r = addServerToRoom(e, "legal", { name: "search-api", command: "echo" });
+    expect(r).toMatchObject({ roomCreated: true, changed: true });
+    const cfg = parseToml(readFileSync(join(dir, "config.toml"), "utf8")) as any;
+    expect(cfg.skills.rooms.legal.mcp.servers[0].name).toBe("search-api");
+  });
+
+  test("throws for a room neither in config nor on disk", () => {
+    const e = envWithConfig({ devops: { description: "Devops", skills: [] } });
+    expect(() => addServerToRoom(e, "nonexistent", { name: "x", command: "echo" })).toThrow(
+      /not found in config or on disk/,
+    );
+  });
+
+  test("rejects a `..`-bearing room name before probing disk or writing config", () => {
+    const e = envWithConfig({ devops: { description: "Devops", skills: [] } });
+    expect(() => addServerToRoom(e, "../escape", { name: "x", command: "echo" })).toThrow(/invalid room name/);
+  });
+
+  test("is idempotent — adding a byte-identical server twice reports no change the second time", () => {
+    const e = envWithConfig({ devops: { description: "Devops", skills: [] } });
+    addServerToRoom(e, "devops", { name: "agentphone", command: "npx" });
+    const r = addServerToRoom(e, "devops", { name: "agentphone", command: "npx" });
+    expect(r.changed).toBe(false);
   });
 });
