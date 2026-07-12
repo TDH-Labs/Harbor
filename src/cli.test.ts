@@ -457,6 +457,7 @@ describe("mcp-server command (subprocess stdio smoke)", () => {
     const out = proc.stdout.toString();
     expect(out).toContain('"read_skill"');
     expect(out).toContain('"list_skills"');
+    expect(out).toContain('"list_rooms"');
     expect(out).toContain('"budget_status"');
   });
 

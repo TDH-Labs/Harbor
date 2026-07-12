@@ -106,12 +106,12 @@ describe("MCP protocol", () => {
     expect(res).toBeNull();
   });
 
-  test("tools/list advertises the four tools with input schemas", async () => {
+  test("tools/list advertises the five tools with input schemas", async () => {
     const server = serverFor(makeEnv({}), "general", "s1");
     const res = await server.handle({ jsonrpc: "2.0", id: 2, method: "tools/list" });
     const result = res!.result as { tools: Array<{ name: string; inputSchema: unknown }> };
     const names = result.tools.map((t) => t.name).sort();
-    expect(names).toEqual(["audit_recent", "budget_status", "list_skills", "read_skill"]);
+    expect(names).toEqual(["audit_recent", "budget_status", "list_rooms", "list_skills", "read_skill"]);
     for (const t of result.tools) expect(t.inputSchema).toHaveProperty("type", "object");
     expect(result.tools.length).toBe(TOOL_DEFINITIONS.length);
   });
@@ -281,6 +281,57 @@ describe("list_skills", () => {
     // The denial is persisted to the audit log under the caller's room.
     const denials = auditRead(env, { room: "marketing" }).filter((e) => e.decision === "denied");
     expect(denials.some((e) => e.capability === "list_skills" && e.resource === "legal")).toBe(true);
+  });
+});
+
+describe("list_rooms", () => {
+  test("lists every configured room's name and description", async () => {
+    const env = makeEnv({
+      rooms: {
+        legal: { description: "Legal work", skills: [], capabilities: READ_CAPS },
+        devops: { description: "Infra and CI", skills: [], capabilities: READ_CAPS },
+      },
+    });
+    const server = serverFor(env, "legal", "s1");
+    const txt = toolText(await call(server, "list_rooms"));
+    expect(txt).toContain("legal: Legal work");
+    expect(txt).toContain("devops: Infra and CI");
+  });
+
+  // Deliberately unrestricted, unlike list_skills — a marketing session must
+  // still see EVERY room's name/description, since room metadata isn't
+  // sensitive (skill CONTENT within a room stays gated by list_skills/
+  // read_skill's normal room check). This is the intended design, not a gap:
+  // it's what lets an orchestrator discover which room to delegate a task to
+  // without needing ADMIN just to see the room list.
+  test("a non-admin session sees every room, not just its own (by design)", async () => {
+    const env = makeEnv({
+      rooms: {
+        marketing: { description: "Marketing", skills: ["campaign"], capabilities: READ_CAPS },
+        legal: { description: "Legal work", skills: ["nda-review"], capabilities: READ_CAPS },
+      },
+    });
+    const server = serverFor(env, "marketing", "sess-mkt");
+    const txt = toolText(await call(server, "list_rooms"));
+    expect(txt).toContain("marketing: Marketing");
+    expect(txt).toContain("legal: Legal work");
+  });
+
+  test("reports no skill content, only names and descriptions", async () => {
+    const env = makeEnv({
+      rooms: { legal: { description: "Legal work", skills: ["nda-review"], capabilities: READ_CAPS } },
+      skills: { "nda-review": skillMd("nda-review", "Review an NDA", "SECRET_STEP_CONTENT") },
+    });
+    const server = serverFor(env, "legal", "s1");
+    const txt = toolText(await call(server, "list_rooms"));
+    expect(txt).not.toContain("nda-review");
+    expect(txt).not.toContain("SECRET_STEP_CONTENT");
+  });
+
+  test("reports a clean message when no rooms are configured", async () => {
+    const server = serverFor(makeEnv({}), "general", "s1");
+    const txt = toolText(await call(server, "list_rooms"));
+    expect(txt).toContain("No rooms configured");
   });
 });
 

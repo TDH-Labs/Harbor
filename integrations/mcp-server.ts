@@ -13,6 +13,10 @@
  * `gate()` / `checkBudget()` / `spendBudget()` — not in the agent):
  *   - read_skill(skill_name)   load a skill's SKILL.md, gated + budgeted
  *   - list_skills(room?)       list pool skills for the session's room
+ *   - list_rooms()             every configured room's name + description, no
+ *                              skill content — unrestricted (room names aren't
+ *                              sensitive; skill CONTENT still goes through
+ *                              read_skill's normal room gate)
  *   - budget_status()          current session token budget (read-only)
  *   - audit_recent(limit?)     recent audit entries for the session's room
  *
@@ -136,6 +140,15 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: "list_rooms",
+    description:
+      "List every configured room's name and one-line description — no skill " +
+      "content, no room-scoping applied. Use this to discover what rooms exist " +
+      "before delegating a task to a room-scoped sub-agent or connection; call " +
+      "list_skills/read_skill against that room's own session for actual content.",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
     name: "budget_status",
     description: "Report the current session's token budget (limit, used, remaining). Read-only.",
     inputSchema: { type: "object", properties: {} },
@@ -201,6 +214,8 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
         const room = typeof args.room === "string" && args.room ? args.room : undefined;
         return listSkillsGated(room);
       }
+      case "list_rooms":
+        return listRoomsImpl();
       case "budget_status":
         return budgetStatusImpl();
       case "audit_recent": {
@@ -372,6 +387,20 @@ async function listSkillsImpl(roomOverride?: string): Promise<ToolResult> {
   }
   lines.push("", "Load one with read_skill <skill_name>.");
   return text(lines.join("\n"));
+}
+
+/**
+ * Every configured room's name and description. Deliberately NOT gate()-wrapped
+ * or room-scoped (same precedent as budget_status/audit_recent below) — room
+ * names and descriptions are non-sensitive metadata already visible via `harbor
+ * isolation rooms`; only skill CONTENT within a room is access-controlled.
+ */
+function listRoomsImpl(): ToolResult {
+  const { env } = currentGateContext();
+  const rooms = Object.entries(env.config.roomSkills);
+  if (rooms.length === 0) return text("No rooms configured.");
+  const lines = rooms.map(([room, data]) => `- ${room}: ${data.description || "(no description)"}`);
+  return text(["Configured rooms:", "", ...lines].join("\n"));
 }
 
 /** Report the session's token budget without mutating it. */

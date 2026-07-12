@@ -83,6 +83,29 @@ describe("emitSnippet — per-agent format snapshots", () => {
     expect(s.snippet).toContain('export { default } from "harbor-tugboat/integrations/pi"');
   });
 
+  test("orchestrator: one mcp_servers entry per room, each with a LITERAL AGENT_ENV_ROOM", () => {
+    const s = emitSnippet("orchestrator", { home, rooms: ["legal", "devops"] });
+    expect(s.tier).toBe(1);
+    expect(s.snippet).toContain("mcp_servers:");
+    expect(s.snippet).toContain("  harbor_legal:");
+    expect(s.snippet).toContain("  harbor_devops:");
+    // Literal room name, NOT the ${AGENT_ENV_ROOM} placeholder every other
+    // agent gets — each connection must stay pinned to its own room
+    // regardless of whatever launches the parent orchestrator process.
+    expect(s.snippet).toContain("AGENT_ENV_ROOM: legal");
+    expect(s.snippet).toContain("AGENT_ENV_ROOM: devops");
+    expect(s.snippet).not.toContain("${AGENT_ENV_ROOM}");
+    expect(s.snippet).toContain("AGENT_ENV_SESSION: harbor-legal");
+    // Instructions cover the two extra steps beyond this file.
+    expect(s.instructions).toContain("toolset");
+    expect(s.instructions).toContain("custom-toolset mechanism");
+  });
+
+  test("orchestrator: zero configured rooms emits a harmless placeholder, not an error", () => {
+    const s = emitSnippet("orchestrator", { home, rooms: [] });
+    expect(s.snippet).toContain("mcp_servers: {}");
+  });
+
   test("a custom command/args/serverName flows into the snippet", () => {
     const doc = JSON.parse(
       renderSnippet("json-mcpServers", { command: "npx", args: ["harbor", "mcp-server"], serverName: "hb" }),
@@ -101,8 +124,10 @@ describe("de-personalization", () => {
       expect(s.snippet).not.toContain("/home/");
       // No personal MCP server name leaks ("acme-erp" stands in for any such vendor).
       expect(s.snippet.toLowerCase()).not.toContain("acme-erp");
-      // Only the generic command and ${VAR} env references appear.
-      if (s.format !== "typescript") {
+      // Only the generic command and ${VAR} env references appear — except
+      // the orchestrator target, which deliberately bakes in a literal room
+      // per connection (see the emitSnippet snapshot test below for why).
+      if (s.format !== "typescript" && s.format !== "yaml-orchestrator") {
         expect(s.snippet).toContain("${AGENT_ENV_ROOM}");
       }
     }
@@ -209,6 +234,60 @@ describe("applyConfig — create, merge, backup, idempotent", () => {
     expect(out).toContain("  harbor:");
   });
 
+  test("orchestrator: creates a fresh mcp_servers block when the file doesn't exist", () => {
+    const r = applyConfig("orchestrator", { home, rooms: ["legal", "devops"] });
+    expect(r.action).toBe("created");
+    const out = readFileSync(r.path, "utf8");
+    expect(out).toContain("  harbor_legal:");
+    expect(out).toContain("  harbor_devops:");
+  });
+
+  // The load-bearing case: a real orchestrator config.yaml can easily carry
+  // live secrets (API tokens, connect URLs) in its OTHER mcp_servers entries
+  // — this must be a surgical insertion, never a parse-and-rebuild that could
+  // reformat or drop them.
+  test("orchestrator: inserts harbor_<room> entries under an existing mcp_servers block, preserving other servers byte-for-byte", () => {
+    const path = join(home, ".config", "orchestrator-agent", "mcp.yaml");
+    mkdirSync(dirname(path), { recursive: true });
+    const original =
+      "model:\n  provider: anthropic\n\nmcp_servers:\n  search-api:\n    url: https://mcp.example.com/connect?token=SECRET123\n" +
+      "  custom-tool:\n    command: bun\n    args: [\"run\", \"server.ts\"]\n    env:\n      API_KEY: sk-live-abc\n\n" +
+      "toolsets:\n  - core-tools\n";
+    writeFileSync(path, original);
+
+    const r = applyConfig("orchestrator", { home, rooms: ["legal"] });
+    expect(r.action).toBe("merged");
+    expect(r.backup).toBe(`${path}.bak`);
+    const out = readFileSync(path, "utf8");
+    // Every pre-existing line survives untouched, including the secrets.
+    expect(out).toContain("url: https://mcp.example.com/connect?token=SECRET123");
+    expect(out).toContain("API_KEY: sk-live-abc");
+    expect(out).toContain("toolsets:\n  - core-tools");
+    // The new entry is present too.
+    expect(out).toContain("  harbor_legal:");
+    expect(out).toContain("AGENT_ENV_ROOM: legal");
+  });
+
+  test("orchestrator: re-applying the same rooms is idempotent, no duplicate entries", () => {
+    const opts = { home, rooms: ["legal", "devops"] };
+    applyConfig("orchestrator", opts);
+    const second = applyConfig("orchestrator", opts);
+    expect(second.action).toBe("unchanged");
+    expect(second.backup).toBeNull();
+    const out = readFileSync(join(home, ".config", "orchestrator-agent", "mcp.yaml"), "utf8");
+    expect(out.split("harbor_legal:").length - 1).toBe(1);
+  });
+
+  test("orchestrator: a room added to config later only adds that room's entry, leaving existing ones untouched", () => {
+    applyConfig("orchestrator", { home, rooms: ["legal"] });
+    const r = applyConfig("orchestrator", { home, rooms: ["legal", "devops"] });
+    expect(r.action).toBe("merged");
+    const out = readFileSync(r.path, "utf8");
+    expect(out).toContain("  harbor_legal:");
+    expect(out).toContain("  harbor_devops:");
+    expect(out.split("harbor_legal:").length - 1).toBe(1); // not duplicated
+  });
+
   test("pi: writes the dedicated extension file, idempotent on re-apply", () => {
     const first = applyConfig("pi", { home });
     expect(first.action).toBe("created");
@@ -227,12 +306,15 @@ describe("applyConfig — create, merge, backup, idempotent", () => {
 
 // ── every agent emits + applies without throwing ───────────────────────────--
 
-describe("coverage: all seven agents", () => {
+describe("coverage: all eight agents", () => {
   test("emit + write succeed for every agent id", () => {
     for (const agent of AGENT_IDS as AgentId[]) {
-      const s = emitSnippet(agent, { home });
+      // The orchestrator target needs rooms to actually have something to
+      // write; every other agent ignores the option.
+      const opts = agent === "orchestrator" ? { home, rooms: ["legal", "devops"] } : { home };
+      const s = emitSnippet(agent, opts);
       expect(s.snippet.length).toBeGreaterThan(0);
-      const r = applyConfig(agent, { home });
+      const r = applyConfig(agent, opts);
       expect(["created", "merged"]).toContain(r.action);
       expect(existsSync(r.path)).toBe(true);
     }

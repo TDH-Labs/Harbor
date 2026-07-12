@@ -38,7 +38,15 @@ import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 
 // ── Agents + formats ─────────────────────────────────────────────────────────
 
-export type AgentId = "claude-code" | "cursor" | "opencode" | "codex" | "gemini" | "goose" | "pi";
+export type AgentId =
+  | "claude-code"
+  | "cursor"
+  | "opencode"
+  | "codex"
+  | "gemini"
+  | "goose"
+  | "pi"
+  | "orchestrator";
 
 export const AGENT_IDS: readonly AgentId[] = [
   "claude-code",
@@ -48,10 +56,11 @@ export const AGENT_IDS: readonly AgentId[] = [
   "gemini",
   "goose",
   "pi",
+  "orchestrator",
 ];
 
 /** Wire format of an agent's config — drives both emission and `--write` merge. */
-export type ConfigFormat = "json-mcpServers" | "json-mcp" | "toml" | "yaml" | "typescript";
+export type ConfigFormat = "json-mcpServers" | "json-mcp" | "toml" | "yaml" | "typescript" | "yaml-orchestrator";
 
 export interface EmitOptions {
   /** Server command (default "harbor"). */
@@ -64,6 +73,15 @@ export interface EmitOptions {
   home?: string;
   /** Process env (used to resolve `home` when not given). */
   procEnv?: Record<string, string | undefined>;
+  /**
+   * Configured room names ("orchestrator" agent only). That target gets one
+   * Harbor MCP connection PER ROOM, each with a fixed `AGENT_ENV_ROOM` —
+   * unlike every other agent here, which gets one generic connection whose
+   * room comes from the launching process's own env. This is deliberate: a
+   * delegating orchestrator needs distinctly-scoped connections to delegate
+   * into, not one connection scoped to whatever room happens to launch it.
+   */
+  rooms?: string[];
 }
 
 export interface InstallSnippet {
@@ -137,6 +155,38 @@ const AGENTS: Record<AgentId, AgentSpec> = {
       `Run Pi with --no-skills so Harbor owns skill loading.`,
     ],
   },
+  // A generic target for any delegating-orchestrator style harness (spawns
+  // sub-agents with a curated toolset), not one specific product — the
+  // pattern below applies broadly, so it isn't pinned to a single agent's
+  // config schema. Point --path at whatever your harness actually reads.
+  orchestrator: {
+    tier: 1,
+    format: "yaml-orchestrator",
+    pathFromHome: [".config", "orchestrator-agent", "mcp.yaml"],
+    extraInstructions: ({ serverName }) => [
+      `Placeholder path — pass --path to point at your orchestrator's real`,
+      `MCP config file.`,
+      `One connection per configured room (${serverName}_<room>), not one shared`,
+      `connection — an orchestrator needs distinctly-scoped access to delegate`,
+      `into, not a single room. list_rooms works identically through any of them.`,
+      `Two more steps most delegating-orchestrator harnesses need beyond this`,
+      `file (many scope a sub-agent's tools by intersecting a requested toolset`,
+      `against the PARENT's own available toolsets, so a toolset the top-level`,
+      `agent can't see gets silently stripped from any child that asks for`,
+      `it — check your harness's own docs for this exact behavior):`,
+      `  1. Add every "${serverName}_<room>" name to wherever the top-level`,
+      `     agent's own available-toolset list lives, so it has them to hand`,
+      `     down (a child is narrowed from what the parent already has — it`,
+      `     never gains something the parent lacks).`,
+      `  2. Register each "${serverName}_<room>" toolset with your harness's`,
+      `     custom-toolset mechanism, bundling that room's`,
+      `     "${serverName}_<room>__*" tool names. If your harness is`,
+      `     third-party, do this as a local hook — never an edit to its`,
+      `     tracked source.`,
+      `Then: delegating a sub-agent scoped to "${serverName}_<room>" reaches`,
+      `only that room's Harbor-gated tools.`,
+    ],
+  },
 };
 
 // ── Emission ─────────────────────────────────────────────────────────────────
@@ -170,7 +220,8 @@ export function emitSnippet(agent: AgentId, options: EmitOptions = {}): InstallS
   const home = resolveHome(options);
   const defaultPath = join(home, ...spec.pathFromHome);
 
-  const snippet = renderSnippet(spec.format, { command, args, serverName });
+  const rooms = options.rooms ?? [];
+  const snippet = renderSnippet(spec.format, { command, args, serverName, rooms });
   const lines: string[] = [`Add to ${defaultPath}:`];
   if (spec.extraInstructions) lines.push(...spec.extraInstructions({ command, args, serverName }));
   lines.push(ENFORCEMENT_NOTE);
@@ -181,9 +232,9 @@ export function emitSnippet(agent: AgentId, options: EmitOptions = {}): InstallS
 /** Render just the config block for a format (the unit each snapshot test pins). */
 export function renderSnippet(
   format: ConfigFormat,
-  ctx: { command: string; args: string[]; serverName: string },
+  ctx: { command: string; args: string[]; serverName: string; rooms?: string[] },
 ): string {
-  const { command, args, serverName } = ctx;
+  const { command, args, serverName, rooms = [] } = ctx;
   switch (format) {
     case "json-mcpServers":
       return JSON.stringify(
@@ -219,9 +270,49 @@ export function renderSnippet(
         'export { default } from "harbor-tugboat/integrations/pi";',
         "",
       ].join("\n");
+    case "yaml-orchestrator":
+      return renderOrchestratorMcpServers(serverName, command, args, rooms, 0);
     default:
       throw new Error(`unknown format: ${format}`);
   }
+}
+
+/**
+ * Render `mcp_servers: {<serverName>_<room>: {...}}` — one entry per room, each
+ * with a LITERAL `AGENT_ENV_ROOM` (not the `${AGENT_ENV_ROOM}` placeholder every
+ * other agent gets here) since each connection must stay pinned to its own room
+ * regardless of whatever room happens to launch the parent orchestrator process.
+ * A delegating-orchestrator harness's config generally carries no YAML writer
+ * either (same reason goose's renderer is hand-rolled lines, not a library) —
+ * this is deliberately the same style.
+ */
+function renderOrchestratorMcpServers(
+  serverName: string,
+  command: string,
+  args: string[],
+  rooms: string[],
+  baseIndent: number,
+): string {
+  const pad = " ".repeat(baseIndent);
+  const i2 = pad + "  ";
+  const i4 = pad + "    ";
+  const i6 = pad + "      ";
+  if (rooms.length === 0) {
+    return `${pad}mcp_servers: {} # no rooms configured — nothing to add yet`;
+  }
+  const lines = [`${pad}mcp_servers:`];
+  for (const room of rooms) {
+    lines.push(
+      `${i2}${serverName}_${room}:`,
+      `${i4}command: ${command}`,
+      `${i4}args:`,
+      ...args.map((a) => `${i6}- ${a}`),
+      `${i4}env:`,
+      `${i6}AGENT_ENV_ROOM: ${room}`,
+      `${i6}AGENT_ENV_SESSION: ${serverName}-${room}`,
+    );
+  }
+  return lines.join("\n");
 }
 
 /** Render a goose `extensions.<name>` stdio block at the given base indent. */
@@ -282,7 +373,7 @@ export function applyConfig(agent: AgentId, options: ApplyOptions = {}): ApplyRe
   const existing = existed ? readFileSync(path, "utf8") : "";
 
   const merge = mergeFor(spec.format);
-  const result = merge(existing, existed, { command, args, serverName });
+  const result = merge(existing, existed, { command, args, serverName, rooms: options.rooms ?? [] });
   if (result.action === "unchanged") {
     return { path, backup: null, action: "unchanged" };
   }
@@ -305,7 +396,7 @@ interface MergeOutcome {
 type MergeFn = (
   existing: string,
   existed: boolean,
-  ctx: { command: string; args: string[]; serverName: string },
+  ctx: { command: string; args: string[]; serverName: string; rooms?: string[] },
 ) => MergeOutcome;
 
 function mergeFor(format: ConfigFormat): MergeFn {
@@ -329,6 +420,8 @@ function mergeFor(format: ConfigFormat): MergeFn {
       return (existing, existed, ctx) => mergeToml(existing, existed, ctx);
     case "yaml":
       return (existing, existed, ctx) => mergeGoose(existing, existed, ctx);
+    case "yaml-orchestrator":
+      return (existing, existed, ctx) => mergeOrchestrator(existing, existed, ctx.serverName, ctx.command, ctx.args, ctx.rooms ?? []);
     case "typescript":
       return (existing, _existed, ctx) => {
         const content = renderSnippet("typescript", ctx) ;
@@ -422,6 +515,49 @@ function indentGooseUnderExtensions(name: string, command: string, args: string[
   // the already-2-space-indented body.
   const full = renderGooseExtension(name, command, args, 0).split("\n");
   return full.slice(1).join("\n");
+}
+
+/**
+ * Insert `<serverName>_<room>` entries for rooms not already present, under
+ * the orchestrator's `mcp_servers:` key. Line-based INSERTION only, never a
+ * parse→rebuild — a real orchestrator config.yaml can easily carry live
+ * secrets in sibling entries (API tokens, connect URLs) with hand-maintained
+ * comments a generic YAML round-trip would reformat or drop. Existing rooms
+ * are left untouched (in case they were hand-edited); only genuinely missing
+ * rooms are added, so re-running after a room config change is safe and
+ * idempotent.
+ */
+function mergeOrchestrator(
+  existing: string,
+  existed: boolean,
+  serverName: string,
+  command: string,
+  args: string[],
+  rooms: string[],
+): MergeOutcome {
+  if (rooms.length === 0) return { content: existing, action: "unchanged" };
+
+  const lines = existed ? existing.split("\n") : [];
+  const missing = rooms.filter((room) => !lines.some((l) => l.trimEnd() === `  ${serverName}_${room}:`));
+  if (missing.length === 0) return { content: existing, action: "unchanged" };
+
+  const newBlock = renderOrchestratorMcpServers(serverName, command, args, missing, 0);
+
+  if (!existed || !existing.trim()) {
+    return { content: newBlock + "\n", action: "created" };
+  }
+
+  const mcpIdx = lines.findIndex((l) => /^mcp_servers:\s*$/.test(l));
+  if (mcpIdx >= 0) {
+    // Drop the block's own `mcp_servers:` header — inserting directly under the
+    // existing one — and splice in right after it, ahead of any existing entries.
+    const entryLines = newBlock.split("\n").slice(1);
+    lines.splice(mcpIdx + 1, 0, ...entryLines);
+    return { content: lines.join("\n"), action: "merged" };
+  }
+  // No mcp_servers section at all — append one.
+  const sep = existing.endsWith("\n") ? "" : "\n";
+  return { content: existing + sep + newBlock + "\n", action: "merged" };
 }
 
 /** First non-existing of `<path>.bak`, `<path>.bak.1`, ... — never clobbers a backup. */

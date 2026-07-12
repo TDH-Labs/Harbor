@@ -1221,6 +1221,11 @@ const installCmd = defineCommand({
     const opts = {
       ...(args.command ? { command: args.command } : {}),
       ...(args["server-name"] ? { serverName: args["server-name"] } : {}),
+      // Only the "orchestrator" target's format consumes `rooms` (one
+      // connection per room); every other agent ignores it. Resolved here,
+      // not inside install.ts, so that module stays free of any
+      // Environment/config dependency of its own.
+      ...(agent === "orchestrator" ? { rooms: Object.keys(envFromArgs(args).config.roomSkills) } : {}),
     };
     if (args.write) {
       const r = applyConfig(agent, { ...opts, ...(args.path ? { path: args.path } : {}) });
