@@ -55,6 +55,7 @@ import { addSkillToAnotherRoom, listConfiguredRooms, roomsForSkill } from "./ski
 import { update as updateSkill, removeSkill } from "./skill-update.ts";
 import { canPrompt, confirmAction, pickRooms } from "./room-picker.ts";
 import { AGENT_IDS, agentConfigPaths, applyConfig, emitSnippet, type AgentId } from "./install.ts";
+import { analyzeIsolation, formatReport } from "./isolation-doctor.ts";
 import {
   describeSecrets,
   exportLines,
@@ -379,6 +380,17 @@ const compactionCmd = defineCommand({
 const isolationCmd = defineCommand({
   meta: { name: "isolation", description: "Capability / room gating + audit" },
   subCommands: {
+    doctor: defineCommand({
+      meta: {
+        name: "doctor",
+        description: "Report the current isolation posture and what would break under real isolation (READ ONLY)",
+      },
+      args: { ...commonArgs, json: { type: "boolean", description: "Emit the raw report as JSON" } },
+      run({ args }) {
+        const report = analyzeIsolation(envFromArgs(args));
+        console.log(args.json ? JSON.stringify(report, null, 2) : formatReport(report));
+      },
+    }),
     check: defineCommand({
       meta: { name: "check", description: "Check whether a room grants a capability" },
       args: {
