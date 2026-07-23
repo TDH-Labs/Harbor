@@ -98,8 +98,8 @@ describe("secret store", () => {
 describe("looksLikeSecret", () => {
   test("classifies real credential shapes", () => {
     expect(looksLikeSecret("Authorization", "Bearer github_pat_11ABCDEFdummy0000")).toBe("github-pat");
-    expect(looksLikeSecret("Authorization", "Bearer ZWMyNzIzZjEtNzAxYy00N2RhLTlmMzgtZjEw")).toBe("bearer");
-    expect(looksLikeSecret("API_KEY", "6b5a60ada0346a5e19e8490a390fc74a83a3141")).toBe("api-key");
+    expect(looksLikeSecret("Authorization", "Bearer EXAMPLE-NOT-A-REAL-CREDENTIAL-0000")).toBe("bearer");
+    expect(looksLikeSecret("API_KEY", "EXAMPLE0000NOT0000A0000REAL0000KEY00000")).toBe("api-key");
   });
 
   // A `${VAR}` reference is the END STATE this command migrates toward — it
@@ -119,7 +119,7 @@ describe("looksLikeSecret", () => {
     expect(looksLikeSecret("experimentKey", "claude-code-some-experiment-name")).toBeNull();
     expect(looksLikeSecret("cacheKey", "abcdef0123456789abcdef0123456789")).toBeNull();
     // ...but a real key under a normal name is still caught.
-    expect(looksLikeSecret("apiKey", "sk-or-v1-0123456789abcdef0123456789abcdef")).toBe("api-key");
+    expect(looksLikeSecret("apiKey", "sk-or-v1-EXAMPLE0000NOTAREALKEY0000EXAMPLE")).toBe("api-key");
   });
 
   test("does not flag paths, URLs, or short values", () => {
@@ -146,7 +146,7 @@ describe("isExpiredJwt", () => {
   test("a live token is not expired, and a non-JWT is never claimed to be", () => {
     const future = Date.now() / 1000 + 3600;
     expect(isExpiredJwt(jwt(future))).toBe(false);
-    expect(isExpiredJwt("Bearer github_pat_11ABCDEF")).toBe(false);
+    expect(isExpiredJwt("Bearer github_pat_11EXAMPLE")).toBe(false);
     expect(isExpiredJwt("not-a-token")).toBe(false);
   });
 });
@@ -157,7 +157,7 @@ describe("scanConfigs", () => {
       "claude.json",
       JSON.stringify({
         mcpServers: {
-          zapier: { headers: { Authorization: "Bearer ZWMyNzIzZjEtNzAxYy00N2RhLTlmMzg" } },
+          zapier: { headers: { Authorization: "Bearer EXAMPLE-FIXTURE-NOT-A-REAL-TOKEN" } },
           safe: { env: { AGENT_ENV_ROOM: "${AGENT_ENV_ROOM:-general}" } },
         },
       }),
@@ -205,5 +205,27 @@ describe("scanConfigs", () => {
 
   test("missing and unreadable files are skipped, not fatal", () => {
     expect(scanConfigs([join(dir, "nope.json"), join(dir, "also-missing.yaml")])).toEqual([]);
+  });
+});
+
+/**
+ * Guard against the mistake this file itself made once: a credential fixture
+ * pasted from a REAL config. A 36-character prefix of a live Zapier token
+ * reached a public repo that way — harmless in the end (it decoded to part of
+ * the account identifier, not the secret half) but entirely avoidable.
+ *
+ * Rule: any fixture shaped like a credential must SAY it is a fixture. Real
+ * credentials do not contain the word EXAMPLE.
+ */
+describe("test fixtures are synthetic", () => {
+  test("every literal this scanner would call a credential is marked as an example", async () => {
+    const src = await Bun.file(new URL(import.meta.url)).text();
+    const literals = src.match(/"[^"\n]{12,}"/g) ?? [];
+    const unmarked = literals
+      .map((l) => l.slice(1, -1))
+      // Ask the scanner itself — no second, drifting notion of "looks secret".
+      .filter((v) => looksLikeSecret("Authorization", v) !== null)
+      .filter((v) => !/EXAMPLE|FIXTURE|NOTAREAL|NOT-A-REAL|dummy/i.test(v));
+    expect(unmarked).toEqual([]);
   });
 });
