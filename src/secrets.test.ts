@@ -72,6 +72,26 @@ describe("secret store", () => {
     await expect(setSecret("  ", "value", b)).rejects.toThrow(SecretError);
   });
 
+  // The bug that motivated the read-back: the real macOS backend once accepted
+  // the write, exited 0, and stored NOTHING. setSecret must not report success
+  // unless the value actually round-trips. Modeled here with a backend that
+  // silently drops the value the way `security -w` + stdin did.
+  test("a store that does not round-trip is reported as a failure, not success", async () => {
+    const dropping = {
+      name: "dropping",
+      async set() {
+        /* accepts the write, keeps nothing — exactly the original macOS bug */
+      },
+      async get() {
+        return null;
+      },
+      async remove() {
+        return false;
+      },
+    };
+    await expect(setSecret("k", "a-real-value-that-vanishes", dropping)).rejects.toThrow(/did not round-trip/);
+  });
+
   // The whole point of the module: a reporting path must never be able to
   // disclose a secret, even by accident.
   test("describeSecrets reports length and a 4-char prefix, never the value", async () => {

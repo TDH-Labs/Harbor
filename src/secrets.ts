@@ -54,18 +54,30 @@ interface Backend {
 }
 
 /**
- * macOS keychain via `security`. `set` writes the value to the child's STDIN
- * (`-w` with no argument makes `security` read it there) so the secret never
- * appears in argv — see rule 1 in the module header.
+ * macOS keychain via `security`.
+ *
+ * The secret is delivered through `security -i` BATCH MODE, not argv: the value
+ * is written on stdin as part of a command line that `security` parses inside
+ * its own process, so it never appears in any process's argv (rule 1).
+ *
+ * A `-w <value>` argument would also work but exposes the value in argv. And
+ * bare `-w` with a piped stdin — the ORIGINAL, BROKEN approach — does NOT read
+ * stdin as the password: `security` treats stdin as the interactive
+ * "type / retype password" prompt, a single value fails the retype, and it
+ * stores NOTHING while still exiting 0. That silent-empty write is why
+ * {@link setSecret} now reads the value back and refuses to report success
+ * unless it round-trips.
  */
 const macBackend: Backend = {
   name: "macos-keychain",
   async set(name, value) {
+    if (value.includes("\n")) {
+      throw new SecretError("secret value must not contain a newline (the keychain batch protocol is line-based)");
+    }
     await run(["security", "delete-generic-password", "-a", name, "-s", SECRET_SERVICE], null, true);
-    const { code, stderr } = await run(
-      ["security", "add-generic-password", "-a", name, "-s", SECRET_SERVICE, "-U", "-w"],
-      value,
-    );
+    // The value rides on stdin inside the batch command, never in argv.
+    const batch = `add-generic-password -a ${shellQuote(name)} -s ${SECRET_SERVICE} -U -w ${shellQuote(value)}\n`;
+    const { code, stderr } = await run(["security", "-i"], batch);
     if (code !== 0) throw new SecretError(`keychain write failed: ${stderr.trim()}`);
   },
   async get(name) {
@@ -106,6 +118,16 @@ const linuxBackend: Backend = {
   },
 };
 
+/**
+ * Quote a value for a `security -i` batch command line. Its tokenizer honors
+ * POSIX single-quoting; a literal single quote is written as the standard
+ * `'\''` break-out. Verified against `security -i` with space- and
+ * quote-bearing values before relying on it.
+ */
+function shellQuote(s: string): string {
+  return `'${s.replace(/'/g, "'\\''")}'`;
+}
+
 /** Resolve the backend for this platform, or explain why there isn't one. */
 export function backendFor(plat: string = platform()): Backend {
   if (plat === "darwin") return macBackend;
@@ -139,11 +161,25 @@ async function run(
 
 // ── Public API ───────────────────────────────────────────────────────────────
 
-/** Store `value` under `name`. The value is piped via stdin, never argv. */
+/**
+ * Store `value` under `name`, then READ IT BACK and confirm it round-trips.
+ *
+ * The read-back is not paranoia — the first implementation stored empty while
+ * exiting 0 (see macBackend), so a "✓ stored 152 chars" message once meant a
+ * secret that wasn't there. A store that cannot be read back as itself is a
+ * failed store, and this reports it as one.
+ */
 export async function setSecret(name: string, value: string, backend = backendFor()): Promise<void> {
   if (!name.trim()) throw new SecretError("secret name is required");
   if (!value) throw new SecretError("refusing to store an empty secret");
   await backend.set(name, value);
+  const readBack = await backend.get(name);
+  if (readBack !== value) {
+    throw new SecretError(
+      `keychain write did not round-trip for '${name}' (stored ${value.length} chars, ` +
+        `read back ${readBack?.length ?? "null"}). The secret was NOT saved.`,
+    );
+  }
 }
 
 /** Retrieve a secret, or null when it isn't stored. */
