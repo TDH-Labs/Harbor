@@ -428,3 +428,73 @@ describe("runStdioServer", () => {
     expect((JSON.parse(out[1]!) as JsonRpcResponse).result).toEqual({});
   });
 });
+
+// ── Blank AGENT_ENV_ROOM normalization ───────────────────────────────────────
+
+/**
+ * A stdio MCP client that substitutes an UNSET variable with an empty string
+ * (verified: Gemini CLI, 2026-07-23) handed this server `AGENT_ENV_ROOM=""`.
+ * `??` treats "" as present, so the empty string became the session's room —
+ * and an unconfigured room used to read as "unrestricted", so that session
+ * enumerated and read every skill in every room. Blank must normalize to
+ * absent and land on the configured default room, exactly like a genuinely
+ * unset variable.
+ */
+describe("a blank AGENT_ENV_ROOM falls back to the configured default room", () => {
+  // `general` is the configured default room AND carries its own skill list —
+  // an unrestricted default (skills: []) would allow everything and prove
+  // nothing about where a blank room actually landed.
+  const rooms = {
+    general: { skills: ["open-tool"], capabilities: READ_CAPS },
+    legal: { skills: ["nda-review"], capabilities: READ_CAPS },
+  };
+
+  for (const [label, value] of [
+    ["empty string", ""],
+    ["whitespace only", "   "],
+  ] as const) {
+    test(`${label} → default room, and cannot read another room's skill`, async () => {
+      const env = makeEnv({
+        rooms,
+        skills: {
+          "nda-review": skillMd("nda-review", "NDA triage"),
+          "open-tool": skillMd("open-tool", "Default-room tool"),
+        },
+      });
+      const server = createMcpServer({ env, procEnv: { AGENT_ENV_ROOM: value, AGENT_ENV_SESSION: "s1" } });
+      const denied = await call(server, "read_skill", { skill_name: "nda-review" });
+      expect(isError(denied)).toBe(true);
+      expect(toolText(denied)).toContain("access denied");
+      // Named by the default room, never by the blank value it arrived as.
+      expect(toolText(denied)).toContain("'general'");
+      // ...and it really is the default room, not a denied-everything state.
+      const allowed = await call(server, "read_skill", { skill_name: "open-tool" }, 2);
+      expect(isError(allowed)).toBe(false);
+    });
+  }
+
+  test("list_skills from a blank room lists the default room, not the whole pool", async () => {
+    const env = makeEnv({
+      rooms,
+      skills: {
+        "nda-review": skillMd("nda-review", "NDA triage"),
+        "open-tool": skillMd("open-tool", "Unrestricted"),
+      },
+    });
+    const server = createMcpServer({ env, procEnv: { AGENT_ENV_ROOM: "", AGENT_ENV_SESSION: "s1" } });
+    const text = toolText(await call(server, "list_skills"));
+    expect(text).not.toContain("nda-review");
+  });
+
+  test("an unconfigured, non-default room is denied rather than treated as unrestricted", async () => {
+    const env = makeEnv({ rooms, skills: { "nda-review": skillMd("nda-review", "NDA triage") } });
+    // What a client that does not expand placeholders actually passes through.
+    const server = createMcpServer({
+      env,
+      procEnv: { AGENT_ENV_ROOM: "${AGENT_ENV_ROOM}", AGENT_ENV_SESSION: "s1" },
+    });
+    const res = await call(server, "read_skill", { skill_name: "nda-review" });
+    expect(isError(res)).toBe(true);
+    expect(toolText(res)).toContain("access denied");
+  });
+});

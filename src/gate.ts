@@ -39,6 +39,7 @@ import {
   Capability,
 } from "./isolation.ts";
 import { Environment } from "./env.ts";
+import { normalizeRoomEnv } from "./config.ts";
 import { deny, emitHypervisorEvent } from "./audit.ts";
 
 /** Contract-named alias for the isolation error (BUILD_BRIEF / phase interface). */
@@ -133,7 +134,9 @@ export function currentGateContext(): GateContext {
   const bound = gateContextStore.getStore();
   if (bound) return bound;
   const env = Environment.default();
-  const room = process.env.AGENT_ENV_ROOM ?? env.config.skillDefaultRoom;
+  // Blank or still-a-placeholder normalizes to absent — see normalizeRoomEnv
+  // in config.ts for why `??` alone let those become the session's room.
+  const room = normalizeRoomEnv(process.env.AGENT_ENV_ROOM) ?? env.config.skillDefaultRoom;
   const sessionId = process.env.AGENT_ENV_SESSION ?? "";
   const memoKey = `${room}:${sessionId}`;
   let session = envVarSessions.get(memoKey);

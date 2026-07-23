@@ -53,6 +53,7 @@ import {
   BudgetExceededError,
   type GateContext,
   createSession,
+  normalizeRoomEnv,
 } from "harbor-tugboat";
 import pkg from "../package.json" with { type: "json" };
 
@@ -437,7 +438,11 @@ function auditRecentImpl(limit: number): ToolResult {
  * so it is testable without touching the live process environment.
  */
 function defaultContext(env: Environment, procEnv: Record<string, string | undefined>): GateContext {
-  const room = procEnv.AGENT_ENV_ROOM ?? env.config.skillDefaultRoom;
+  // `??` alone is not enough: a blank value (Gemini CLI substitutes an empty
+  // string for an unset variable) or an unsubstituted "${AGENT_ENV_ROOM}"
+  // literal (Goose/OpenCode/Claude Code-when-unset) is not null, so it slipped
+  // past the fallback and became the session's room. See normalizeRoomEnv.
+  const room = normalizeRoomEnv(procEnv.AGENT_ENV_ROOM) ?? env.config.skillDefaultRoom;
   const sessionId = procEnv.AGENT_ENV_SESSION;
   // No `env` passed → no `session_created` audit row per request (which would
   // otherwise pollute audit_recent); capabilities are still room-resolved.

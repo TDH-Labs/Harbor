@@ -10,6 +10,7 @@ import {
   DEFAULTS,
   deepMerge,
   loadConfig,
+  normalizeRoomEnv,
 } from "./config.ts";
 
 let dir: string;
@@ -169,5 +170,44 @@ describe("deepMerge", () => {
     const before = structuredClone(DEFAULTS);
     deepMerge(DEFAULTS, { paths: { home: "/tmp/elsewhere" } });
     expect(DEFAULTS).toEqual(before);
+  });
+});
+
+/**
+ * Each case below mirrors a REAL client behavior verified on 2026-07-23, not a
+ * hypothetical. Left unnormalized, every one of these became the session's room
+ * name — and an unrecognized room used to grant access to the whole skill pool.
+ */
+describe("normalizeRoomEnv", () => {
+  test("returns null for values that carry no room information", () => {
+    // genuinely unset
+    expect(normalizeRoomEnv(undefined)).toBeNull();
+    expect(normalizeRoomEnv(null)).toBeNull();
+    // Gemini CLI substitutes an empty string for an unset variable
+    expect(normalizeRoomEnv("")).toBeNull();
+    expect(normalizeRoomEnv("   ")).toBeNull();
+    // Goose/OpenCode never expand ${VAR}; Claude Code passes it through unset
+    expect(normalizeRoomEnv("${AGENT_ENV_ROOM}")).toBeNull();
+    // Cursor / VS Code syntax, unsubstituted
+    expect(normalizeRoomEnv("${env:AGENT_ENV_ROOM}")).toBeNull();
+    // OpenCode syntax, unsubstituted
+    expect(normalizeRoomEnv("{env:AGENT_ENV_ROOM}")).toBeNull();
+    // bare-dollar form
+    expect(normalizeRoomEnv("$AGENT_ENV_ROOM")).toBeNull();
+  });
+
+  test("passes real room names through, trimmed", () => {
+    expect(normalizeRoomEnv("legal")).toBe("legal");
+    expect(normalizeRoomEnv("  devops  ")).toBe("devops");
+    expect(normalizeRoomEnv("finance_real_estate")).toBe("finance_real_estate");
+    expect(normalizeRoomEnv("broker-operations")).toBe("broker-operations");
+  });
+
+  test("does not swallow a legitimate name that merely contains a special character", () => {
+    // Only a WHOLE-value placeholder is discarded — these are real, if odd, names
+    // and silently rewriting them to the default room would be its own bug.
+    expect(normalizeRoomEnv("room${x}")).toBe("room${x}");
+    expect(normalizeRoomEnv("env:legal")).toBe("env:legal");
+    expect(normalizeRoomEnv("$")).toBe("$");
   });
 });

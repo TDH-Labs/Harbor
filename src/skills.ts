@@ -356,7 +356,14 @@ export function listSkills(env: Environment, room?: string): SkillRecord[] {
     // and legal) would be invisible to list_skills from one of them even
     // though read_skill (roomSkillAllowed, isolation.ts) already grants it.
     const rooms = explicitRooms[name] ?? [assigned];
-    if (room && !rooms.includes(room)) continue;
+    // `undefined` means "no filter" (the CLI's `skills-list` with no --room).
+    // An EMPTY STRING is a room that simply matches nothing — not a wildcard.
+    // Treating "" as falsy here meant a session whose room resolved to "" (a
+    // client substituting an unset variable with an empty string) enumerated
+    // the entire pool across every room. Defense in depth: the env-read sites
+    // now normalize blank to the default room, but this filter must not be a
+    // wildcard on its own either.
+    if (room !== undefined && !rooms.includes(room)) continue;
     const dir = findSkillDir(env, name) ?? join(env.skillsDir, name);
     out.push({ name, description: getSkillDescription(dir), room: assigned, rooms, dir });
   }

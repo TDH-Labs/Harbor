@@ -1418,8 +1418,9 @@ const installCmd = defineCommand({
     room: {
       type: "string",
       description:
-        "Default room ('goose' only — its config can't expand ${VAR}, so this is baked in literally; " +
-        "defaults to the environment's configured default room). Use --with-extension for a different room per session.",
+        "Default room baked into the emitted config (defaults to the environment's configured default room). " +
+        "Used by agents whose config can express a fallback or nothing at all; agents that interpolate live " +
+        "still let AGENT_ENV_ROOM from the launching shell win.",
     },
   },
   run({ args }) {
@@ -1437,10 +1438,12 @@ const installCmd = defineCommand({
       // not inside install.ts, so that module stays free of any
       // Environment/config dependency of its own.
       ...(agent === "orchestrator" ? { rooms: Object.keys(envFromArgs(args).config.roomSkills) } : {}),
-      // Only "goose" consumes `room` (a literal, since its config doesn't
-      // expand ${VAR} — see install.ts's renderGooseExtension). Defaults to
-      // the environment's configured default room; --room overrides it.
-      ...(agent === "goose" ? { room: args.room ?? envFromArgs(args).config.skillDefaultRoom } : {}),
+      // `room` is the room baked into the emitted config. Agents whose config
+      // interpolates live (claude-code, gemini) use it only as the `:-default`
+      // fallback; ones that cannot substitute at all (goose) use it as the
+      // literal value; the rest ignore it. Resolved here, not inside
+      // install.ts, so that module stays free of an Environment dependency.
+      room: args.room ?? envFromArgs(args).config.skillDefaultRoom,
     };
     if (args.write) {
       const r = applyConfig(agent, { ...opts, ...(args.path ? { path: args.path } : {}) });

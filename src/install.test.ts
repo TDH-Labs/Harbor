@@ -23,7 +23,29 @@ afterEach(() => {
   rmSync(home, { recursive: true, force: true });
 });
 
-const EXPECTED_ENV = { AGENT_ENV_ROOM: "${AGENT_ENV_ROOM}", AGENT_ENV_SESSION: "${AGENT_ENV_SESSION}" };
+/**
+ * Each client's env block is expressed in ITS OWN verified substitution syntax
+ * (install.ts's EnvSyntax) — there is no single shared shape, because the
+ * clients genuinely disagree and none of them errors on a syntax it does not
+ * recognize: it silently hands the template text to the server as the room
+ * name. Every expectation below was verified against the real client on
+ * 2026-07-23 with an env-probe shim standing in for the server.
+ */
+/** Claude Code + Gemini CLI: expand ${VAR} AND honor a ${VAR:-default} fallback. */
+const SHELL_ENV = {
+  AGENT_ENV_ROOM: "${AGENT_ENV_ROOM:-general}",
+  AGENT_ENV_SESSION: "${AGENT_ENV_SESSION:-harbor-general}",
+};
+/** Cursor: VS Code-style ${env:VAR}; plain ${VAR} is not interpolated. */
+const VSCODE_ENV = {
+  AGENT_ENV_ROOM: "${env:AGENT_ENV_ROOM}",
+  AGENT_ENV_SESSION: "${env:AGENT_ENV_SESSION}",
+};
+/** OpenCode: its own {env:VAR}; ${VAR} reached the server as literal text. */
+const OPENCODE_ENV = {
+  AGENT_ENV_ROOM: "{env:AGENT_ENV_ROOM}",
+  AGENT_ENV_SESSION: "{env:AGENT_ENV_SESSION}",
+};
 
 // ── Per-agent snapshots (pin the verified formats) ─────────────────────────--
 
@@ -31,14 +53,14 @@ describe("emitSnippet — per-agent format snapshots", () => {
   test("claude-code: mcpServers JSON with command/args/env", () => {
     const s = emitSnippet("claude-code", { home });
     const doc = JSON.parse(s.snippet);
-    expect(doc).toEqual({ mcpServers: { harbor: { command: "harbor", args: ["mcp-server"], env: EXPECTED_ENV } } });
+    expect(doc).toEqual({ mcpServers: { harbor: { command: "harbor", args: ["mcp-server"], env: SHELL_ENV } } });
     expect(s.tier).toBe(1);
     expect(s.instructions).toContain("claude mcp add-json");
   });
 
-  test("cursor: same mcpServers JSON shape", () => {
+  test("cursor: same mcpServers JSON shape, but VS Code ${env:VAR} interpolation", () => {
     const doc = JSON.parse(emitSnippet("cursor", { home }).snippet);
-    expect(doc.mcpServers.harbor).toEqual({ command: "harbor", args: ["mcp-server"], env: EXPECTED_ENV });
+    expect(doc.mcpServers.harbor).toEqual({ command: "harbor", args: ["mcp-server"], env: VSCODE_ENV });
   });
 
   test("opencode: mcp key, type local, array command, environment", () => {
@@ -49,22 +71,27 @@ describe("emitSnippet — per-agent format snapshots", () => {
           type: "local",
           command: ["harbor", "mcp-server"],
           enabled: true,
-          environment: EXPECTED_ENV,
+          environment: OPENCODE_ENV,
         },
       },
     });
   });
 
-  test("codex: TOML under [mcp_servers.harbor]", () => {
+  // Codex expands nothing AND scrubs the child environment (env_clear + an
+  // allowlist), so an env table could only ever pin a literal. env_vars is its
+  // sanctioned live passthrough: forwarded when set, omitted when not — which
+  // lands on the configured default room rather than a bogus one.
+  test("codex: TOML under [mcp_servers.harbor], forwarding via env_vars not env", () => {
     const doc = parseToml(emitSnippet("codex", { home }).snippet) as any;
     expect(doc.mcp_servers.harbor.command).toBe("harbor");
     expect(doc.mcp_servers.harbor.args).toEqual(["mcp-server"]);
-    expect(doc.mcp_servers.harbor.env).toEqual(EXPECTED_ENV);
+    expect(doc.mcp_servers.harbor.env_vars).toEqual(["AGENT_ENV_ROOM", "AGENT_ENV_SESSION"]);
+    expect(doc.mcp_servers.harbor.env).toBeUndefined();
   });
 
   test("gemini: mcpServers JSON shape", () => {
     const doc = JSON.parse(emitSnippet("gemini", { home }).snippet);
-    expect(doc.mcpServers.harbor).toEqual({ command: "harbor", args: ["mcp-server"], env: EXPECTED_ENV });
+    expect(doc.mcpServers.harbor).toEqual({ command: "harbor", args: ["mcp-server"], env: SHELL_ENV });
   });
 
   test("goose: YAML stdio extension under extensions, with a LITERAL default room", () => {
@@ -122,11 +149,41 @@ describe("emitSnippet — per-agent format snapshots", () => {
     expect(s.snippet).toContain("mcp_servers: {}");
   });
 
+  // Whatever a client's syntax, an explicit --room must be honored: as the
+  // `:-default` fallback where the client interpolates, as the literal value
+  // where it cannot. Clients that only ever read the live variable (cursor,
+  // opencode, codex) legitimately ignore it.
+  test("an explicit room reaches every agent that can express one", () => {
+    expect(emitSnippet("claude-code", { home, room: "legal" }).snippet).toContain(
+      "${AGENT_ENV_ROOM:-legal}",
+    );
+    expect(emitSnippet("gemini", { home, room: "legal" }).snippet).toContain(
+      "${AGENT_ENV_SESSION:-harbor-legal}",
+    );
+    expect(emitSnippet("goose", { home, room: "legal" }).snippet).toContain("AGENT_ENV_ROOM: legal");
+  });
+
+  // No client's emitted room may still be an unsubstituted template of ANOTHER
+  // client's dialect — that is exactly what reached the server as a literal
+  // room name and, before the isolation fix, unlocked the whole skill pool.
+  test("no agent emits a foreign client's placeholder dialect", () => {
+    const dialects: Record<string, RegExp> = {
+      "claude-code": /\{env:/,
+      gemini: /\{env:/,
+      cursor: /\$\{AGENT_ENV_ROOM[:}]/,
+      opencode: /\$\{AGENT_ENV_ROOM[:}]/,
+      goose: /\$\{|\{env:/,
+    };
+    for (const [agent, forbidden] of Object.entries(dialects)) {
+      expect(emitSnippet(agent as AgentId, { home }).snippet).not.toMatch(forbidden);
+    }
+  });
+
   test("a custom command/args/serverName flows into the snippet", () => {
     const doc = JSON.parse(
       renderSnippet("json-mcpServers", { command: "npx", args: ["harbor", "mcp-server"], serverName: "hb" }),
     );
-    expect(doc.mcpServers.hb).toEqual({ command: "npx", args: ["harbor", "mcp-server"], env: EXPECTED_ENV });
+    expect(doc.mcpServers.hb).toEqual({ command: "npx", args: ["harbor", "mcp-server"], env: SHELL_ENV });
   });
 });
 
@@ -140,17 +197,21 @@ describe("de-personalization", () => {
       expect(s.snippet).not.toContain("/home/");
       // No personal MCP server name leaks ("acme-erp" stands in for any such vendor).
       expect(s.snippet.toLowerCase()).not.toContain("acme-erp");
-      // Only the generic command and ${VAR} env references appear — except
-      // orchestrator (bakes in a literal room per connection) and goose
-      // (confirmed empirically that Goose's extensions.<name>.envs values are
-      // NOT ${VAR}-expanded, so a placeholder there would silently break room
-      // resolution — see renderGooseExtension's doc). Both default to the
-      // harmless generic "general" when no room is given, not a personal name.
-      if (s.format !== "typescript" && s.format !== "yaml-orchestrator" && s.format !== "yaml") {
-        expect(s.snippet).toContain("${AGENT_ENV_ROOM}");
-      }
-      if (s.format === "yaml") {
-        expect(s.snippet).toContain("AGENT_ENV_ROOM: general");
+      // Every agent references AGENT_ENV_ROOM somehow, but the SYNTAX is
+      // per-client (install.ts's EnvSyntax) — a single expected string would
+      // only re-encode one client's dialect. What must hold universally is
+      // that the room is either a variable reference or the harmless generic
+      // default "general", never a personal or hand-picked room name. Tier 2
+      // (typescript) has no config env block at all.
+      // Tier 2 (typescript) has no config env block; the orchestrator emits one
+      // connection PER ROOM and so emits an empty placeholder when this loop
+      // passes it none — both are covered by their own snapshot tests above.
+      if (s.format !== "typescript" && s.format !== "yaml-orchestrator") {
+        expect(s.snippet).toContain("AGENT_ENV_ROOM");
+        // The only literal room that may be baked in is the harmless generic
+        // default. Emitting for a specific room is opt-in via `room`, tested
+        // separately below.
+        expect(s.snippet).not.toMatch(/\b(legal|devops|finance|marketing|bookkeeping|productivity)\b/);
       }
     }
   });

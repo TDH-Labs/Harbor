@@ -142,7 +142,29 @@ export class AgentSession {
     return env.config.roomSkillSet(this.room);
   }
 
+  /**
+   * May this session's room load `skillName`?
+   *
+   * FAIL CLOSED ON AN UNKNOWN ROOM. `roomSkills` returns an empty set both for
+   * a configured room that restricts nothing and for a room that isn't in
+   * config at all, and "empty ⇒ unrestricted" applied to the second case is a
+   * full isolation bypass: any unrecognized room string — an empty
+   * `AGENT_ENV_ROOM`, a typo, or a client that passed the literal
+   * `${AGENT_ENV_ROOM}` because it does not expand placeholders — read every
+   * skill in the pool, across every room. Verified live 2026-07-23: an empty
+   * room read a legal-room skill's full content while the correctly-scoped
+   * `productivity` room was properly denied the same skill.
+   *
+   * The configured default room is exempt: a fresh install legitimately runs
+   * in a default room (e.g. "general") that has no `[skills.rooms.*]` section
+   * yet, and that has always meant "unrestricted" — see skill-install.ts's
+   * isDefaultRoom branch, which likewise declines to write a config entry for
+   * it. Every OTHER unconfigured room is an error state, not a wildcard.
+   */
   roomSkillAllowed(env: Environment, skillName: string): boolean {
+    if (!env.config.hasRoom(this.room) && this.room !== env.config.skillDefaultRoom) {
+      return false;
+    }
     const allowed = this.roomSkills(env);
     if (allowed.size === 0) return true; // no restriction configured
     return allowed.has(skillName);

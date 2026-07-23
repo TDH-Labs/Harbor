@@ -16,6 +16,7 @@ export {
   SCHEMA_VERSION,
   deepMerge,
   loadConfig,
+  normalizeRoomEnv,
 } from "./config.ts";
 export type { RawConfig, RawRoom, RawMcpServer } from "./config.ts";
 

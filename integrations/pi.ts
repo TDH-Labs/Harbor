@@ -45,6 +45,7 @@ import {
   AccessDeniedError,
   BudgetExceededError,
   type GateContext,
+  normalizeRoomEnv,
 } from "harbor-tugboat";
 
 // ── Pi extension API (structural — no package dependency) ─────────────────────
@@ -95,7 +96,9 @@ export interface PiHarborOptions {
 export function piContext(options: PiHarborOptions = {}): GateContext {
   const env = options.env ?? Environment.default();
   const procEnv = options.procEnv ?? process.env;
-  const room = procEnv.AGENT_ENV_ROOM ?? env.config.skillDefaultRoom;
+  // Blank or still-a-placeholder normalizes to absent — see normalizeRoomEnv
+  // in ../src/config.ts for why `??` alone let those become the session's room.
+  const room = normalizeRoomEnv(procEnv.AGENT_ENV_ROOM) ?? env.config.skillDefaultRoom;
   const sessionId = procEnv.AGENT_ENV_SESSION;
   const session = new AgentSession({
     room,

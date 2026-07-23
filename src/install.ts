@@ -10,7 +10,12 @@
  * Two tiers (BUILD_BRIEF §6):
  *   - Tier 1 — MCP server: Claude Code, Cursor, OpenCode, Codex, Gemini, Goose.
  *     One stdio entry pointing at `harbor mcp-server`. The room/session come from
- *     `AGENT_ENV_ROOM` / `AGENT_ENV_SESSION` in the launching environment.
+ *     `AGENT_ENV_ROOM` / `AGENT_ENV_SESSION` in the launching environment —
+ *     but HOW each client gets them there differs per client and is not
+ *     interchangeable: see {@link EnvSyntax}, where every dialect is recorded
+ *     against a live verification rather than assumed. A client handed a syntax
+ *     it does not recognize does not error; it passes the template text through
+ *     as the room name, which is why this matters.
  *   - Tier 2 — in-process import: Pi. A one-line extension re-export of
  *     `harbor-tugboat/integrations/pi` — no subprocess.
  *
@@ -20,8 +25,9 @@
  * a per-agent snapshot test.
  *
  * De-personalization (BUILD_BRIEF §3): every emitted snippet is generic. The
- * command is `harbor` (overridable); env values are `${AGENT_ENV_ROOM}` /
- * `${AGENT_ENV_SESSION}` references, never literal room names or paths; no
+ * command is `harbor` (overridable); env values are variable references, or at
+ * most the environment's own configured default room, never a hand-picked room
+ * name or a personal path; no
  * personal MCP servers appear. Default config paths resolve from an explicit
  * `home` (tests) or `$HOME` — never a hardcoded absolute user path.
  *
@@ -83,15 +89,13 @@ export interface EmitOptions {
    */
   rooms?: string[];
   /**
-   * Default room ("goose" agent only). Confirmed empirically (2026-07-23,
-   * live `AGENT_ENV_ROOM=<room>` in the parent shell + `goose run`): Goose's
-   * `extensions.<name>.envs` values are passed to the child process LITERALLY
-   * — Goose does NOT expand `${VAR}` references the way the launching-env
-   * story above assumes for every other Tier 1 agent. Emitting the placeholder
-   * there would silently break room resolution (empty/invalid room), which is
-   * WORSE than a working hardcoded default. So goose's static config entry is
-   * pinned to one concrete room at install time instead, same as orchestrator's
-   * per-room entries. Defaults to "general" when not given.
+   * The room baked into the emitted config. How it is used depends on the
+   * agent's {@link EnvSyntax}: clients that interpolate live take it only as
+   * the `${VAR:-default}` fallback (so `AGENT_ENV_ROOM` from the launching
+   * shell still wins); a client that cannot substitute at all takes it as the
+   * literal value; clients that only ever read the live variable ignore it.
+   * Defaults to "general" — callers pass the environment's configured default
+   * room (the CLI does).
    */
   room?: string;
 }
@@ -109,11 +113,40 @@ export interface InstallSnippet {
   instructions: string;
 }
 
+/**
+ * How an agent's config expresses the `AGENT_ENV_ROOM` / `AGENT_ENV_SESSION`
+ * values. MCP clients differ sharply and none of them errors on a syntax it
+ * doesn't recognize — it just hands the literal template text to the server as
+ * the room name. Each variant below was VERIFIED (2026-07-23), not assumed:
+ * an env-probe shim stood in for the server and recorded exactly what arrived.
+ *
+ *  - `shell`    — `${VAR}` expands, and `${VAR:-default}` is supported, so the
+ *                 launching environment wins and a bare launch still lands on a
+ *                 real room. Verified live: Claude Code, Gemini CLI.
+ *  - `vscode`   — VS Code-style `${env:VAR}`; `${VAR}` is NOT expanded. No
+ *                 default syntax exists, so an unset variable arrives blank or
+ *                 literal — both normalize to the default room server-side
+ *                 (see normalizeRoomEnv). Cursor, per its published docs.
+ *  - `opencode` — OpenCode's own `{env:VAR}`; `${VAR}` is ignored entirely
+ *                 (verified: the literal `${AGENT_ENV_ROOM}` reached the
+ *                 server even with the variable set in the launching shell).
+ *  - `codex`    — no substitution anywhere, AND the child environment is
+ *                 scrubbed (`env_clear()` + an allowlist), so nothing is
+ *                 inherited either. Its `env_vars` key is the sanctioned
+ *                 passthrough: named variables are forwarded live, and simply
+ *                 omitted when unset — which lands on the default room.
+ *  - `literal`  — no substitution of any kind, so the room is baked in at
+ *                 install time. Verified: Goose.
+ */
+type EnvSyntax = "shell" | "vscode" | "opencode" | "codex" | "literal";
+
 interface AgentSpec {
   tier: 1 | 2;
   format: ConfigFormat;
   /** Default config path relative to home (POSIX segments). */
   pathFromHome: string[];
+  /** Verified env-substitution syntax for this client (see {@link EnvSyntax}). */
+  envSyntax: EnvSyntax;
   /** Extra instruction lines (e.g. a native CLI command). */
   extraInstructions?: (ctx: { command: string; args: string[]; serverName: string }) => string[];
 }
@@ -123,6 +156,7 @@ const AGENTS: Record<AgentId, AgentSpec> = {
     tier: 1,
     format: "json-mcpServers",
     pathFromHome: [".claude.json"],
+    envSyntax: "shell",
     extraInstructions: ({ serverName }) => [
       `Project scope: add the block to ./.mcp.json (top-level "mcpServers").`,
       `Or use the CLI: claude mcp add-json ${serverName} '<the JSON object above>'`,
@@ -133,29 +167,48 @@ const AGENTS: Record<AgentId, AgentSpec> = {
     tier: 1,
     format: "json-mcpServers",
     pathFromHome: [".cursor", "mcp.json"],
-    extraInstructions: () => [`Project scope: ./.cursor/mcp.json (same shape).`],
+    envSyntax: "vscode",
+    extraInstructions: () => [
+      `Project scope: ./.cursor/mcp.json (same shape).`,
+      `Cursor interpolates \${env:VAR}, not \${VAR}, and does not pass the parent`,
+      `environment through to MCP servers — the room must be named explicitly here.`,
+    ],
   },
   opencode: {
     tier: 1,
     format: "json-mcp",
     pathFromHome: [".config", "opencode", "opencode.json"],
-    extraInstructions: () => [`OpenCode uses the "mcp" key with type "local" and an array command.`],
+    envSyntax: "opencode",
+    extraInstructions: () => [
+      `OpenCode uses the "mcp" key with type "local" and an array command.`,
+      `Its interpolation syntax is {env:VAR} — \${VAR} is NOT expanded and would`,
+      `reach the server as literal text.`,
+    ],
   },
   codex: {
     tier: 1,
     format: "toml",
     pathFromHome: [".codex", "config.toml"],
-    extraInstructions: () => [`Codex reads MCP servers from config.toml under [mcp_servers.<name>].`],
+    envSyntax: "codex",
+    extraInstructions: () => [
+      `Codex reads MCP servers from config.toml under [mcp_servers.<name>].`,
+      `Codex spawns MCP servers with a SCRUBBED environment and expands nothing,`,
+      `so the room is forwarded via env_vars (its sanctioned passthrough) rather`,
+      `than an env table. Unset simply omits the key, which falls back to the`,
+      `environment's configured default room.`,
+    ],
   },
   gemini: {
     tier: 1,
     format: "json-mcpServers",
     pathFromHome: [".gemini", "settings.json"],
+    envSyntax: "shell",
   },
   goose: {
     tier: 1,
     format: "yaml",
     pathFromHome: [".config", "goose", "config.yaml"],
+    envSyntax: "literal",
     extraInstructions: () => [
       `Goose registers MCP servers as stdio extensions under "extensions".`,
       `Goose does NOT expand \${VAR} in extensions.<name>.envs — the room/session`,
@@ -170,6 +223,9 @@ const AGENTS: Record<AgentId, AgentSpec> = {
     tier: 2,
     format: "typescript",
     pathFromHome: [".pi", "agent", "extensions", "skill-accessor.ts"],
+    // Tier 2 runs IN-PROCESS and reads the real process env directly, so there
+    // is no config file to substitute into and nothing to get wrong here.
+    envSyntax: "literal",
     extraInstructions: () => [
       `Tier 2 (in-process import): no subprocess, <3ms per call.`,
       `Run Pi with --no-skills so Harbor owns skill loading.`,
@@ -183,6 +239,8 @@ const AGENTS: Record<AgentId, AgentSpec> = {
     tier: 1,
     format: "yaml-orchestrator",
     pathFromHome: [".config", "orchestrator-agent", "mcp.yaml"],
+    // Emits one connection per room, each already pinned to a literal room.
+    envSyntax: "literal",
     extraInstructions: ({ serverName }) => [
       `Placeholder path — pass --path to point at your orchestrator's real`,
       `MCP config file.`,
@@ -217,13 +275,42 @@ function resolveHome(options: EmitOptions): string {
   return env.HOME ?? env.USERPROFILE ?? homedir();
 }
 
-/** The Harbor server's env block — generic `${VAR}` references only. */
-function serverEnv(): Record<string, string> {
-  return {
-    AGENT_ENV_ROOM: "${AGENT_ENV_ROOM}",
-    AGENT_ENV_SESSION: "${AGENT_ENV_SESSION}",
-  };
+/**
+ * The Harbor server's env block, in the calling agent's OWN verified
+ * substitution syntax (see {@link EnvSyntax}).
+ *
+ * Every value stays generic — a `${VAR}` reference, or the environment's
+ * configured default room, never a personal path or hand-picked room name.
+ * `codex` returns an empty block on purpose: it forwards the variables through
+ * its `env_vars` allowlist instead (rendered by the TOML branch).
+ */
+function serverEnv(syntax: EnvSyntax, room: string): Record<string, string> {
+  switch (syntax) {
+    case "shell":
+      // Launching env wins; a bare launch still lands on a real room.
+      return {
+        AGENT_ENV_ROOM: `\${AGENT_ENV_ROOM:-${room}}`,
+        AGENT_ENV_SESSION: `\${AGENT_ENV_SESSION:-harbor-${room}}`,
+      };
+    case "vscode":
+      return {
+        AGENT_ENV_ROOM: "${env:AGENT_ENV_ROOM}",
+        AGENT_ENV_SESSION: "${env:AGENT_ENV_SESSION}",
+      };
+    case "opencode":
+      return {
+        AGENT_ENV_ROOM: "{env:AGENT_ENV_ROOM}",
+        AGENT_ENV_SESSION: "{env:AGENT_ENV_SESSION}",
+      };
+    case "codex":
+      return {};
+    case "literal":
+      return { AGENT_ENV_ROOM: room, AGENT_ENV_SESSION: `harbor-${room}` };
+  }
 }
+
+/** Variables Codex forwards live from the launching shell via its allowlist. */
+const CODEX_ENV_VARS = ["AGENT_ENV_ROOM", "AGENT_ENV_SESSION"];
 
 const ENFORCEMENT_NOTE =
   "Note: this routes skill access through Harbor's room/budget gate. It is a tool-" +
@@ -242,7 +329,9 @@ export function emitSnippet(agent: AgentId, options: EmitOptions = {}): InstallS
 
   const rooms = options.rooms ?? [];
   const room = options.room ?? "general";
-  const snippet = renderSnippet(spec.format, { command, args, serverName, rooms, room });
+  const snippet = renderSnippet(spec.format, {
+    command, args, serverName, rooms, room, envSyntax: spec.envSyntax,
+  });
   const lines: string[] = [`Add to ${defaultPath}:`];
   if (spec.extraInstructions) lines.push(...spec.extraInstructions({ command, args, serverName }));
   lines.push(ENFORCEMENT_NOTE);
@@ -253,16 +342,22 @@ export function emitSnippet(agent: AgentId, options: EmitOptions = {}): InstallS
 /** Render just the config block for a format (the unit each snapshot test pins). */
 export function renderSnippet(
   format: ConfigFormat,
-  ctx: { command: string; args: string[]; serverName: string; rooms?: string[]; room?: string },
+  ctx: {
+    command: string;
+    args: string[];
+    serverName: string;
+    rooms?: string[];
+    room?: string;
+    /** The agent's verified substitution syntax; two agents can share a format
+     *  but differ here (claude-code and cursor are both json-mcpServers). */
+    envSyntax?: EnvSyntax;
+  },
 ): string {
-  const { command, args, serverName, rooms = [], room = "general" } = ctx;
+  const { command, args, serverName, rooms = [], room = "general", envSyntax = "shell" } = ctx;
+  const env = serverEnv(envSyntax, room);
   switch (format) {
     case "json-mcpServers":
-      return JSON.stringify(
-        { mcpServers: { [serverName]: { command, args, env: serverEnv() } } },
-        null,
-        2,
-      );
+      return JSON.stringify({ mcpServers: { [serverName]: { command, args, env } } }, null, 2);
     case "json-mcp":
       return JSON.stringify(
         {
@@ -271,7 +366,7 @@ export function renderSnippet(
               type: "local",
               command: [command, ...args],
               enabled: true,
-              environment: serverEnv(),
+              environment: env,
             },
           },
         },
@@ -279,7 +374,16 @@ export function renderSnippet(
         2,
       );
     case "toml":
-      return stringifyToml({ mcp_servers: { [serverName]: { command, args, env: serverEnv() } } });
+      // Codex expands nothing and scrubs the child environment; `env_vars` is
+      // its sanctioned live passthrough, so it replaces the env table entirely.
+      return stringifyToml({
+        mcp_servers: {
+          [serverName]:
+            envSyntax === "codex"
+              ? { command, args, env_vars: CODEX_ENV_VARS }
+              : { command, args, env },
+        },
+      });
     case "yaml":
       return renderGooseExtension(serverName, command, args, 0, room);
     case "typescript":
@@ -410,6 +514,7 @@ export function applyConfig(agent: AgentId, options: ApplyOptions = {}): ApplyRe
     serverName,
     rooms: options.rooms ?? [],
     room: options.room ?? "general",
+    envSyntax: spec.envSyntax,
   });
   if (result.action === "unchanged") {
     return { path, backup: null, action: "unchanged" };
@@ -433,7 +538,14 @@ interface MergeOutcome {
 type MergeFn = (
   existing: string,
   existed: boolean,
-  ctx: { command: string; args: string[]; serverName: string; rooms?: string[]; room?: string },
+  ctx: {
+    command: string;
+    args: string[];
+    serverName: string;
+    rooms?: string[];
+    room?: string;
+    envSyntax?: EnvSyntax;
+  },
 ) => MergeOutcome;
 
 function mergeFor(format: ConfigFormat): MergeFn {
@@ -443,7 +555,7 @@ function mergeFor(format: ConfigFormat): MergeFn {
         mergeJson(existing, existed, "mcpServers", ctx.serverName, {
           command: ctx.command,
           args: ctx.args,
-          env: serverEnv(),
+          env: serverEnv(ctx.envSyntax ?? "shell", ctx.room ?? "general"),
         });
     case "json-mcp":
       return (existing, existed, ctx) =>
@@ -451,7 +563,7 @@ function mergeFor(format: ConfigFormat): MergeFn {
           type: "local",
           command: [ctx.command, ...ctx.args],
           enabled: true,
-          environment: serverEnv(),
+          environment: serverEnv(ctx.envSyntax ?? "shell", ctx.room ?? "general"),
         });
     case "toml":
       return (existing, existed, ctx) => mergeToml(existing, existed, ctx);
@@ -495,7 +607,7 @@ function mergeJson(
 function mergeToml(
   existing: string,
   existed: boolean,
-  ctx: { command: string; args: string[]; serverName: string },
+  ctx: { command: string; args: string[]; serverName: string; room?: string; envSyntax?: EnvSyntax },
 ): MergeOutcome {
   let doc: Record<string, unknown> = {};
   if (existed && existing.trim()) {
@@ -504,7 +616,13 @@ function mergeToml(
   const servers = (doc.mcp_servers && typeof doc.mcp_servers === "object"
     ? doc.mcp_servers
     : {}) as Record<string, unknown>;
-  const entry = { command: ctx.command, args: ctx.args, env: serverEnv() };
+  const syntax = ctx.envSyntax ?? "shell";
+  // Codex scrubs the child environment and expands nothing — `env_vars` is its
+  // sanctioned live passthrough and replaces the env table (see EnvSyntax).
+  const entry =
+    syntax === "codex"
+      ? { command: ctx.command, args: ctx.args, env_vars: CODEX_ENV_VARS }
+      : { command: ctx.command, args: ctx.args, env: serverEnv(syntax, ctx.room ?? "general") };
   if (JSON.stringify(servers[ctx.serverName]) === JSON.stringify(entry)) {
     return { content: existing, action: "unchanged" };
   }

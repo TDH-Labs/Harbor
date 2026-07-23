@@ -249,6 +249,45 @@ export function fileExists(path: string): boolean {
   }
 }
 
+/**
+ * A config-template placeholder that reached us verbatim because the MCP client
+ * never substituted it: `${VAR}`, `${env:VAR}` (VS Code / Cursor), `{env:VAR}`
+ * (OpenCode), `$VAR`.
+ *
+ * MCP clients differ sharply here, and NONE of them error on an unsubstituted
+ * value — each was verified rather than assumed (2026-07-23): Claude Code
+ * expands `${VAR}` and supports `${VAR:-default}`, but passes the literal
+ * through when the variable is unset; Gemini CLI expands `${VAR}` and
+ * substitutes an empty string when unset; OpenCode ignores `${VAR}` entirely
+ * and only expands its own `{env:VAR}`; Goose performs no substitution at all;
+ * Cursor documents `${env:VAR}`; Codex scrubs the environment and expands
+ * nothing.
+ */
+const UNSUBSTITUTED_PLACEHOLDER = /^\$\{[^}]*\}$|^\{env:[^}]*\}$|^\$[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * Normalize a raw `AGENT_ENV_ROOM` env value into a usable room name, or `null`
+ * when it carries no real information and the caller should fall back to the
+ * configured default room.
+ *
+ * Blank and still-a-placeholder both mean "this client told us nothing". Left
+ * unnormalized they became the session's ROOM NAME, and an unrecognized room
+ * used to read as "no restriction configured" — a full isolation bypass
+ * (verified live 2026-07-23: an empty room read a legal-room skill's entire
+ * contents). isolation.ts's `roomSkillAllowed` now also fails closed on an
+ * unknown room, so this normalizer is the usability half of that fix: it turns
+ * "denied everything" into "correctly scoped to the default room" for the very
+ * common case of an agent launched from a bare terminal with no
+ * `AGENT_ENV_ROOM` set.
+ */
+export function normalizeRoomEnv(raw: string | undefined | null): string | null {
+  if (raw == null) return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  if (UNSUBSTITUTED_PLACEHOLDER.test(trimmed)) return null;
+  return trimmed;
+}
+
 // ── Config ─────────────────────────────────────────────────────────────────--
 
 /**
@@ -389,6 +428,22 @@ export class Config {
   }
   get defaultRoomDailyLimit(): number {
     return Number(this.data.budgets.default_room_daily_limit);
+  }
+
+  /**
+   * Is `room` an actually-configured room (has a `[skills.rooms.<room>]`
+   * section)?
+   *
+   * Load-bearing for the isolation boundary: {@link roomSkillSet} returns an
+   * empty set BOTH for a configured room that lists no skills (legitimately
+   * unrestricted) and for a room that does not exist at all (a typo, or an
+   * unexpanded `${AGENT_ENV_ROOM}` placeholder arriving as a literal). Those
+   * two cases must not be conflated — isolation.ts's `roomSkillAllowed` reads
+   * "empty set" as "no restriction configured", so without this predicate an
+   * UNKNOWN room silently grants access to every skill in the pool.
+   */
+  hasRoom(room: string): boolean {
+    return Object.prototype.hasOwnProperty.call(this.data.skills.rooms, room);
   }
 
   /** Skills allowed for a room (empty set ⇒ no room-skill restriction). */

@@ -102,6 +102,31 @@ describe("room-gated resource access", () => {
     expect(checkSkillAccess(s, env, "anything")).toBe(true);
   });
 
+  // An UNCONFIGURED room and a configured-but-unrestricted room both produce an
+  // empty roomSkillSet. Reading both as "no restriction" was a full isolation
+  // bypass: verified live 2026-07-23 that a session whose room was an empty
+  // string, or the literal "${AGENT_ENV_ROOM}" a non-substituting MCP client
+  // passed through, read a legal-room skill's entire contents while a correctly
+  // scoped room was denied that same skill.
+  test("a room that is NOT in config is denied, not treated as unrestricted", () => {
+    const env = envWithRooms({ legal: { skills: ["nda-review"] } });
+    for (const room of ["", "${AGENT_ENV_ROOM}", "typo-room", "  "]) {
+      const s = createSession({ room, env });
+      expect(checkSkillAccess(s, env, "nda-review")).toBe(false);
+      expect(checkSkillAccess(s, env, "anything-at-all")).toBe(false);
+    }
+  });
+
+  // The one legitimate unconfigured room: a fresh install runs in the default
+  // room before any [skills.rooms.*] section exists. skill-install.ts's
+  // isDefaultRoom branch relies on the same carve-out.
+  test("the configured default room stays unrestricted even with no config section", () => {
+    const env = envWithRooms({ legal: { skills: ["nda-review"] } });
+    expect(env.config.hasRoom(env.config.skillDefaultRoom)).toBe(false);
+    const s = createSession({ room: env.config.skillDefaultRoom, env });
+    expect(checkSkillAccess(s, env, "anything")).toBe(true);
+  });
+
   test("checkSkillAccess fails without the read_skill capability", () => {
     const env = envWithRooms({ legal: { skills: ["nda-review"], capabilities: ["list_skills"] } });
     const s = createSession({ room: "legal", env });

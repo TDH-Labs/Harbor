@@ -224,6 +224,22 @@ describe("listSkills / getSkill", () => {
     expect(r2.map((s) => s.name)).toEqual(["bb"]);
   });
 
+  // `undefined` (the CLI's `skills-list` with no --room) means "no filter".
+  // An empty string does NOT — it is a room that matches nothing. Treating it
+  // as falsy made it a wildcard, so a session whose room resolved to "" (a
+  // client that substitutes an unset variable with an empty string) enumerated
+  // every skill in every room.
+  test("an empty-string room filters to nothing, it is not a wildcard", () => {
+    writeSkill("aa", 'name: aa\ndescription: "Skill AA"');
+    writeSkill("bb", 'name: bb\ndescription: "Skill BB"');
+    const e = env({
+      rooms: { r1: { description: "R1", skills: ["aa"] }, r2: { description: "R2", skills: ["bb"] } },
+      default_room: "r1",
+    });
+    expect(listSkills(e, "").map((s) => s.name)).toEqual([]);
+    expect(listSkills(e, undefined).map((s) => s.name)).toEqual(["aa", "bb"]);
+  });
+
   // A skill can be explicitly granted in MORE than one room (isolation.ts's
   // roomSkillAllowed already checks each room's own config list directly, so
   // this was always safe to enforce — the gap was purely in these display/
