@@ -120,6 +120,26 @@ describe("emitSnippet — per-agent format snapshots", () => {
     expect(s.instructions).toContain("--with-extension");
   });
 
+  // Antigravity is a DIFFERENT product from the Gemini CLI and must not be
+  // conflated with it: same ~/.gemini directory, different file. Conflating
+  // them would silently write one agent's config into the other's.
+  test("antigravity: mcpServers JSON at its own path, distinct from the Gemini CLI", () => {
+    const s = emitSnippet("antigravity", { home });
+    expect(s.defaultPath).toBe(join(home, ".gemini", "config", "mcp_config.json"));
+    expect(s.defaultPath).not.toBe(emitSnippet("gemini", { home }).defaultPath);
+    const doc = JSON.parse(s.snippet);
+    expect(doc.mcpServers.harbor.command).toBe("harbor");
+    expect(doc.mcpServers.harbor.env.AGENT_ENV_ROOM).toBe("general");
+  });
+
+  test("antigravity: --room is baked in literally", () => {
+    const doc = JSON.parse(emitSnippet("antigravity", { home, room: "legal" }).snippet);
+    expect(doc.mcpServers.harbor.env).toEqual({
+      AGENT_ENV_ROOM: "legal",
+      AGENT_ENV_SESSION: "harbor-legal",
+    });
+  });
+
   test("pi: Tier 2 in-process re-export (no MCP entry)", () => {
     const s = emitSnippet("pi", { home });
     expect(s.tier).toBe(2);

@@ -51,6 +51,7 @@ export type AgentId =
   | "codex"
   | "gemini"
   | "goose"
+  | "antigravity"
   | "pi"
   | "orchestrator";
 
@@ -61,6 +62,7 @@ export const AGENT_IDS: readonly AgentId[] = [
   "codex",
   "gemini",
   "goose",
+  "antigravity",
   "pi",
   "orchestrator",
 ];
@@ -217,6 +219,27 @@ const AGENTS: Record<AgentId, AgentSpec> = {
       `interactive session without editing this file, launch goose with its own`,
       `--with-extension flag instead of relying on this static entry, e.g.:`,
       `  goose session --with-extension "AGENT_ENV_ROOM=<room> AGENT_ENV_SESSION=<id> harbor mcp-server"`,
+    ],
+  },
+  // Google's agentic IDE — a DIFFERENT product from the Gemini CLI above, with
+  // its own MCP config. Both can be installed side by side. The path and schema
+  // here come from the documentation Antigravity embeds in its own
+  // language_server binary (the component that owns MCP): global config lives
+  // at `~/.gemini/config/mcp_config.json` — the same ~/.gemini DIRECTORY the
+  // Gemini CLI uses but a different FILE, so the two never collide.
+  antigravity: {
+    tier: 1,
+    format: "json-mcpServers",
+    pathFromHome: [".gemini", "config", "mcp_config.json"],
+    // No substitution is documented for its `env` block, so the room is pinned
+    // literally — the same conservative choice made for Goose, and safe either
+    // way now that an unsubstituted placeholder normalizes to the default room.
+    envSyntax: "literal",
+    extraInstructions: () => [
+      `Antigravity is Google's agentic IDE — a different product from the Gemini`,
+      `CLI, with its own MCP config file (~/.gemini/config/mcp_config.json vs the`,
+      `CLI's ~/.gemini/settings.json). Installing one does not configure the other.`,
+      `Its language server also reads plugins/<name>/mcp_config.json per plugin.`,
     ],
   },
   pi: {
