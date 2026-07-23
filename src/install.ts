@@ -290,6 +290,18 @@ const AGENTS: Record<AgentId, AgentSpec> = {
   },
 };
 
+/**
+ * Every supported agent's default config path, resolved under `home`.
+ *
+ * Derived from the AGENTS registry rather than a hand-kept list, so a newly
+ * supported agent is picked up by everything that scans configs (notably
+ * `harbor secrets doctor`) with no second place to update. Tier 2 is excluded:
+ * its "config" is a TypeScript re-export, not a credential-bearing file.
+ */
+export function agentConfigPaths(home: string): string[] {
+  return AGENT_IDS.filter((id) => AGENTS[id].tier === 1).map((id) => join(home, ...AGENTS[id].pathFromHome));
+}
+
 // ── Emission ─────────────────────────────────────────────────────────────────
 
 function resolveHome(options: EmitOptions): string {

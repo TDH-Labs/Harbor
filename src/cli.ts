@@ -54,7 +54,16 @@ import { assignOrphans, assignOrphansAndReload, getOrphanSkills } from "./skill-
 import { addSkillToAnotherRoom, listConfiguredRooms, roomsForSkill } from "./skill-room-add.ts";
 import { update as updateSkill, removeSkill } from "./skill-update.ts";
 import { canPrompt, confirmAction, pickRooms } from "./room-picker.ts";
-import { AGENT_IDS, applyConfig, emitSnippet, type AgentId } from "./install.ts";
+import { AGENT_IDS, agentConfigPaths, applyConfig, emitSnippet, type AgentId } from "./install.ts";
+import {
+  describeSecrets,
+  exportLines,
+  getSecret,
+  removeSecret,
+  scanConfigs,
+  setSecret,
+  defaultHome,
+} from "./secrets.ts";
 
 // ── Environment resolution ────────────────────────────────────────────────────
 
@@ -1466,6 +1475,114 @@ const installCmd = defineCommand({
   },
 });
 
+const secretsCmd = defineCommand({
+  meta: {
+    name: "secrets",
+    description: "Keychain-backed secrets — keep credentials out of agent config files",
+  },
+  subCommands: {
+    set: defineCommand({
+      meta: { name: "set", description: "Store a secret. The VALUE is read from stdin, never argv." },
+      args: { name: { type: "positional", required: true, description: "Secret name" } },
+      async run({ args }) {
+        // stdin, never argv: a value passed as an argument is visible to `ps`
+        // for the lifetime of the call.
+        const value = (await Bun.stdin.text()).replace(/\n$/, "");
+        if (!value) {
+          console.error("secrets set: no value on stdin. Pipe it, e.g.:  printf %s \"$TOKEN\" | harbor secrets set my-key");
+          process.exitCode = 1;
+          return;
+        }
+        try {
+          await setSecret(args.name, value);
+        } catch (err) {
+          console.error(`secrets set: ${err instanceof Error ? err.message : String(err)}`);
+          process.exitCode = 1;
+          return;
+        }
+        console.log(`✓ stored '${args.name}' (${value.length} chars) in the OS keychain`);
+      },
+    }),
+    get: defineCommand({
+      meta: { name: "get", description: "Print a secret to stdout (for $(...) capture)" },
+      args: { name: { type: "positional", required: true, description: "Secret name" } },
+      async run({ args }) {
+        const v = await getSecret(args.name);
+        if (v == null) {
+          console.error(`secrets get: '${args.name}' not found`);
+          process.exitCode = 1;
+          return;
+        }
+        process.stdout.write(v);
+      },
+    }),
+    list: defineCommand({
+      meta: { name: "list", description: "Show stored secrets by name + length (never the value)" },
+      args: { name: { type: "string", description: "Comma-separated names to check" } },
+      async run({ args }) {
+        const names = parseCommaList(args.name);
+        if (names.length === 0) {
+          console.log("usage: harbor secrets list --name a,b,c");
+          console.log("(the OS keychain has no portable list-by-service; pass the names to check)");
+          return;
+        }
+        const infos = await describeSecrets(names);
+        if (infos.length === 0) {
+          console.log("(none of those names are stored)");
+          return;
+        }
+        for (const i of infos) console.log(`  ${i.name.padEnd(28)} ${String(i.length).padStart(5)} chars  ${i.prefix}…`);
+      },
+    }),
+    rm: defineCommand({
+      meta: { name: "rm", description: "Remove a secret from the keychain" },
+      args: { name: { type: "positional", required: true, description: "Secret name" } },
+      async run({ args }) {
+        console.log((await removeSecret(args.name)) ? `✓ removed '${args.name}'` : `'${args.name}' was not stored`);
+      },
+    }),
+    export: defineCommand({
+      meta: { name: "export", description: "Emit shell export lines that resolve from the keychain at run time" },
+      args: { name: { type: "string", description: "Comma-separated secret names" } },
+      async run({ args }) {
+        const names = parseCommaList(args.name);
+        if (names.length === 0) {
+          console.error("secrets export: --name a,b,c is required");
+          process.exitCode = 1;
+          return;
+        }
+        for (const line of await exportLines(names)) console.log(line);
+      },
+    }),
+    doctor: defineCommand({
+      meta: {
+        name: "doctor",
+        description: "Scan every supported agent's config for credentials sitting in plaintext",
+      },
+      args: { home: { type: "string", description: "Home dir to resolve agent config paths under" } },
+      run({ args }) {
+        const home = args.home ?? defaultHome();
+        const findings = scanConfigs(agentConfigPaths(home));
+        if (findings.length === 0) {
+          console.log("✅ No plaintext credentials found in any supported agent's config.");
+          return;
+        }
+        console.log(`⚠️  ${findings.length} plaintext credential(s) found:\n`);
+        for (const f of findings) {
+          const tag = f.expired ? " [EXPIRED — delete it, do not migrate]" : "";
+          console.log(`  ${f.file}`);
+          console.log(`    ${f.location}  (${f.kind}, ${f.length} chars, ${f.prefix}…)${tag}`);
+        }
+        console.log(`\nMove each into the keychain, then reference it from the config:`);
+        console.log(`  printf %s "$VALUE" | harbor secrets set <name>`);
+        console.log(`  harbor secrets export --name <name>   # add to your shell profile`);
+        console.log(`\nNote: clients differ on substitution syntax — see 'harbor install --for <agent>'.`);
+        process.exitCode = 1;
+      },
+    }),
+  },
+});
+
 // ── Root command ──────────────────────────────────────────────────────────────
 
 export const main: CommandDef = defineCommand({
@@ -1505,6 +1622,7 @@ export const main: CommandDef = defineCommand({
     "skill-remove": skillRemoveCmd,
     "mcp-server": mcpServerCmd,
     install: installCmd,
+    secrets: secretsCmd,
   },
 });
 
