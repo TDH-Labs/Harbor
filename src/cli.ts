@@ -56,6 +56,7 @@ import { update as updateSkill, removeSkill } from "./skill-update.ts";
 import { canPrompt, confirmAction, pickRooms } from "./room-picker.ts";
 import { AGENT_IDS, agentConfigPaths, applyConfig, emitSnippet, type AgentId } from "./install.ts";
 import { analyzeIsolation, formatReport } from "./isolation-doctor.ts";
+import { findSensitive, planPack, writePack } from "./buzz-pack.ts";
 import {
   describeSecrets,
   exportLines,
@@ -1595,6 +1596,81 @@ const secretsCmd = defineCommand({
   },
 });
 
+const buzzPackCmd = defineCommand({
+  meta: {
+    name: "buzz-pack",
+    description: "Emit a Buzz Persona Pack from Harbor rooms (one room -> one persona)",
+  },
+  args: {
+    ...commonArgs,
+    out: { type: "string", description: "Output directory for the pack" },
+    room: { type: "string", description: "Emit a single room (default: every configured room)" },
+    id: { type: "string", description: "Pack id (default 'com.harbor.rooms')" },
+    name: { type: "string", description: "Pack display name (default 'Harbor Rooms')" },
+    version: { type: "string", description: "Pack version (default '0.1.0')" },
+    "dry-run": { type: "boolean", description: "Show what would be emitted, write nothing" },
+    "private-term": {
+      type: "string",
+      description: "Comma-separated terms to warn about in descriptions before publishing",
+    },
+  },
+  run({ args }) {
+    const env = envFromArgs(args);
+    let plan;
+    try {
+      plan = planPack(env, {
+        ...(args.room ? { room: args.room } : {}),
+        ...(args.id ? { packId: args.id } : {}),
+        ...(args.name ? { packName: args.name } : {}),
+        ...(args.version ? { version: args.version } : {}),
+      });
+    } catch (err) {
+      console.error(`buzz-pack: ${err instanceof Error ? err.message : String(err)}`);
+      process.exitCode = 1;
+      return;
+    }
+
+    console.log(`${plan.personas.length} persona(s) from Harbor rooms:`);
+    for (const p of plan.personas) {
+      console.log(`  ${p.name.padEnd(22)} ${String(p.skills.length).padStart(3)} skill(s)  ${p.mcp_servers.length} mcp`);
+    }
+    console.log(`  ${plan.skillsToCopy.length} unique skill(s) to copy`);
+
+    // Buzz drops a command-less MCP server SILENTLY; say so here instead.
+    for (const d of plan.droppedServers) {
+      console.log(`  ⚠️  ${d.room}: dropped MCP server '${d.server}' — ${d.reason}`);
+    }
+    for (const m of plan.missingSkills) {
+      console.log(`  ⚠️  ${m.room}: skill '${m.skill}' is not in the pool — omitted`);
+    }
+
+    // A pack embeds room descriptions and full skill CONTENT. Warn BEFORE it
+    // is written, because publishing one is equivalent to publishing the
+    // skills themselves.
+    const terms = parseCommaList(args["private-term"]);
+    const hits = findSensitive(plan, terms);
+    if (hits.length > 0) {
+      console.log("");
+      console.log("⚠️  Private terms appear in:");
+      for (const h of hits) console.log(`     ${h}`);
+    }
+
+    if (!args.out || args["dry-run"]) {
+      console.log("");
+      console.log(args.out ? "Dry run — nothing written." : "No --out given — nothing written.");
+      return;
+    }
+
+    const res = writePack(env, plan, args.out);
+    console.log("");
+    console.log(`✓ Wrote pack to ${res.outDir}`);
+    console.log(`  ${res.personaFiles.length} persona file(s), ${res.skillsCopied} skill(s) copied`);
+    console.log("");
+    console.log("Validate it with Buzz before use:  buzz pack validate " + res.outDir);
+    console.log("A pack contains your skill CONTENT — review before publishing it anywhere.");
+  },
+});
+
 // ── Root command ──────────────────────────────────────────────────────────────
 
 export const main: CommandDef = defineCommand({
@@ -1635,6 +1711,7 @@ export const main: CommandDef = defineCommand({
     "mcp-server": mcpServerCmd,
     install: installCmd,
     secrets: secretsCmd,
+    "buzz-pack": buzzPackCmd,
   },
 });
 
