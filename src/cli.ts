@@ -1415,6 +1415,12 @@ const installCmd = defineCommand({
     path: { type: "string", description: "Override the target config path" },
     command: { type: "string", description: "Server command (default 'harbor')" },
     "server-name": { type: "string", description: "Entry name (default 'harbor')" },
+    room: {
+      type: "string",
+      description:
+        "Default room ('goose' only — its config can't expand ${VAR}, so this is baked in literally; " +
+        "defaults to the environment's configured default room). Use --with-extension for a different room per session.",
+    },
   },
   run({ args }) {
     const agent = args.for as AgentId | undefined;
@@ -1431,6 +1437,10 @@ const installCmd = defineCommand({
       // not inside install.ts, so that module stays free of any
       // Environment/config dependency of its own.
       ...(agent === "orchestrator" ? { rooms: Object.keys(envFromArgs(args).config.roomSkills) } : {}),
+      // Only "goose" consumes `room` (a literal, since its config doesn't
+      // expand ${VAR} — see install.ts's renderGooseExtension). Defaults to
+      // the environment's configured default room; --room overrides it.
+      ...(agent === "goose" ? { room: args.room ?? envFromArgs(args).config.skillDefaultRoom } : {}),
     };
     if (args.write) {
       const r = applyConfig(agent, { ...opts, ...(args.path ? { path: args.path } : {}) });

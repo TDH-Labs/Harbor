@@ -82,6 +82,18 @@ export interface EmitOptions {
    * into, not one connection scoped to whatever room happens to launch it.
    */
   rooms?: string[];
+  /**
+   * Default room ("goose" agent only). Confirmed empirically (2026-07-23,
+   * live `AGENT_ENV_ROOM=<room>` in the parent shell + `goose run`): Goose's
+   * `extensions.<name>.envs` values are passed to the child process LITERALLY
+   * — Goose does NOT expand `${VAR}` references the way the launching-env
+   * story above assumes for every other Tier 1 agent. Emitting the placeholder
+   * there would silently break room resolution (empty/invalid room), which is
+   * WORSE than a working hardcoded default. So goose's static config entry is
+   * pinned to one concrete room at install time instead, same as orchestrator's
+   * per-room entries. Defaults to "general" when not given.
+   */
+  room?: string;
 }
 
 export interface InstallSnippet {
@@ -144,7 +156,15 @@ const AGENTS: Record<AgentId, AgentSpec> = {
     tier: 1,
     format: "yaml",
     pathFromHome: [".config", "goose", "config.yaml"],
-    extraInstructions: () => [`Goose registers MCP servers as stdio extensions under "extensions".`],
+    extraInstructions: () => [
+      `Goose registers MCP servers as stdio extensions under "extensions".`,
+      `Goose does NOT expand \${VAR} in extensions.<name>.envs — the room/session`,
+      `above are literal, pinned at install time (pass --room to pick one; a bare`,
+      `re-run without it defaults to "general"). To use a DIFFERENT room for one`,
+      `interactive session without editing this file, launch goose with its own`,
+      `--with-extension flag instead of relying on this static entry, e.g.:`,
+      `  goose session --with-extension "AGENT_ENV_ROOM=<room> AGENT_ENV_SESSION=<id> harbor mcp-server"`,
+    ],
   },
   pi: {
     tier: 2,
@@ -221,7 +241,8 @@ export function emitSnippet(agent: AgentId, options: EmitOptions = {}): InstallS
   const defaultPath = join(home, ...spec.pathFromHome);
 
   const rooms = options.rooms ?? [];
-  const snippet = renderSnippet(spec.format, { command, args, serverName, rooms });
+  const room = options.room ?? "general";
+  const snippet = renderSnippet(spec.format, { command, args, serverName, rooms, room });
   const lines: string[] = [`Add to ${defaultPath}:`];
   if (spec.extraInstructions) lines.push(...spec.extraInstructions({ command, args, serverName }));
   lines.push(ENFORCEMENT_NOTE);
@@ -232,9 +253,9 @@ export function emitSnippet(agent: AgentId, options: EmitOptions = {}): InstallS
 /** Render just the config block for a format (the unit each snapshot test pins). */
 export function renderSnippet(
   format: ConfigFormat,
-  ctx: { command: string; args: string[]; serverName: string; rooms?: string[] },
+  ctx: { command: string; args: string[]; serverName: string; rooms?: string[]; room?: string },
 ): string {
-  const { command, args, serverName, rooms = [] } = ctx;
+  const { command, args, serverName, rooms = [], room = "general" } = ctx;
   switch (format) {
     case "json-mcpServers":
       return JSON.stringify(
@@ -260,7 +281,7 @@ export function renderSnippet(
     case "toml":
       return stringifyToml({ mcp_servers: { [serverName]: { command, args, env: serverEnv() } } });
     case "yaml":
-      return renderGooseExtension(serverName, command, args, 0);
+      return renderGooseExtension(serverName, command, args, 0, room);
     case "typescript":
       return [
         "/**",
@@ -315,8 +336,18 @@ function renderOrchestratorMcpServers(
   return lines.join("\n");
 }
 
-/** Render a goose `extensions.<name>` stdio block at the given base indent. */
-function renderGooseExtension(name: string, command: string, args: string[], baseIndent: number): string {
+/**
+ * Render a goose `extensions.<name>` stdio block at the given base indent.
+ *
+ * `room` is a LITERAL value (not the `${AGENT_ENV_ROOM}` placeholder every
+ * other Tier 1 agent gets here) — confirmed empirically that Goose passes
+ * `extensions.<name>.envs` values to the child process as-is, with no `${VAR}`
+ * expansion from its own environment. A placeholder there would silently
+ * break room resolution. Session id mirrors orchestrator's `<name>-<room>`
+ * convention (a deterministic literal, not a runtime-generated one — Goose's
+ * static config has no way to mint a fresh id per launch).
+ */
+function renderGooseExtension(name: string, command: string, args: string[], baseIndent: number, room: string): string {
   const pad = " ".repeat(baseIndent);
   const i2 = pad + "  ";
   const i4 = pad + "    ";
@@ -331,8 +362,8 @@ function renderGooseExtension(name: string, command: string, args: string[], bas
     `${i4}args:`,
     ...args.map((a) => `${i6}- ${a}`),
     `${i4}envs:`,
-    `${i6}AGENT_ENV_ROOM: \${AGENT_ENV_ROOM}`,
-    `${i6}AGENT_ENV_SESSION: \${AGENT_ENV_SESSION}`,
+    `${i6}AGENT_ENV_ROOM: ${room}`,
+    `${i6}AGENT_ENV_SESSION: ${name}-${room}`,
     `${i4}timeout: 300`,
     `${i4}bundled: null`,
   ];
@@ -373,7 +404,13 @@ export function applyConfig(agent: AgentId, options: ApplyOptions = {}): ApplyRe
   const existing = existed ? readFileSync(path, "utf8") : "";
 
   const merge = mergeFor(spec.format);
-  const result = merge(existing, existed, { command, args, serverName, rooms: options.rooms ?? [] });
+  const result = merge(existing, existed, {
+    command,
+    args,
+    serverName,
+    rooms: options.rooms ?? [],
+    room: options.room ?? "general",
+  });
   if (result.action === "unchanged") {
     return { path, backup: null, action: "unchanged" };
   }
@@ -396,7 +433,7 @@ interface MergeOutcome {
 type MergeFn = (
   existing: string,
   existed: boolean,
-  ctx: { command: string; args: string[]; serverName: string; rooms?: string[] },
+  ctx: { command: string; args: string[]; serverName: string; rooms?: string[]; room?: string },
 ) => MergeOutcome;
 
 function mergeFor(format: ConfigFormat): MergeFn {
@@ -477,43 +514,78 @@ function mergeToml(
 }
 
 /**
- * Insert a goose stdio extension. Goose config is YAML and Harbor carries no YAML
- * writer, so this is a targeted, idempotent text insertion (the one format without
- * a structured merge — flagged in PHASE5_NOTES). If `extensions:` exists, the
- * harbor block is inserted under it; otherwise an `extensions:` section is added.
+ * Insert (or upsert) a goose stdio extension. Goose config is YAML and Harbor
+ * carries no YAML writer, so this is targeted text insertion (the one format
+ * without a structured merge — flagged in PHASE5_NOTES). If `extensions:`
+ * exists, the harbor block is inserted under it; otherwise an `extensions:`
+ * section is added.
+ *
+ * Upsert, not just presence-check: an existing `<name>:` entry whose body
+ * differs from what would be emitted now (e.g. an outdated hardcoded room, or
+ * a missing AGENT_ENV_SESSION from before this field existed) is REPLACED in
+ * place, matching config-edit.ts's addMcpServerToRoom precedent — otherwise
+ * re-running `--write` after fixing a stale entry would silently no-op and
+ * leave the bug in place.
  */
 function mergeGoose(
   existing: string,
   existed: boolean,
-  ctx: { command: string; args: string[]; serverName: string },
+  ctx: { command: string; args: string[]; serverName: string; room?: string },
 ): MergeOutcome {
-  // Already installed? (a `<2-space>harbor:` key under extensions). Idempotent.
-  // Line-equality (not a dynamic RegExp) so a server name with regex
-  // metacharacters can't mis-match — and there's no ReDoS surface.
-  const present = existing.split("\n").some((l) => l.trimEnd() === `  ${ctx.serverName}:`);
-  if (present) return { content: existing, action: "unchanged" };
+  const room = ctx.room ?? "general";
 
   if (!existed || !existing.trim()) {
-    return { content: renderGooseExtension(ctx.serverName, ctx.command, ctx.args, 0) + "\n", action: "created" };
+    return {
+      content: renderGooseExtension(ctx.serverName, ctx.command, ctx.args, 0, room) + "\n",
+      action: "created",
+    };
   }
 
-  const block = indentGooseUnderExtensions(ctx.serverName, ctx.command, ctx.args);
   const lines = existing.split("\n");
+  // Line-equality (not a dynamic RegExp) so a server name with regex
+  // metacharacters can't mis-match — and there's no ReDoS surface.
+  const startIdx = lines.findIndex((l) => l.trimEnd() === `  ${ctx.serverName}:`);
+  const newBody = indentGooseUnderExtensions(ctx.serverName, ctx.command, ctx.args, room);
+
+  if (startIdx >= 0) {
+    // Present — find the full span (this line through the last line indented
+    // deeper than the `  <name>:` key itself) and upsert only if it differs.
+    let endIdx = lines.length;
+    for (let i = startIdx + 1; i < lines.length; i++) {
+      const line = lines[i]!;
+      if (line.trim() === "") continue;
+      const indent = line.length - line.trimStart().length;
+      if (indent <= 2) {
+        endIdx = i;
+        break;
+      }
+    }
+    const currentBody = lines.slice(startIdx, endIdx).join("\n");
+    if (currentBody === newBody) {
+      return { content: existing, action: "unchanged" };
+    }
+    const merged = [...lines.slice(0, startIdx), ...newBody.split("\n"), ...lines.slice(endIdx)];
+    return { content: merged.join("\n"), action: "merged" };
+  }
+
   const idx = lines.findIndex((l) => /^extensions:\s*$/.test(l));
   if (idx >= 0) {
-    lines.splice(idx + 1, 0, block);
+    lines.splice(idx + 1, 0, newBody);
     return { content: lines.join("\n"), action: "merged" };
   }
   // No extensions section — append one.
   const sep = existing.endsWith("\n") ? "" : "\n";
-  return { content: existing + sep + renderGooseExtension(ctx.serverName, ctx.command, ctx.args, 0) + "\n", action: "merged" };
+  return {
+    content: existing + sep + renderGooseExtension(ctx.serverName, ctx.command, ctx.args, 0, room) + "\n",
+    action: "merged",
+  };
 }
 
 /** The harbor extension entry indented for placement directly under `extensions:`. */
-function indentGooseUnderExtensions(name: string, command: string, args: string[]): string {
+function indentGooseUnderExtensions(name: string, command: string, args: string[], room: string): string {
   // renderGooseExtension emits its own `extensions:` line first; drop it and keep
   // the already-2-space-indented body.
-  const full = renderGooseExtension(name, command, args, 0).split("\n");
+  const full = renderGooseExtension(name, command, args, 0, room).split("\n");
   return full.slice(1).join("\n");
 }
 

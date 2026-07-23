@@ -67,14 +67,30 @@ describe("emitSnippet — per-agent format snapshots", () => {
     expect(doc.mcpServers.harbor).toEqual({ command: "harbor", args: ["mcp-server"], env: EXPECTED_ENV });
   });
 
-  test("goose: YAML stdio extension under extensions", () => {
+  test("goose: YAML stdio extension under extensions, with a LITERAL default room", () => {
     const s = emitSnippet("goose", { home }).snippet;
     expect(s).toContain("extensions:");
     expect(s).toContain("  harbor:");
     expect(s).toContain("type: stdio");
     expect(s).toContain("cmd: harbor");
     expect(s).toContain("- mcp-server");
-    expect(s).toContain("AGENT_ENV_ROOM: ${AGENT_ENV_ROOM}");
+    // NOT the ${VAR} placeholder every other Tier 1 agent gets — confirmed
+    // empirically that Goose does not expand it (see renderGooseExtension).
+    expect(s).not.toContain("${AGENT_ENV_ROOM}");
+    expect(s).toContain("AGENT_ENV_ROOM: general");
+    expect(s).toContain("AGENT_ENV_SESSION: harbor-general");
+  });
+
+  test("goose: a --room option flows into a literal AGENT_ENV_ROOM + matching session id", () => {
+    const s = emitSnippet("goose", { home, room: "legal" }).snippet;
+    expect(s).toContain("AGENT_ENV_ROOM: legal");
+    expect(s).toContain("AGENT_ENV_SESSION: harbor-legal");
+  });
+
+  test("goose: extraInstructions explain the no-substitution gap and the --with-extension workaround", () => {
+    const s = emitSnippet("goose", { home });
+    expect(s.instructions).toContain("does NOT expand");
+    expect(s.instructions).toContain("--with-extension");
   });
 
   test("pi: Tier 2 in-process re-export (no MCP entry)", () => {
@@ -125,10 +141,16 @@ describe("de-personalization", () => {
       // No personal MCP server name leaks ("acme-erp" stands in for any such vendor).
       expect(s.snippet.toLowerCase()).not.toContain("acme-erp");
       // Only the generic command and ${VAR} env references appear — except
-      // the orchestrator target, which deliberately bakes in a literal room
-      // per connection (see the emitSnippet snapshot test below for why).
-      if (s.format !== "typescript" && s.format !== "yaml-orchestrator") {
+      // orchestrator (bakes in a literal room per connection) and goose
+      // (confirmed empirically that Goose's extensions.<name>.envs values are
+      // NOT ${VAR}-expanded, so a placeholder there would silently break room
+      // resolution — see renderGooseExtension's doc). Both default to the
+      // harmless generic "general" when no room is given, not a personal name.
+      if (s.format !== "typescript" && s.format !== "yaml-orchestrator" && s.format !== "yaml") {
         expect(s.snippet).toContain("${AGENT_ENV_ROOM}");
+      }
+      if (s.format === "yaml") {
+        expect(s.snippet).toContain("AGENT_ENV_ROOM: general");
       }
     }
   });
@@ -232,6 +254,47 @@ describe("applyConfig — create, merge, backup, idempotent", () => {
     expect(out).toContain("some_other_key: true");
     expect(out).toContain("extensions:");
     expect(out).toContain("  harbor:");
+  });
+
+  test("goose YAML: upserts an existing entry with a stale room/missing session in place", () => {
+    const path = join(home, ".config", "goose", "config.yaml");
+    mkdirSync(dirname(path), { recursive: true });
+    // Mirrors the real-world drift this was written to fix: a hardcoded room,
+    // AGENT_ENV_SESSION missing entirely, sitting alongside an unrelated
+    // extension that must survive untouched.
+    writeFileSync(
+      path,
+      [
+        "extensions:",
+        "  harbor:",
+        "    enabled: true",
+        "    type: stdio",
+        "    name: harbor",
+        "    cmd: harbor",
+        "    args:",
+        "      - mcp-server",
+        "    envs:",
+        "      AGENT_ENV_ROOM: productivity",
+        "    timeout: 300",
+        "    bundled: null",
+        "  todo:",
+        "    enabled: true",
+        "    type: platform",
+        "",
+      ].join("\n"),
+    );
+    const r = applyConfig("goose", { home, room: "legal" });
+    expect(r.action).toBe("merged");
+    expect(r.backup).toBe(`${path}.bak`);
+    const out = readFileSync(path, "utf8");
+    expect(out).toContain("AGENT_ENV_ROOM: legal");
+    expect(out).toContain("AGENT_ENV_SESSION: harbor-legal");
+    expect(out).not.toContain("AGENT_ENV_ROOM: productivity");
+    expect(out).toContain("  todo:"); // sibling extension untouched
+    expect(out).toContain("type: platform");
+    // Idempotent: re-applying the same room now is a no-op.
+    const second = applyConfig("goose", { home, room: "legal" });
+    expect(second.action).toBe("unchanged");
   });
 
   test("orchestrator: creates a fresh mcp_servers block when the file doesn't exist", () => {
