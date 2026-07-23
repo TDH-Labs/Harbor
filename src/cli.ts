@@ -623,8 +623,10 @@ If the room isn't in config yet but exists on disk
     harbor install --for <agent>          # print the config block (writes nothing)
     harbor install --for <agent> --write  # apply it (backs up the existing file)
 
-Supported <agent>: claude-code, cursor, opencode, codex, gemini, goose, pi,
-orchestrator. This wires Harbor's own \`read_skill\`/\`list_skills\`/etc. server —
+Supported <agent>: claude-code, cursor, opencode, codex, gemini, goose,
+antigravity, pi, orchestrator. Each gets its own verified env-substitution
+dialect — Antigravity is a DIFFERENT product from the Gemini CLI and has its
+own config file. This wires Harbor's own \`read_skill\`/\`list_skills\`/etc. server —
 it does NOT add a third-party MCP server (AgentPhone, Composio, ...); there is
 no \`--command\`/\`--args\`/\`--env\` path through \`install\` for that.
 
