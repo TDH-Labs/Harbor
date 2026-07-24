@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 470" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" role="img" aria-label="Without Harbor every agent carries every tool into every channel; with Harbor each channel maps to a room that scopes the agent to just that room's skills.">
+  <!-- self-contained light card so it reads on both light and dark GitHub themes -->
+  <rect x="1" y="1" width="838" height="468" rx="16" fill="#ffffff" stroke="#e2e8f0" stroke-width="2"/>
+
+  <text x="32" y="46" font-size="25" font-weight="700" fill="#0f172a">Harbor + Buzz</text>
+  <text x="33" y="72" font-size="14" fill="#475569">The channel becomes the unit of capability — scope it once, every agent there inherits it.</text>
+
+  <line x1="420" y1="96" x2="420" y2="438" stroke="#e2e8f0" stroke-width="2"/>
+
+  <!-- ============ WITHOUT HARBOR ============ -->
+  <rect x="32" y="102" width="150" height="24" rx="12" fill="#fef2f2" stroke="#fecaca"/>
+  <text x="107" y="119" font-size="12" font-weight="700" fill="#dc2626" text-anchor="middle">WITHOUT HARBOR</text>
+
+  <!-- channels -->
+  <g font-size="13" font-weight="600" fill="#0f172a">
+    <rect x="32" y="150" width="130" height="34" rx="8" fill="#f1f5f9" stroke="#cbd5e1"/><text x="48" y="172">#legal</text>
+    <rect x="32" y="196" width="130" height="34" rx="8" fill="#f1f5f9" stroke="#cbd5e1"/><text x="48" y="218">#bookkeeping</text>
+    <rect x="32" y="242" width="130" height="34" rx="8" fill="#f1f5f9" stroke="#cbd5e1"/><text x="48" y="264">#ops</text>
+  </g>
+
+  <!-- converging connectors to one big pile -->
+  <g stroke="#f87171" stroke-width="2" fill="none">
+    <path d="M162 167 C210 167 210 205 250 205"/>
+    <path d="M162 213 L250 213"/>
+    <path d="M162 259 C210 259 210 221 250 221"/>
+  </g>
+
+  <!-- the ungoverned pile -->
+  <rect x="250" y="150" width="140" height="126" rx="10" fill="#fff7ed" stroke="#fdba74" stroke-width="2"/>
+  <text x="320" y="176" font-size="13" font-weight="700" fill="#9a3412" text-anchor="middle">EVERY tool</text>
+  <text x="320" y="194" font-size="13" font-weight="700" fill="#9a3412" text-anchor="middle">EVERY channel</text>
+  <g font-size="10" fill="#c2410c" text-anchor="middle">
+    <text x="320" y="220">legal · payroll · deploy</text>
+    <text x="320" y="236">secrets · CRM · email</text>
+    <text x="320" y="252">…the whole harness</text>
+  </g>
+
+  <text x="32" y="316" font-size="12.5" fill="#475569">Every agent carries the same full toolset into</text>
+  <text x="32" y="334" font-size="12.5" fill="#475569">every channel. No per-channel limit. Nothing</text>
+  <text x="32" y="352" font-size="12.5" fill="#475569">audited. A #legal bot can reach payroll + deploy.</text>
+
+  <!-- ============ WITH HARBOR ============ -->
+  <rect x="452" y="102" width="130" height="24" rx="12" fill="#eef2ff" stroke="#c7d2fe"/>
+  <text x="517" y="119" font-size="12" font-weight="700" fill="#4f46e5" text-anchor="middle">WITH HARBOR</text>
+
+  <!-- three scoped rows: channel -> room -> skills (gated) -->
+  <g>
+    <!-- row 1 -->
+    <rect x="452" y="150" width="104" height="34" rx="8" fill="#f1f5f9" stroke="#cbd5e1"/>
+    <text x="466" y="172" font-size="12.5" font-weight="600" fill="#0f172a">#legal</text>
+    <path d="M556 167 L588 167" stroke="#94a3b8" stroke-width="2"/>
+    <rect x="588" y="150" width="104" height="34" rx="8" fill="#eef2ff" stroke="#c7d2fe"/>
+    <text x="602" y="172" font-size="12" font-weight="600" fill="#4f46e5">room: legal</text>
+    <path d="M692 167 L716 167" stroke="#94a3b8" stroke-width="2"/>
+    <text x="722" y="164" font-size="11.5" font-weight="700" fill="#059669">110 skills</text>
+    <text x="722" y="179" font-size="10" fill="#64748b">gated · audited</text>
+  </g>
+  <g>
+    <!-- row 2 -->
+    <rect x="452" y="200" width="104" height="34" rx="8" fill="#f1f5f9" stroke="#cbd5e1"/>
+    <text x="466" y="222" font-size="12" font-weight="600" fill="#0f172a">#bookkeeping</text>
+    <path d="M556 217 L588 217" stroke="#94a3b8" stroke-width="2"/>
+    <rect x="588" y="200" width="104" height="34" rx="8" fill="#eef2ff" stroke="#c7d2fe"/>
+    <text x="602" y="222" font-size="11" font-weight="600" fill="#4f46e5">room: bookkeeping</text>
+    <path d="M692 217 L716 217" stroke="#94a3b8" stroke-width="2"/>
+    <text x="722" y="214" font-size="11.5" font-weight="700" fill="#059669">11 skills</text>
+    <text x="722" y="229" font-size="10" fill="#64748b">gated · audited</text>
+  </g>
+  <g>
+    <!-- row 3 -->
+    <rect x="452" y="250" width="104" height="34" rx="8" fill="#f1f5f9" stroke="#cbd5e1"/>
+    <text x="466" y="272" font-size="12.5" font-weight="600" fill="#0f172a">#ops</text>
+    <path d="M556 267 L588 267" stroke="#94a3b8" stroke-width="2"/>
+    <rect x="588" y="250" width="104" height="34" rx="8" fill="#eef2ff" stroke="#c7d2fe"/>
+    <text x="602" y="272" font-size="12" font-weight="600" fill="#4f46e5">room: devops</text>
+    <path d="M692 267 L716 267" stroke="#94a3b8" stroke-width="2"/>
+    <text x="722" y="264" font-size="11.5" font-weight="700" fill="#059669">45 skills</text>
+    <text x="722" y="279" font-size="10" fill="#64748b">gated · audited</text>
+  </g>
+
+  <text x="452" y="316" font-size="12.5" fill="#475569">Each channel maps to a Harbor room. Whichever</text>
+  <text x="452" y="334" font-size="12.5" fill="#475569">agent works there gets exactly that room's skills —</text>
+  <text x="452" y="352" font-size="12.5" fill="#475569">enforced server-side, audited, add/remove per channel.</text>
+
+  <!-- footer strip -->
+  <rect x="32" y="392" width="776" height="46" rx="10" fill="#f8fafc" stroke="#e2e8f0"/>
+  <text x="48" y="412" font-size="12.5" fill="#334155"><tspan font-weight="700" fill="#0f172a">~/.buzz/channel-tools.toml</tspan>  maps each channel → room;  buzz-acp loads <tspan font-family="ui-monospace,Menlo,monospace" fill="#4f46e5">harbor mcp-server --room=&lt;room&gt;</tspan> for that session.</text>
+  <text x="48" y="429" font-size="12.5" fill="#334155">Works in any community — self-hosted or Block-hosted — because scoping happens where the agent runs, not on the relay.</text>
+</svg>

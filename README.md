@@ -162,6 +162,28 @@ import { gate, checkBudget, audit } from "harbor-tugboat";
 
 ---
 
+## Buzz
+
+Harbor turns a [Buzz](https://github.com/block/buzz) **channel** into the unit of capability:
+map a channel to a room and every agent that works there is confined to exactly that room's
+skills — enforced server-side, audited, and the same in any community (self-hosted or
+Block-hosted).
+
+<p align="center">
+  <img src="./docs/assets/harbor-buzz.svg" alt="Without Harbor every agent carries every tool into every channel; with Harbor each channel maps to a room that scopes it." width="820">
+</p>
+
+```bash
+harbor channel-tools legal --map     # scope a channel to a room (on the fly)
+harbor channel-tools legal --json    # what a channel exposes (the shape a GUI reads)
+```
+
+**[→ Full guide: docs/BUZZ.md](./docs/BUZZ.md)** — the policy file, both integration modes
+(per-agent on stock Buzz, or per-channel with the companion patch), and making agents reliably
+use skills.
+
+---
+
 ## Security model
 
 Harbor is a control plane, not a sandbox. It governs how cooperating agents load skills,
