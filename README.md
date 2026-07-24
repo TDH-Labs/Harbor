@@ -23,6 +23,9 @@ Harbor gives you:
 - **A priority-queue scheduler** — SQLite-backed, budget-aware task dispatch.
 - **Session tracking + a live dashboard** — file-based session state with a SQLite rollup,
   served on a local HTTP dashboard with WebSocket updates.
+- **Channel-scoped tools for [Buzz](https://github.com/block/buzz)** — map a Buzz channel to
+  a room so every agent working there is confined to exactly that room's skills and MCP tools,
+  enforced and audited; a companion desktop panel manages it. See [docs/BUZZ.md](./docs/BUZZ.md).
 
 Harbor is built on [Bun](https://bun.sh): one runtime, built-in SQLite, a built-in test
 runner, and single-binary compilation.
@@ -257,15 +260,27 @@ Run `harbor <command> --help` for full flags. All commands accept the global sel
 
 | Command | What it does |
 |---------|--------------|
-| `harbor skills-list [--room R]` | List pool skills with room assignments. |
-| `harbor mcp-check` / `mcp-gen` / `mcp-merge` | Validate / generate / merge per-room MCP configs. |
+| `harbor skills-list [--room R] [--json]` | List pool skills with room assignments. |
 | `harbor skill-create` / `skill-install` / `skill-assign` | Scaffold / install / route skills. |
+| `harbor skill-room-add` / `skill-update` / `skill-remove` | Grant a skill to another room / overwrite it / unregister it. |
+| `harbor mcp-add` / `mcp-remove` | Add or remove an MCP server for a room. |
+| `harbor mcp-check` / `mcp-gen` / `mcp-merge` | Validate / generate / merge per-room MCP configs. |
+| `harbor secrets` | Keychain-backed secrets — keep credentials out of config files. |
+| `harbor approval` | Human-in-the-loop grants for a cross-room skill load. |
+
+**Buzz** (see [docs/BUZZ.md](./docs/BUZZ.md))
+
+| Command | What it does |
+|---------|--------------|
+| `harbor channel-tools <channel> [--json]` | Show the skills + MCP servers a Buzz channel exposes. |
+| `harbor channel-tools <channel> --map [--room R]` | Scope a channel to a room on the fly (creates the room + records the mapping). |
+| `harbor buzz-pack` | Emit a Buzz Persona Pack from Harbor rooms (one room → one persona). |
 
 **Integrations**
 
 | Command | What it does |
 |---------|--------------|
-| `harbor mcp-server` | Run the Harbor MCP server over stdio (Tier 1, universal). |
+| `harbor mcp-server [--room R]` | Run the Harbor MCP server over stdio (Tier 1, universal). |
 | `harbor install --for <agent> [--write]` | Emit (or apply) an agent's integration config. |
 
 ---
