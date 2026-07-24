@@ -57,6 +57,12 @@ import { canPrompt, confirmAction, pickRooms } from "./room-picker.ts";
 import { AGENT_IDS, agentConfigPaths, applyConfig, emitSnippet, type AgentId } from "./install.ts";
 import { analyzeIsolation, formatReport } from "./isolation-doctor.ts";
 import { findSensitive, planPack, writePack } from "./buzz-pack.ts";
+import {
+  ChannelToolsError,
+  defaultPolicyPath,
+  listChannels,
+  resolveChannelTools,
+} from "./channel-tools.ts";
 import { listGrants, saveGrant, purgeExpiredGrants, MAX_GRANT_SECONDS } from "./approval.ts";
 import {
   describeSecrets,
@@ -1672,6 +1678,101 @@ const buzzPackCmd = defineCommand({
   },
 });
 
+const channelToolsCmd = defineCommand({
+  meta: {
+    name: "channel-tools",
+    description: "Show the skills + MCP servers a Buzz channel exposes (reads ~/.buzz/channel-tools.toml)",
+  },
+  args: {
+    ...commonArgs,
+    channel: { type: "positional", required: false, description: "Channel name or UUID (omit for a directory of all mapped channels)" },
+    policy: { type: "string", description: "Path to channel-tools.toml (default ~/.buzz/channel-tools.toml)" },
+    json: { type: "boolean", description: "Emit JSON (the shape the Buzz GUI panel reads)" },
+  },
+  run({ args }) {
+    const env = envFromArgs(args);
+    const policyPath = args.policy ?? defaultPolicyPath();
+    const channel = args.channel as string | undefined;
+
+    // No channel argument → directory view of every mapped channel.
+    if (!channel) {
+      let channels;
+      try {
+        channels = listChannels(policyPath);
+      } catch (err) {
+        if (err instanceof ChannelToolsError) {
+          console.error(`channel-tools: ${err.message}`);
+          process.exitCode = 1;
+          return;
+        }
+        throw err;
+      }
+      if (args.json) {
+        console.log(JSON.stringify(channels, null, 2));
+        return;
+      }
+      if (channels.length === 0) {
+        console.log(`(no channels mapped in ${policyPath})`);
+        return;
+      }
+      console.log(`Channels mapped in ${policyPath}:`);
+      for (const c of channels) console.log(`  ${c.channel.padEnd(28)} → ${c.room ?? "(no room)"}`);
+      console.log("");
+      console.log("Show one:  harbor channel-tools <channel>");
+      return;
+    }
+
+    let tools;
+    try {
+      tools = resolveChannelTools(env, policyPath, channel);
+    } catch (err) {
+      if (err instanceof ChannelToolsError) {
+        console.error(`channel-tools: ${err.message}`);
+        process.exitCode = 1;
+        return;
+      }
+      throw err;
+    }
+
+    if (args.json) {
+      console.log(JSON.stringify(tools, null, 2));
+      return;
+    }
+
+    if (!tools.scoped) {
+      console.log(`Channel '${channel}' has no entry in ${policyPath}.`);
+      console.log("It is NOT Harbor-scoped — the agent keeps its harness's own configured extensions.");
+      return;
+    }
+    if (!tools.room) {
+      console.log(`Channel '${channel}' is mapped but has no room.`);
+      if (tools.mcpServers.length > 0) {
+        console.log("Explicit MCP servers:");
+        for (const m of tools.mcpServers) console.log(`  ${m.name}  (${m.source})`);
+      }
+      return;
+    }
+
+    console.log(`Channel '${channel}' → room '${tools.room}'`);
+    console.log("");
+    console.log(`Skills (${tools.skills.length}):`);
+    if (tools.skills.length === 0) console.log("  (none)");
+    for (const s of tools.skills) {
+      const flag = s.present ? " " : "!";
+      const desc = s.description ? `  — ${s.description}` : "";
+      console.log(` ${flag} ${s.name}${desc}`);
+    }
+    console.log("");
+    console.log(`MCP servers (${tools.mcpServers.length}):`);
+    if (tools.mcpServers.length === 0) console.log("  (none)");
+    for (const m of tools.mcpServers) console.log(`  ${m.name}  (${m.source})`);
+    console.log("");
+    console.log("Add a NEW skill to this channel:      harbor skill-install <src> --room " + tools.room);
+    console.log("Add an EXISTING skill to this channel: harbor skill-room-add <skill> --room " + tools.room);
+    console.log("Add an MCP server to this channel:     harbor mcp-add --room " + tools.room + " --name <n> --command <cmd>");
+  },
+});
+
 const approvalCmd = defineCommand({
   meta: {
     name: "approval",
@@ -1795,6 +1896,7 @@ export const main: CommandDef = defineCommand({
     install: installCmd,
     secrets: secretsCmd,
     "buzz-pack": buzzPackCmd,
+    "channel-tools": channelToolsCmd,
     approval: approvalCmd,
   },
 });
