@@ -309,14 +309,23 @@ export interface AuditLogInput {
 function auditDb(env: Environment): Database {
   const path = env.isolationDb;
   mkdirSync(dirname(path), { recursive: true });
-  return openDb(path, (db) => {
+  // `isolationDb` is now shared with approval.ts's grant store (same physical
+  // file), and db.ts's cache runs `init` only on the FIRST open of a given
+  // path — whichever module opens it first wins, the other's init is skipped.
+  // So AUDIT_SCHEMA must not live only inside `init`: if approval.ts's
+  // grantDb() opens this path first, an init-only AUDIT_SCHEMA would never
+  // run and every audit write would throw "no such table". `CREATE TABLE IF
+  // NOT EXISTS` is idempotent and cheap, so run it unconditionally instead —
+  // correct regardless of which module opens the connection first.
+  const db = openDb(path, (d) => {
     // busy_timeout before journal_mode — see compaction.ts: the WAL switch can
     // need recovery, and a concurrent first-open without the timeout set fails
     // immediately with SQLITE_BUSY_RECOVERY instead of waiting for the lock.
-    db.exec("PRAGMA busy_timeout = 5000");
-    db.exec("PRAGMA journal_mode = WAL");
-    db.exec(AUDIT_SCHEMA);
+    d.exec("PRAGMA busy_timeout = 5000");
+    d.exec("PRAGMA journal_mode = WAL");
   }).db;
+  db.exec(AUDIT_SCHEMA);
+  return db;
 }
 
 /** Record an audit event. Defaults to a "denied" decision (deny-by-default). */

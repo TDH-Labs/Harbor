@@ -57,6 +57,7 @@ import { canPrompt, confirmAction, pickRooms } from "./room-picker.ts";
 import { AGENT_IDS, agentConfigPaths, applyConfig, emitSnippet, type AgentId } from "./install.ts";
 import { analyzeIsolation, formatReport } from "./isolation-doctor.ts";
 import { findSensitive, planPack, writePack } from "./buzz-pack.ts";
+import { listGrants, saveGrant, purgeExpiredGrants, MAX_GRANT_SECONDS } from "./approval.ts";
 import {
   describeSecrets,
   exportLines,
@@ -1671,6 +1672,88 @@ const buzzPackCmd = defineCommand({
   },
 });
 
+const approvalCmd = defineCommand({
+  meta: {
+    name: "approval",
+    description: "Human-in-the-loop grants for a cross-room skill load (docs/SPEC_hardening.md step 2)",
+  },
+  subCommands: {
+    grant: defineCommand({
+      meta: {
+        name: "grant",
+        description: "Pre-approve a specific (session, room, resource) cross-room request",
+      },
+      args: {
+        ...commonArgs,
+        session: { type: "positional", required: true, description: "Session id making the request" },
+        room: { type: "positional", required: true, description: "The room the session is scoped to" },
+        resource: { type: "positional", required: true, description: "The skill/resource being requested" },
+        minutes: { type: "string", description: `Grant lifetime in minutes (default 15, max ${MAX_GRANT_SECONDS / 60})` },
+        approver: { type: "string", description: "Your name/identifier, recorded in the audit trail" },
+      },
+      run({ args }) {
+        const env = envFromArgs(args);
+        const minutes = args.minutes ? Number.parseInt(args.minutes, 10) : 15;
+        if (!Number.isFinite(minutes) || minutes <= 0) {
+          console.error("approval grant: --minutes must be a positive number");
+          process.exitCode = 1;
+          return;
+        }
+        const now = Date.now() / 1000;
+        const grant = saveGrant(
+          env,
+          {
+            sessionId: args.session,
+            room: args.room,
+            tool: "read_skill",
+            resource: args.resource,
+            targetRoom: "",
+            reason: "manually approved via `harbor approval grant`",
+          },
+          { granted: true, expiresAt: now + minutes * 60, approver: args.approver ?? "" },
+          now,
+        );
+        const actualMinutes = Math.round((grant.expiresAt - now) / 60);
+        console.log(
+          `✓ Granted '${grant.resource}' to session '${grant.sessionId}' in room '${grant.room}' ` +
+            `for ${actualMinutes} minute(s)${grant.approver ? ` (approver: ${grant.approver})` : ""}.`,
+        );
+        if (actualMinutes < minutes) {
+          console.log(`  (clamped from ${minutes}m — grants cannot exceed ${MAX_GRANT_SECONDS / 60}m)`);
+        }
+      },
+    }),
+    list: defineCommand({
+      meta: { name: "list", description: "Show every live (unexpired) grant" },
+      args: { ...commonArgs },
+      run({ args }) {
+        const env = envFromArgs(args);
+        const grants = listGrants(env);
+        if (grants.length === 0) {
+          console.log("(no live grants)");
+          return;
+        }
+        const now = Date.now() / 1000;
+        for (const g of grants) {
+          const remaining = Math.round((g.expiresAt - now) / 60);
+          console.log(
+            `  ${g.sessionId.padEnd(16)} ${g.room.padEnd(16)} ${g.resource.padEnd(24)} ` +
+              `${remaining}m left${g.approver ? `  (${g.approver})` : ""}`,
+          );
+        }
+      },
+    }),
+    purge: defineCommand({
+      meta: { name: "purge", description: "Delete every expired grant row" },
+      args: { ...commonArgs },
+      run({ args }) {
+        const n = purgeExpiredGrants(envFromArgs(args));
+        console.log(`purged ${n} expired grant(s)`);
+      },
+    }),
+  },
+});
+
 // ── Root command ──────────────────────────────────────────────────────────────
 
 export const main: CommandDef = defineCommand({
@@ -1712,6 +1795,7 @@ export const main: CommandDef = defineCommand({
     install: installCmd,
     secrets: secretsCmd,
     "buzz-pack": buzzPackCmd,
+    approval: approvalCmd,
   },
 });
 

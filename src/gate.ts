@@ -40,7 +40,8 @@ import {
 } from "./isolation.ts";
 import { Environment } from "./env.ts";
 import { normalizeRoomEnv } from "./config.ts";
-import { deny, emitHypervisorEvent } from "./audit.ts";
+import { deny, allow, emitHypervisorEvent } from "./audit.ts";
+import { hasLiveGrant } from "./approval.ts";
 
 /** Contract-named alias for the isolation error (BUILD_BRIEF / phase interface). */
 export { AccessDenied as AccessDeniedError } from "./isolation.ts";
@@ -185,24 +186,49 @@ export function gate<A extends unknown[], R>(
 
     // 2. Room-skill allowlist check for skill-loading tools.
     if (skillGated && resource && !session.roomSkillAllowed(env, resource)) {
-      const reason = `skill '${resource}' not in room '${session.room}'`;
-      deny(session.sessionId, tool, resource, reason, {
-        room: session.room,
-        agentId: session.agentId,
-        env,
-      });
-      emitHypervisorEvent({
-        kind: "gate",
-        event: "room_skill_denied",
-        decision: "denied",
-        sessionId: session.sessionId,
-        room: session.room,
-        capability: tool,
-        resource,
-        reason,
-        timestamp: nowSec(),
-      });
-      throw new AccessDenied(reason, { session, capability: tool, resource });
+      // A live, time-boxed approval grant (docs/SPEC_hardening.md step 2,
+      // approval.ts) turns this from a silent wall into a doorbell: a human
+      // ran `harbor approval grant` for exactly this (session, room, resource)
+      // triple, and it has not expired. NO grant, expired grant, or a grant
+      // for a different session/room/resource all fall straight through to
+      // the SAME denial as before this existed — the check is purely additive.
+      if (hasLiveGrant(env, session.sessionId, session.room, resource)) {
+        allow(session.sessionId, tool, resource, `approved cross-room grant (would otherwise be denied)`, {
+          room: session.room,
+          agentId: session.agentId,
+          env,
+        });
+        emitHypervisorEvent({
+          kind: "gate",
+          event: "room_skill_approved",
+          decision: "allowed",
+          sessionId: session.sessionId,
+          room: session.room,
+          capability: tool,
+          resource,
+          reason: "live approval grant",
+          timestamp: nowSec(),
+        });
+      } else {
+        const reason = `skill '${resource}' not in room '${session.room}'`;
+        deny(session.sessionId, tool, resource, reason, {
+          room: session.room,
+          agentId: session.agentId,
+          env,
+        });
+        emitHypervisorEvent({
+          kind: "gate",
+          event: "room_skill_denied",
+          decision: "denied",
+          sessionId: session.sessionId,
+          room: session.room,
+          capability: tool,
+          resource,
+          reason,
+          timestamp: nowSec(),
+        });
+        throw new AccessDenied(reason, { session, capability: tool, resource });
+      }
     }
 
     // 3. Room-override check for tools whose first arg is an optional room
