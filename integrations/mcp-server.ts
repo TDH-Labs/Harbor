@@ -265,9 +265,12 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
               capabilities: { tools: { listChanged: false } },
               serverInfo: SERVER_INFO,
               instructions:
-                "Harbor gates skill access by room and token budget. Use list_skills to " +
-                "discover skills, then read_skill to load one. Denials and budget limits " +
-                "are enforced server-side and surfaced as tool errors.",
+                "This channel has curated skills for the work done here. BEFORE you start " +
+                "a task, call list_skills to see what's available, and read_skill to load any " +
+                "whose description fits — a matching skill's instructions are authoritative, so " +
+                "prefer following one over improvising. Skills are gated by room and token " +
+                "budget; denials and budget limits are enforced server-side and surfaced as " +
+                "tool errors.",
             });
 
       case "notifications/initialized":
