@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 470" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" role="img" aria-label="Without Harbor every agent carries every tool into every channel; with Harbor each channel maps to a room that scopes the agent to just that room's skills.">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 470" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" role="img" aria-label="Without Harbor every agent carries every tool into every channel; with Harbor each channel has its own curated, gated toolset — the same in any community.">
   <!-- self-contained light card so it reads on both light and dark GitHub themes -->
   <rect x="1" y="1" width="838" height="468" rx="16" fill="#ffffff" stroke="#e2e8f0" stroke-width="2"/>
 
@@ -43,47 +43,41 @@
   <rect x="452" y="102" width="130" height="24" rx="12" fill="#eef2ff" stroke="#c7d2fe"/>
   <text x="517" y="119" font-size="12" font-weight="700" fill="#4f46e5" text-anchor="middle">WITH HARBOR</text>
 
-  <!-- three scoped rows: channel -> room -> skills (gated) -->
+  <!-- three scoped rows: channel -> its own curated, gated toolset -->
   <g>
     <!-- row 1 -->
-    <rect x="452" y="150" width="104" height="34" rx="8" fill="#f1f5f9" stroke="#cbd5e1"/>
-    <text x="466" y="172" font-size="12.5" font-weight="600" fill="#0f172a">#legal</text>
-    <path d="M556 167 L588 167" stroke="#94a3b8" stroke-width="2"/>
-    <rect x="588" y="150" width="104" height="34" rx="8" fill="#eef2ff" stroke="#c7d2fe"/>
-    <text x="602" y="172" font-size="12" font-weight="600" fill="#4f46e5">room: legal</text>
-    <path d="M692 167 L716 167" stroke="#94a3b8" stroke-width="2"/>
-    <text x="722" y="164" font-size="11.5" font-weight="700" fill="#059669">110 skills</text>
-    <text x="722" y="179" font-size="10" fill="#64748b">gated · audited</text>
+    <rect x="452" y="150" width="120" height="34" rx="8" fill="#f1f5f9" stroke="#cbd5e1"/>
+    <text x="468" y="172" font-size="12.5" font-weight="600" fill="#0f172a">#legal</text>
+    <path d="M576 167 L604 167" stroke="#94a3b8" stroke-width="2"/>
+    <rect x="608" y="150" width="182" height="34" rx="8" fill="#ecfdf5" stroke="#a7f3d0"/>
+    <text x="622" y="164" font-size="12" font-weight="700" fill="#059669">110 skills</text>
+    <text x="622" y="179" font-size="10" fill="#64748b">gated · audited · in this channel only</text>
   </g>
   <g>
     <!-- row 2 -->
-    <rect x="452" y="200" width="104" height="34" rx="8" fill="#f1f5f9" stroke="#cbd5e1"/>
-    <text x="466" y="222" font-size="12" font-weight="600" fill="#0f172a">#bookkeeping</text>
-    <path d="M556 217 L588 217" stroke="#94a3b8" stroke-width="2"/>
-    <rect x="588" y="200" width="104" height="34" rx="8" fill="#eef2ff" stroke="#c7d2fe"/>
-    <text x="602" y="222" font-size="11" font-weight="600" fill="#4f46e5">room: bookkeeping</text>
-    <path d="M692 217 L716 217" stroke="#94a3b8" stroke-width="2"/>
-    <text x="722" y="214" font-size="11.5" font-weight="700" fill="#059669">11 skills</text>
-    <text x="722" y="229" font-size="10" fill="#64748b">gated · audited</text>
+    <rect x="452" y="202" width="120" height="34" rx="8" fill="#f1f5f9" stroke="#cbd5e1"/>
+    <text x="468" y="224" font-size="12" font-weight="600" fill="#0f172a">#bookkeeping</text>
+    <path d="M576 219 L604 219" stroke="#94a3b8" stroke-width="2"/>
+    <rect x="608" y="202" width="182" height="34" rx="8" fill="#ecfdf5" stroke="#a7f3d0"/>
+    <text x="622" y="216" font-size="12" font-weight="700" fill="#059669">11 skills</text>
+    <text x="622" y="231" font-size="10" fill="#64748b">gated · audited · in this channel only</text>
   </g>
   <g>
     <!-- row 3 -->
-    <rect x="452" y="250" width="104" height="34" rx="8" fill="#f1f5f9" stroke="#cbd5e1"/>
-    <text x="466" y="272" font-size="12.5" font-weight="600" fill="#0f172a">#ops</text>
-    <path d="M556 267 L588 267" stroke="#94a3b8" stroke-width="2"/>
-    <rect x="588" y="250" width="104" height="34" rx="8" fill="#eef2ff" stroke="#c7d2fe"/>
-    <text x="602" y="272" font-size="12" font-weight="600" fill="#4f46e5">room: devops</text>
-    <path d="M692 267 L716 267" stroke="#94a3b8" stroke-width="2"/>
-    <text x="722" y="264" font-size="11.5" font-weight="700" fill="#059669">45 skills</text>
-    <text x="722" y="279" font-size="10" fill="#64748b">gated · audited</text>
+    <rect x="452" y="254" width="120" height="34" rx="8" fill="#f1f5f9" stroke="#cbd5e1"/>
+    <text x="468" y="276" font-size="12.5" font-weight="600" fill="#0f172a">#ops</text>
+    <path d="M576 271 L604 271" stroke="#94a3b8" stroke-width="2"/>
+    <rect x="608" y="254" width="182" height="34" rx="8" fill="#ecfdf5" stroke="#a7f3d0"/>
+    <text x="622" y="268" font-size="12" font-weight="700" fill="#059669">45 skills</text>
+    <text x="622" y="283" font-size="10" fill="#64748b">gated · audited · in this channel only</text>
   </g>
 
-  <text x="452" y="316" font-size="12.5" fill="#475569">Each channel maps to a Harbor room. Whichever</text>
-  <text x="452" y="334" font-size="12.5" fill="#475569">agent works there gets exactly that room's skills —</text>
-  <text x="452" y="352" font-size="12.5" fill="#475569">enforced server-side, audited, add/remove per channel.</text>
+  <text x="452" y="320" font-size="12.5" fill="#475569">Each channel has its own curated toolset. Whichever</text>
+  <text x="452" y="338" font-size="12.5" fill="#475569">agent works there gets exactly those skills — enforced,</text>
+  <text x="452" y="356" font-size="12.5" fill="#475569">audited, and you add or remove them per channel.</text>
 
   <!-- footer strip -->
   <rect x="32" y="392" width="776" height="46" rx="10" fill="#f8fafc" stroke="#e2e8f0"/>
-  <text x="48" y="412" font-size="12.5" fill="#334155"><tspan font-weight="700" fill="#0f172a">~/.buzz/channel-tools.toml</tspan>  maps each channel → room;  buzz-acp loads <tspan font-family="ui-monospace,Menlo,monospace" fill="#4f46e5">harbor mcp-server --room=&lt;room&gt;</tspan> for that session.</text>
+  <text x="48" y="412" font-size="12.5" fill="#334155">A per-channel policy curates each channel's skills &amp; tools; <tspan font-weight="700" fill="#0f172a">buzz-acp</tspan> enforces exactly that set for every session in the channel.</text>
   <text x="48" y="429" font-size="12.5" fill="#334155">Works in any community — self-hosted or Block-hosted — because scoping happens where the agent runs, not on the relay.</text>
 </svg>
