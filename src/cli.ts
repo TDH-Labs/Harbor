@@ -15,7 +15,7 @@
  * always resolved from `--config`, `--root`, or `os.homedir()` defaults.
  */
 import { type ArgsDef, type CommandDef, defineCommand, runMain } from "citty";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, writeSync } from "node:fs";
 import { basename, join } from "node:path";
 
 import pkg from "../package.json" with { type: "json" };
@@ -75,6 +75,34 @@ import {
 } from "./secrets.ts";
 
 // ── Environment resolution ────────────────────────────────────────────────────
+
+/**
+ * Print a value as pretty JSON with a BLOCKING write to fd 1.
+ *
+ * `console.log` on Bun writes to stdout asynchronously; when the output is a
+ * pipe (as it is whenever a parent process — e.g. Buzz's desktop app reading
+ * `harbor ... --json` via `Command::output()`) and the payload exceeds the OS
+ * pipe buffer (~64 KB), the process can exit before the tail is flushed,
+ * truncating the JSON mid-string. `writeSync` on the raw fd blocks until every
+ * byte is handed to the kernel, so large `--json` outputs arrive whole. The
+ * loop handles a short write (kernel accepting fewer bytes than offered).
+ */
+function printJson(value: unknown): void {
+  const buf = Buffer.from(JSON.stringify(value, null, 2) + "\n");
+  let offset = 0;
+  while (offset < buf.length) {
+    try {
+      offset += writeSync(1, buf, offset, buf.length - offset);
+    } catch (err) {
+      // Bun marks a piped stdout non-blocking: once the ~64 KB pipe buffer
+      // fills, writeSync throws EAGAIN instead of blocking. Retry until the
+      // reader drains — dropping this catch is exactly what truncated large
+      // `--json` payloads mid-string. The spin is bounded by output size.
+      if ((err as NodeJS.ErrnoException).code === "EAGAIN") continue;
+      throw err;
+    }
+  }
+}
 
 export const commonArgs = {
   config: { type: "string", description: "Path to config.toml (its paths.home sets the root)" },
@@ -196,7 +224,8 @@ const benchCmd = defineCommand({
           console.log("no benchmark results found");
           return;
         }
-        console.log(args.json ? JSON.stringify(summary, null, 2) : formatSummary(summary));
+        if (args.json) printJson(summary);
+        else console.log(formatSummary(summary));
       },
     }),
   },
@@ -396,7 +425,8 @@ const isolationCmd = defineCommand({
       args: { ...commonArgs, json: { type: "boolean", description: "Emit the raw report as JSON" } },
       run({ args }) {
         const report = analyzeIsolation(envFromArgs(args));
-        console.log(args.json ? JSON.stringify(report, null, 2) : formatReport(report));
+        if (args.json) printJson(report);
+        else console.log(formatReport(report));
       },
     }),
     check: defineCommand({
@@ -896,10 +926,18 @@ const auditCmd = defineCommand({
 
 const skillsListCmd = defineCommand({
   meta: { name: "skills-list", description: "List pool skills with room assignments" },
-  args: { ...commonArgs, room: { type: "string", description: "Filter to one room" } },
+  args: {
+    ...commonArgs,
+    room: { type: "string", description: "Filter to one room" },
+    json: { type: "boolean", description: "Emit JSON (name/room/description per skill)" },
+  },
   run({ args }) {
     const env = envFromArgs(args);
     const skills = listSkills(env, args.room);
+    if (args.json) {
+      printJson(skills);
+      return;
+    }
     if (skills.length === 0) {
       console.log(args.room ? `(no skills in room ${args.room})` : "(no skills in pool)");
       return;
@@ -1037,7 +1075,7 @@ const mcpMergeCmd = defineCommand({
     if (args.output) {
       console.log(`Merged MCP config for ${selected.length} room(s) → ${args.output}`);
     } else {
-      console.log(JSON.stringify(merged, null, 2));
+      printJson(merged);
     }
   },
 });
@@ -1708,7 +1746,7 @@ const channelToolsCmd = defineCommand({
         throw err;
       }
       if (args.json) {
-        console.log(JSON.stringify(channels, null, 2));
+        printJson(channels);
         return;
       }
       if (channels.length === 0) {
@@ -1735,7 +1773,7 @@ const channelToolsCmd = defineCommand({
     }
 
     if (args.json) {
-      console.log(JSON.stringify(tools, null, 2));
+      printJson(tools);
       return;
     }
 

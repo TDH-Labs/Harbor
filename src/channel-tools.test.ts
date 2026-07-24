@@ -107,10 +107,10 @@ describe("resolveChannelTools", () => {
     const tools = resolveChannelTools(e, p, "legal");
     expect(tools.scoped).toBe(true);
     expect(tools.room).toBe("legal");
-    const byName = Object.fromEntries(tools.skills.map((s) => [s.name, s]));
-    expect(byName["present-skill"].present).toBe(true);
-    expect(byName["present-skill"].description).toBe("present-skill does a thing");
-    expect(byName["ghost-skill"].present).toBe(false); // listed by the room, absent from the pool
+    const byName = new Map(tools.skills.map((s) => [s.name, s]));
+    expect(byName.get("present-skill")?.present).toBe(true);
+    expect(byName.get("present-skill")?.description).toBe("present-skill does a thing");
+    expect(byName.get("ghost-skill")?.present).toBe(false); // listed by the room, absent from the pool
     expect(tools.mcpServers).toEqual([{ name: "docsign", source: "room" }]);
   });
 
