@@ -7,15 +7,17 @@
  * `~/.buzz/channel-tools.toml`.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
   ChannelToolsError,
+  deriveRoomName,
   findChannelPolicy,
   listChannels,
   loadPolicy,
+  mapChannel,
   resolveChannelTools,
 } from "./channel-tools.ts";
 import { Config, DEFAULTS, deepMerge } from "./config.ts";
@@ -153,5 +155,80 @@ describe("listChannels", () => {
       { channel: "alpha", room: "a" },
       { channel: "zeta", room: "z" },
     ]);
+  });
+});
+
+describe("deriveRoomName", () => {
+  test("uses a channel that is already a legal room name verbatim", () => {
+    expect(deriveRoomName("welcome-everyone")).toBe("welcome-everyone");
+    expect(deriveRoomName("legal")).toBe("legal");
+  });
+
+  test("slugifies a channel with spaces/punctuation to the room charset", () => {
+    expect(deriveRoomName("Welcome Everyone!")).toBe("welcome_everyone");
+    expect(deriveRoomName("  🎉 party time  ")).toBe("party_time");
+  });
+});
+
+describe("mapChannel", () => {
+  // mapChannel writes Harbor's config (room creation), so it needs an env with
+  // a real config path — build one the way config-edit's tests do.
+  function envWithConfig(): Environment {
+    const configPath = join(dir, "config.toml");
+    writeFileSync(
+      configPath,
+      `[paths]\nskills_dir = "${join(dir, "pool")}"\n\n[skills.rooms.legal]\nskills = ["nda-review"]\n`,
+    );
+    return new Environment(dir, Config.load(configPath), configPath);
+  }
+
+  test("scopes a brand-new channel: creates its room and appends the mapping", () => {
+    const e = envWithConfig();
+    const p = writePolicy(`# keep me\nharbor_command = "harbor"\n\n[channels.legal]\nroom = "legal"\n`);
+
+    const res = mapChannel(e, p, "welcome-everyone");
+    expect(res).toEqual({ channel: "welcome-everyone", room: "welcome-everyone", mappingCreated: true });
+
+    // Existing entry + comment preserved, new entry present.
+    const text = readFileSync(p, "utf8");
+    expect(text).toContain("# keep me");
+    expect(text).toContain("[channels.legal]");
+    const { channels } = loadPolicy(p);
+    expect(findChannelPolicy(channels, "welcome-everyone")?.room).toBe("welcome-everyone");
+    // Room now exists in Harbor config.
+    expect(e.config.roomSkillSet("welcome-everyone").size).toBe(0);
+  });
+
+  test("is idempotent — a mapped channel keeps its room and file is not duplicated", () => {
+    const e = envWithConfig();
+    const p = writePolicy(`[channels.legal]\nroom = "legal"\n`);
+    const res = mapChannel(e, p, "legal");
+    expect(res).toEqual({ channel: "legal", room: "legal", mappingCreated: false });
+    // Only one [channels.legal] table.
+    expect(readFileSync(p, "utf8").match(/\[channels\.legal\]/g)?.length).toBe(1);
+  });
+
+  test("honors an explicit room override", () => {
+    const e = envWithConfig();
+    const p = writePolicy(`harbor_command = "harbor"\n`);
+    const res = mapChannel(e, p, "welcome-everyone", "greeters");
+    expect(res.room).toBe("greeters");
+    expect(loadPolicy(p).channels.get("welcome-everyone")?.room).toBe("greeters");
+  });
+
+  test("quotes a channel key that isn't a bare TOML key, and stays parseable", () => {
+    const e = envWithConfig();
+    const p = writePolicy(`harbor_command = "harbor"\n`);
+    const res = mapChannel(e, p, "team lunch");
+    expect(res.mappingCreated).toBe(true);
+    // The written file must still parse and resolve by the original key.
+    const { channels } = loadPolicy(p);
+    expect(findChannelPolicy(channels, "team lunch")?.room).toBe(res.room);
+  });
+
+  test("throws on an invalid explicit room name", () => {
+    const e = envWithConfig();
+    const p = writePolicy(`harbor_command = "harbor"\n`);
+    expect(() => mapChannel(e, p, "welcome-everyone", "bad room!")).toThrow(ChannelToolsError);
   });
 });

@@ -25,12 +25,13 @@
  * `skill-room-add`, `mcp-add --room` — which is why this file only READS: the
  * mutations already have their own audited commands.
  */
-import { existsSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { parse as parseToml } from "smol-toml";
+import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 
+import { ensureRoomInConfig, isValidRoomName } from "./config-edit.ts";
 import type { Environment } from "./env.ts";
 import { findSkillDir, getSkillDescription } from "./skills.ts";
 
@@ -173,4 +174,92 @@ export function resolveChannelTools(env: Environment, policyPath: string, channe
 export function listChannels(policyPath: string): Array<{ channel: string; room: string | null }> {
   const { channels } = loadPolicy(policyPath);
   return [...channels.values()].map((p) => ({ channel: p.key, room: p.room })).sort((a, b) => a.channel.localeCompare(b.channel));
+}
+
+/** TOML bare-key charset — a key matching this needs no quoting. */
+const BARE_KEY_RE = /^[A-Za-z0-9_-]+$/;
+
+/**
+ * Derive a valid room name from a channel key. A channel that is already a
+ * legal room name (e.g. "welcome-everyone") is used verbatim so the mapping
+ * reads naturally; otherwise it is slugified to the room-name charset.
+ */
+export function deriveRoomName(channel: string): string {
+  const trimmed = channel.trim();
+  if (isValidRoomName(trimmed)) return trimmed;
+  const slug = trimmed
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^[_-]+|[_-]+$/g, "")
+    .slice(0, 64);
+  return slug || "channel";
+}
+
+/** Render a channel key as a TOML table key, quoting only when it isn't a bare key. */
+function tomlKey(key: string): string {
+  return BARE_KEY_RE.test(key) ? key : `"${key.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
+/** The outcome of mapping a channel to a room. */
+export interface MapResult {
+  channel: string;
+  room: string;
+  /** False when the channel was already mapped (idempotent no-op). */
+  mappingCreated: boolean;
+}
+
+/**
+ * Ensure a Buzz channel is scoped: create its room in Harbor's config (empty if
+ * new) and record the channel → room mapping in `channel-tools.toml`. This is
+ * the "on the fly" write the GUI uses so a channel needs no hand-edited policy
+ * before you can add a skill or MCP server to it.
+ *
+ * Idempotent: a channel already mapped to a room keeps that room (its skills
+ * are untouched). A brand-new mapping is APPENDED so the file's comments and
+ * every existing entry are preserved; only the rare case of an entry that
+ * exists without a room falls back to a parse→mutate→stringify rewrite.
+ */
+export function mapChannel(
+  env: Environment,
+  policyPath: string,
+  channel: string,
+  room?: string,
+): MapResult {
+  const chan = channel.trim();
+  if (!chan) throw new ChannelToolsError("channel must not be empty");
+
+  let existing: ChannelPolicy | null = null;
+  if (existsSync(policyPath)) {
+    const { channels } = loadPolicy(policyPath);
+    existing = findChannelPolicy(channels, chan);
+    if (existing?.room) {
+      // Already scoped — keep the mapping, just make sure the room exists.
+      ensureRoomInConfig(env, existing.room);
+      return { channel: chan, room: existing.room, mappingCreated: false };
+    }
+  }
+
+  const targetRoom = room?.trim() ? room.trim() : deriveRoomName(chan);
+  if (!isValidRoomName(targetRoom)) {
+    throw new ChannelToolsError(`'${targetRoom}' is not a valid room name (allowed: letters, digits, _ and -, max 64)`);
+  }
+  ensureRoomInConfig(env, targetRoom);
+
+  const block = `\n[channels.${tomlKey(chan)}]\nroom = "${targetRoom}"\n`;
+  if (existing) {
+    // Rare: the channel has an entry but no room. Editing the table in place
+    // (parse→mutate→stringify) avoids writing a duplicate [channels.X] header,
+    // which would make the file fail to parse.
+    const data = parseToml(readFileSync(policyPath, "utf8")) as Toml;
+    const channelsTbl = (data.channels ?? (data.channels = {})) as Record<string, Toml>;
+    const table = (channelsTbl[existing.key] ?? (channelsTbl[existing.key] = {})) as Toml;
+    table.room = targetRoom;
+    writeFileSync(policyPath, `${stringifyToml(data)}\n`);
+  } else if (!existsSync(policyPath)) {
+    writeFileSync(policyPath, `harbor_command = "harbor"\n${block}`);
+  } else {
+    appendFileSync(policyPath, block);
+  }
+  return { channel: chan, room: targetRoom, mappingCreated: true };
 }

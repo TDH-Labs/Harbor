@@ -61,6 +61,7 @@ import {
   ChannelToolsError,
   defaultPolicyPath,
   listChannels,
+  mapChannel,
   resolveChannelTools,
 } from "./channel-tools.ts";
 import { listGrants, saveGrant, purgeExpiredGrants, MAX_GRANT_SECONDS } from "./approval.ts";
@@ -1725,12 +1726,44 @@ const channelToolsCmd = defineCommand({
     ...commonArgs,
     channel: { type: "positional", required: false, description: "Channel name or UUID (omit for a directory of all mapped channels)" },
     policy: { type: "string", description: "Path to channel-tools.toml (default ~/.buzz/channel-tools.toml)" },
+    map: { type: "boolean", description: "Scope this channel on the fly: create its room + record the mapping" },
+    room: { type: "string", description: "Room to map to (with --map; default: derived from the channel name)" },
     json: { type: "boolean", description: "Emit JSON (the shape the Buzz GUI panel reads)" },
   },
   run({ args }) {
     const env = envFromArgs(args);
     const policyPath = args.policy ?? defaultPolicyPath();
     const channel = args.channel as string | undefined;
+
+    // --map: ensure the channel is scoped (create room + mapping), then report.
+    if (args.map) {
+      if (!channel) {
+        console.error("channel-tools --map: a channel is required");
+        process.exitCode = 1;
+        return;
+      }
+      let result;
+      try {
+        result = mapChannel(env, policyPath, channel, args.room);
+      } catch (err) {
+        if (err instanceof ChannelToolsError) {
+          console.error(`channel-tools: ${err.message}`);
+          process.exitCode = 1;
+          return;
+        }
+        throw err;
+      }
+      if (args.json) {
+        printJson(result);
+        return;
+      }
+      console.log(
+        result.mappingCreated
+          ? `✓ Scoped '${result.channel}' → room '${result.room}'`
+          : `'${result.channel}' is already scoped → room '${result.room}'`,
+      );
+      return;
+    }
 
     // No channel argument → directory view of every mapped channel.
     if (!channel) {
