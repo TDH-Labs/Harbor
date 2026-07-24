@@ -190,6 +190,38 @@ export function addMcpServerToRoom(env: Environment, room: string, server: McpSe
 }
 
 /**
+ * Remove the MCP server named `name` from `[skills.rooms.<room>].mcp.servers`.
+ * Idempotent — returns `changed: false` if the room has no such server (or no
+ * server list at all). Throws {@link ConfigEditError} if the environment has no
+ * config file or the room section is absent.
+ */
+export function removeMcpServerFromRoom(env: Environment, room: string, name: string): EditResult {
+  validateRoomName(room);
+  const path = env.configPath;
+  if (!path) {
+    throw new ConfigEditError("no config file path available (environment built from defaults)");
+  }
+
+  const data = parseToml(readFileSync(path, "utf8")) as TomlTable;
+  const rooms = data?.skills?.rooms as TomlTable | undefined;
+  if (!rooms || typeof rooms !== "object" || !(room in rooms)) {
+    throw new ConfigEditError(`room section '[skills.rooms.${room}]' not found in config`);
+  }
+
+  const roomTable = rooms[room] as TomlTable;
+  const mcpTable = roomTable.mcp as TomlTable | undefined;
+  const servers: TomlTable[] = Array.isArray(mcpTable?.servers) ? (mcpTable.servers as TomlTable[]) : [];
+  const nextServers = servers.filter((s) => s.name !== name);
+  if (nextServers.length === servers.length) {
+    return { changed: false, path };
+  }
+
+  (roomTable.mcp as TomlTable).servers = nextServers;
+  writeFileSync(path, stringifyToml(data) + "\n");
+  return { changed: true, path };
+}
+
+/**
  * Remove `skill` from `[skills.rooms.<room>].skills` in the environment's
  * config.toml, if present.
  *

@@ -25,7 +25,13 @@ import { join } from "node:path";
 
 import type { RawMcpServer } from "./config.ts";
 import type { Environment } from "./env.ts";
-import { addMcpServerToRoom, ensureRoomInConfig, isValidRoomName, type McpServerSpec } from "./config-edit.ts";
+import {
+  addMcpServerToRoom,
+  ensureRoomInConfig,
+  isValidRoomName,
+  removeMcpServerFromRoom,
+  type McpServerSpec,
+} from "./config-edit.ts";
 
 // ── Types ──────────────────────────────────────────────────────────────────--
 
@@ -320,6 +326,25 @@ export function addServerToRoom(env: Environment, room: string, server: McpServe
 
   const { changed } = addMcpServerToRoom(env, room, server);
   return { room, server: server.name, roomCreated, changed };
+}
+
+/**
+ * Remove the MCP server named `name` from `room`. The structural inverse of
+ * {@link addServerToRoom}; idempotent (`changed: false` when the room has no
+ * such server). Throws if the room is not in config.
+ */
+export function removeServerFromRoom(
+  env: Environment,
+  room: string,
+  name: string,
+): { room: string; server: string; changed: boolean } {
+  if (!isValidRoomName(room)) {
+    throw new Error(
+      `invalid room name '${room}' — room names may only contain letters, digits, hyphens, and underscores`,
+    );
+  }
+  const { changed } = removeMcpServerFromRoom(env, room, name);
+  return { room, server: name, changed };
 }
 
 /**

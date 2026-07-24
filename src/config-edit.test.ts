@@ -9,6 +9,7 @@ import { Config } from "./config.ts";
 import { Environment } from "./env.ts";
 import {
   addMcpServerToRoom,
+  removeMcpServerFromRoom,
   addSkillToRoom,
   ConfigEditError,
   ensureRoomInConfig,
@@ -174,6 +175,37 @@ describe("addMcpServerToRoom", () => {
   test("throws when the environment has no config file", () => {
     const e = new Environment(dir, Config.defaults(), null);
     expect(() => addMcpServerToRoom(e, "ops", { name: "x", command: "echo" })).toThrow(/no config file/);
+  });
+});
+
+describe("removeMcpServerFromRoom", () => {
+  test("removes the named server, leaving the others in place", () => {
+    const e = writeConfig(BASE.replace("PLACEHOLDER", dir));
+    addMcpServerToRoom(e, "ops", { name: "keep", command: "echo" });
+    addMcpServerToRoom(e, "ops", { name: "drop", command: "bun" });
+    const res = removeMcpServerFromRoom(e, "ops", "drop");
+    expect(res.changed).toBe(true);
+    const cfg = parseToml(readFileSync(configPath, "utf8")) as any;
+    expect(cfg.skills.rooms.ops.mcp.servers.map((s: any) => s.name)).toEqual(["keep"]);
+  });
+
+  test("is idempotent — removing an absent server is a no-op", () => {
+    const e = writeConfig(BASE.replace("PLACEHOLDER", dir));
+    addMcpServerToRoom(e, "ops", { name: "keep", command: "echo" });
+    const res = removeMcpServerFromRoom(e, "ops", "never-added");
+    expect(res.changed).toBe(false);
+    const cfg = parseToml(readFileSync(configPath, "utf8")) as any;
+    expect(cfg.skills.rooms.ops.mcp.servers.map((s: any) => s.name)).toEqual(["keep"]);
+  });
+
+  test("no-op (not a throw) when the room has no mcp table at all", () => {
+    const e = writeConfig(BASE.replace("PLACEHOLDER", dir));
+    expect(removeMcpServerFromRoom(e, "ops", "anything").changed).toBe(false);
+  });
+
+  test("throws for an unknown room", () => {
+    const e = writeConfig(BASE.replace("PLACEHOLDER", dir));
+    expect(() => removeMcpServerFromRoom(e, "ghost", "x")).toThrow(ConfigEditError);
   });
 });
 

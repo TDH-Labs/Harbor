@@ -44,6 +44,7 @@ import {
   generateRoomConfig,
   generateRoomConfigs,
   mergeConfigs,
+  removeServerFromRoom,
   roomsWithMcp,
   validateAllRooms,
   validateRoom,
@@ -1029,6 +1030,41 @@ const mcpAddCmd = defineCommand({
   },
 });
 
+const mcpRemoveCmd = defineCommand({
+  meta: {
+    name: "mcp-remove",
+    description: "Remove an MCP server from a room (structural inverse of mcp-add)",
+  },
+  args: {
+    ...commonArgs,
+    room: { type: "string", description: "Room to remove the server from" },
+    name: { type: "string", description: "Server entry name to remove" },
+  },
+  run({ args }) {
+    const env = envFromArgs(args);
+    const room = args.room;
+    const name = args.name;
+    if (!room || !name) {
+      console.error("mcp-remove: --room and --name are both required");
+      process.exitCode = 1;
+      return;
+    }
+    let result;
+    try {
+      result = removeServerFromRoom(env, room, name);
+    } catch (err) {
+      console.error(`mcp-remove: ${err instanceof Error ? err.message : String(err)}`);
+      process.exitCode = 1;
+      return;
+    }
+    console.log(
+      result.changed
+        ? `✓ Removed '${name}' from room: ${room}`
+        : `'${name}' is not configured in '${room}' — nothing to remove.`,
+    );
+  },
+});
+
 const mcpGenCmd = defineCommand({
   meta: { name: "mcp-gen", description: "Generate per-room .room-mcp.json configs" },
   args: { ...commonArgs, room: { type: "string", description: "Generate for one room" } },
@@ -1955,6 +1991,7 @@ export const main: CommandDef = defineCommand({
     "skills-list": skillsListCmd,
     "mcp-check": mcpCheckCmd,
     "mcp-add": mcpAddCmd,
+    "mcp-remove": mcpRemoveCmd,
     "mcp-gen": mcpGenCmd,
     "mcp-merge": mcpMergeCmd,
     "skill-create": skillCreateCmd,
