@@ -177,8 +177,9 @@ Block-hosted).
 </p>
 
 ```bash
-harbor channel-tools legal --map     # scope a channel to a room (on the fly)
-harbor channel-tools legal --json    # what a channel exposes (the shape a GUI reads)
+harbor channel-tools legal --map      # scope a channel to a room (on the fly)
+harbor channel-tools legal --json     # what a channel exposes (the shape a GUI reads)
+harbor channel-persona legal --json   # the persona a channel runs under (auto-derived from its room)
 ```
 
 **[→ Full guide: docs/BUZZ.md](./docs/BUZZ.md)** — the policy file, both integration modes
@@ -275,6 +276,9 @@ Run `harbor <command> --help` for full flags. All commands accept the global sel
 | `harbor channel-tools <channel> [--json]` | Show the skills + MCP servers a Buzz channel exposes. |
 | `harbor channel-tools <channel> --map [--room R]` | Scope a channel to a room on the fly (creates the room + records the mapping). |
 | `harbor buzz-pack` | Emit a Buzz Persona Pack from Harbor rooms (one room → one persona). |
+| `harbor channel-persona <channel> [--json]` | Show or manage the persona a Buzz channel runs under — auto-derived from its room, or overridden (`--set-file` / `--set-inline` / `--sync` / `--remove`). |
+| `harbor room-personas <room> [--json]` | List the personas a room offers (`rooms/<room>/agents/*.md`). |
+| `harbor room-persona <room> <name> [--json] [--set-body T]` | Read or edit a single room persona's full text (the canonical persona). |
 
 **Integrations**
 
