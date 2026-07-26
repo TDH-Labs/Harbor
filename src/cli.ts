@@ -65,6 +65,14 @@ import {
   mapChannel,
   resolveChannelTools,
 } from "./channel-tools.ts";
+import {
+  listRoomPersonas,
+  removeChannelPersona,
+  resolveChannelPersona,
+  setChannelPersonaFile,
+  syncChannelPersona,
+  writeCustomPersona,
+} from "./channel-personas.ts";
 import { listGrants, saveGrant, purgeExpiredGrants, MAX_GRANT_SECONDS } from "./approval.ts";
 import {
   describeSecrets,
@@ -1880,6 +1888,91 @@ const channelToolsCmd = defineCommand({
   },
 });
 
+const roomPersonasCmd = defineCommand({
+  meta: {
+    name: "room-personas",
+    description: "List the persona files a Harbor room offers (rooms/<room>/agents/*.md)",
+  },
+  args: {
+    ...commonArgs,
+    room: { type: "positional", required: true, description: "Room name" },
+    json: { type: "boolean", description: "Emit JSON (the shape the Buzz GUI persona picker reads)" },
+  },
+  run({ args }) {
+    const env = envFromArgs(args);
+    const personas = listRoomPersonas(env, args.room as string);
+    if (args.json) {
+      printJson(personas);
+      return;
+    }
+    if (personas.length === 0) {
+      console.log(`(room '${args.room}' has no personas in rooms/${args.room}/agents/)`);
+      return;
+    }
+    console.log(`Personas in room '${args.room}':`);
+    for (const p of personas) console.log(`  ${p.name}${p.preview ? ` — ${p.preview}` : ""}`);
+  },
+});
+
+const channelPersonaCmd = defineCommand({
+  meta: {
+    name: "channel-persona",
+    description: "Show or manage the persona (system prompt) a Buzz channel runs under — auto-derived from its room, or overridden",
+  },
+  args: {
+    ...commonArgs,
+    channel: { type: "positional", required: true, description: "Channel name or UUID" },
+    policy: { type: "string", description: "Path to channel-tools.toml (default ~/.buzz/channel-tools.toml)" },
+    json: { type: "boolean", description: "Emit JSON (the shape the Buzz GUI panel reads)" },
+    "set-file": { type: "string", description: "Override: point the persona at this file" },
+    "set-inline": { type: "string", description: "Override: use this text as the persona (stored under ~/.buzz/personas/)" },
+    sync: { type: "boolean", description: "Auto-apply the room persona if unambiguous (points persona_file at the live room file)" },
+    remove: { type: "boolean", description: "Clear any override, reverting to the room-derived persona (or none)" },
+  },
+  run({ args }) {
+    const env = envFromArgs(args);
+    const policyPath = args.policy ?? defaultPolicyPath();
+    const channel = args.channel as string;
+
+    if (args.remove) {
+      removeChannelPersona(policyPath, channel);
+    } else if (args["set-inline"]) {
+      const file = writeCustomPersona(channel, args["set-inline"] as string);
+      setChannelPersonaFile(policyPath, channel, file);
+    } else if (args["set-file"]) {
+      setChannelPersonaFile(policyPath, channel, args["set-file"] as string);
+    } else if (args.sync) {
+      const res = syncChannelPersona(env, policyPath, channel);
+      if (args.json) {
+        printJson(res);
+        return;
+      }
+      console.log(res.synced ? `✓ Applied room persona → ${res.path}` : `(not applied: ${res.reason})`);
+      return;
+    }
+
+    const resolved = resolveChannelPersona(env, policyPath, channel);
+    if (args.json) {
+      printJson(resolved);
+      return;
+    }
+    if (!resolved.effective) {
+      console.log(
+        resolved.ambiguous
+          ? `'${channel}': room '${resolved.room}' has several personas — pick one: ${resolved.roomOptions.map((o) => o.name).join(", ")}`
+          : `'${channel}': no persona (uses the agent's base prompt)`,
+      );
+      return;
+    }
+    const src = resolved.overridden ? "override" : "from room";
+    console.log(`'${channel}' persona: ${resolved.effective.name} (${src})`);
+    if (resolved.effective.preview) console.log(`  ${resolved.effective.preview}`);
+    if (resolved.roomOptions.length > 1) {
+      console.log(`  room offers: ${resolved.roomOptions.map((o) => o.name).join(", ")}`);
+    }
+  },
+});
+
 const approvalCmd = defineCommand({
   meta: {
     name: "approval",
@@ -2005,6 +2098,8 @@ export const main: CommandDef = defineCommand({
     secrets: secretsCmd,
     "buzz-pack": buzzPackCmd,
     "channel-tools": channelToolsCmd,
+    "channel-persona": channelPersonaCmd,
+    "room-personas": roomPersonasCmd,
     approval: approvalCmd,
   },
 });

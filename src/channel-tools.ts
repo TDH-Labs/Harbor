@@ -62,6 +62,10 @@ export interface ChannelPolicy {
   room: string | null;
   /** Explicit MCP servers declared for this channel (additive with the room). */
   explicitMcp: ExplicitMcpServer[];
+  /** Inline persona (system-prompt) override, if set. Mutually exclusive with personaFile. */
+  persona: string | null;
+  /** Persona file override, if set. Mutually exclusive with persona. */
+  personaFile: string | null;
 }
 
 /** A skill visible in a channel (via its room). */
@@ -109,7 +113,9 @@ export function loadPolicy(path: string): { harborCommand: string; channels: Map
             args: Array.isArray(m.args) ? m.args.map(String) : [],
           }))
       : [];
-    channels.set(key, { key, room, explicitMcp });
+    const persona = typeof v.persona === "string" && v.persona.trim() ? v.persona : null;
+    const personaFile = typeof v.persona_file === "string" && v.persona_file.trim() ? v.persona_file.trim() : null;
+    channels.set(key, { key, room, explicitMcp, persona, personaFile });
   }
   return { harborCommand, channels };
 }
