@@ -84,19 +84,27 @@ export interface ChannelTools {
   /** True when the channel has a policy entry at all. */
   scoped: boolean;
   skills: ChannelSkill[];
-  /** MCP servers: the room's configured servers plus any explicit inline ones. */
-  mcpServers: Array<{ name: string; source: "room" | "explicit" }>;
+  /** MCP servers: the room's configured servers, explicit inline ones, and the policy baseline. */
+  mcpServers: Array<{ name: string; source: "room" | "explicit" | "baseline" }>;
 }
 
 type Toml = Record<string, unknown>;
 
 /** Parse a `channel-tools.toml` and return its channel → policy map. */
-export function loadPolicy(path: string): { harborCommand: string; channels: Map<string, ChannelPolicy> } {
+export function loadPolicy(path: string): {
+  harborCommand: string;
+  /** Execution-baseline MCP commands appended to every scoped channel (any harness). */
+  baselineMcp: string[];
+  channels: Map<string, ChannelPolicy>;
+} {
   if (!existsSync(path)) {
     throw new ChannelToolsError(`channel-tools policy not found at ${path}`);
   }
   const data = parseToml(readFileSync(path, "utf8")) as Toml;
   const harborCommand = typeof data.harbor_command === "string" ? data.harbor_command : "harbor";
+  const baselineMcp = Array.isArray(data.baseline_mcp)
+    ? (data.baseline_mcp as unknown[]).filter((c): c is string => typeof c === "string" && c.trim() !== "")
+    : [];
 
   const channels = new Map<string, ChannelPolicy>();
   const rawChannels = (data.channels ?? {}) as Record<string, unknown>;
@@ -117,7 +125,7 @@ export function loadPolicy(path: string): { harborCommand: string; channels: Map
     const personaFile = typeof v.persona_file === "string" && v.persona_file.trim() ? v.persona_file.trim() : null;
     channels.set(key, { key, room, explicitMcp, persona, personaFile });
   }
-  return { harborCommand, channels };
+  return { harborCommand, baselineMcp, channels };
 }
 
 /**
@@ -147,16 +155,28 @@ export function findChannelPolicy(
  * honest state, not an error.
  */
 export function resolveChannelTools(env: Environment, policyPath: string, channel: string): ChannelTools {
-  const { channels } = loadPolicy(policyPath);
+  const { baselineMcp, channels } = loadPolicy(policyPath);
   const policy = findChannelPolicy(channels, channel);
 
+  // The policy baseline is appended to any *scoped* channel (one that exposes at
+  // least one server), deduped by name — mirrors buzz-acp's load-time append.
+  const stem = (cmd: string) => (cmd.split(/[\\/]/).pop() ?? cmd).replace(/\.[^.]+$/, "");
+  const baseline = baselineMcp.map((cmd) => ({ name: stem(cmd), source: "baseline" as const }));
+  const addBaseline = (servers: ChannelTools["mcpServers"]): ChannelTools["mcpServers"] => [
+    ...servers,
+    ...baseline.filter((b) => !servers.some((s) => s.name === b.name)),
+  ];
+
   if (!policy || !policy.room) {
+    // A room-less channel is only tool-scoped (and so gets the baseline) if it
+    // declares explicit servers; a persona-only entry leaves the harness's tools alone.
+    const explicitOnly = (policy?.explicitMcp ?? []).map((m) => ({ name: m.name, source: "explicit" as const }));
     return {
       channel,
       room: policy?.room ?? null,
       scoped: policy != null,
       skills: [],
-      mcpServers: (policy?.explicitMcp ?? []).map((m) => ({ name: m.name, source: "explicit" as const })),
+      mcpServers: explicitOnly.length > 0 ? addBaseline(explicitOnly) : explicitOnly,
     };
   }
 
@@ -173,7 +193,9 @@ export function resolveChannelTools(env: Environment, policyPath: string, channe
   const roomServers = env.config.roomMcpServers(room).map((name) => ({ name, source: "room" as const }));
   const explicit = policy.explicitMcp.map((m) => ({ name: m.name, source: "explicit" as const }));
 
-  return { channel, room, scoped: true, skills, mcpServers: [...roomServers, ...explicit] };
+  // A room channel is always scoped (buzz-acp adds the harbor skill server), so
+  // the baseline applies even when the room has no configured MCP servers.
+  return { channel, room, scoped: true, skills, mcpServers: addBaseline([...roomServers, ...explicit]) };
 }
 
 /** Every channel in the policy plus its resolved room (for a directory view). */
