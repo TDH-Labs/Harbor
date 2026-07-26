@@ -17,6 +17,7 @@ import {
   resolveChannelPersona,
   setChannelPersonaFile,
   syncChannelPersona,
+  writeRoomPersona,
 } from "./channel-personas.ts";
 import { loadPolicy as loadPolicyLocal } from "./channel-tools.ts";
 import { Config, DEFAULTS, deepMerge } from "./config.ts";
@@ -119,6 +120,34 @@ describe("resolveChannelPersona", () => {
     expect(r.overridden).toBe(true);
     expect(r.effective?.source).toBe("override-file");
     expect(r.effective?.preview).toBe("You are a custom override.");
+  });
+});
+
+describe("resolveChannelPersona full body (for editing)", () => {
+  test("effective.body carries the full room persona text, not just a preview", () => {
+    writePersona("support", "support-agent", "## Identity\nYou are the support agent.\n\nLong body line two.\n");
+    const p = writePolicy(`[channels.support]\nroom = "support"\n`);
+    const r = resolveChannelPersona(env(), p, "support");
+    expect(r.effective?.body).toContain("Long body line two.");
+    expect(r.effective!.body.length).toBeGreaterThan(r.effective!.preview.length);
+  });
+});
+
+describe("writeRoomPersona", () => {
+  test("overwrites the canonical room persona file", () => {
+    const path = writePersona("support", "support-agent");
+    const e = env();
+    const written = writeRoomPersona(e, "support", "support-agent", "## Identity\nEdited canonical persona.\n");
+    expect(written).toBe(path);
+    expect(readFileSync(path, "utf8")).toContain("Edited canonical persona.");
+  });
+  test("rejects an empty body", () => {
+    expect(() => writeRoomPersona(env(), "support", "support-agent", "   ")).toThrow();
+  });
+  test("rejects a traversing room/name", () => {
+    expect(() => writeRoomPersona(env(), "support", "..", "x")).toThrow();
+    expect(() => writeRoomPersona(env(), "..", "support-agent", "x")).toThrow();
+    expect(() => writeRoomPersona(env(), "support", "a/b", "x")).toThrow();
   });
 });
 

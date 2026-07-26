@@ -19,7 +19,7 @@
  */
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, sep } from "node:path";
 
 import { findChannelPolicy, loadPolicy } from "./channel-tools.ts";
 import type { Environment } from "./env.ts";
@@ -53,6 +53,8 @@ export interface ChannelPersona {
     inline: string | null;
     source: "override-file" | "override-inline" | "room";
     preview: string;
+    /** The full prompt text, for in-place editing. */
+    body: string;
   } | null;
   /** Every persona the mapped room offers, for the picker. */
   roomOptions: RoomPersona[];
@@ -162,6 +164,7 @@ export function resolveChannelPersona(env: Environment, policyPath: string, chan
         inline: policy.persona,
         source: "override-inline",
         preview: personaPreview(policy.persona),
+        body: policy.persona,
       },
       roomOptions,
       ambiguous: false,
@@ -171,13 +174,14 @@ export function resolveChannelPersona(env: Environment, policyPath: string, chan
   if (policy?.personaFile) {
     // Name it after the matching room persona when the path points into the room.
     const match = roomOptions.find((p) => policy.personaFile!.includes(p.name));
-    let preview = "";
+    let body = "";
     const expanded = policy.personaFile.replace(/^~(?=\/)/, homedir());
     try {
-      preview = personaPreview(readFileSync(expanded, "utf8"));
+      body = readFileSync(expanded, "utf8");
     } catch {
-      preview = `(persona_file: ${policy.personaFile})`;
+      body = "";
     }
+    const preview = body ? personaPreview(body) : `(persona_file: ${policy.personaFile})`;
     return {
       channel,
       room,
@@ -189,6 +193,7 @@ export function resolveChannelPersona(env: Environment, policyPath: string, chan
         // persona (auto-applied); only a file outside the room is a "custom" override.
         source: match ? "room" : "override-file",
         preview,
+        body,
       },
       roomOptions,
       ambiguous: false,
@@ -199,10 +204,16 @@ export function resolveChannelPersona(env: Environment, policyPath: string, chan
   // No override — auto-derive from the room.
   const auto = matchRoomPersona(channel, roomOptions, room ?? undefined);
   if (auto) {
+    let body = "";
+    try {
+      body = readFileSync(auto.path, "utf8");
+    } catch {
+      body = "";
+    }
     return {
       channel,
       room,
-      effective: { name: auto.name, path: auto.path, inline: null, source: "room", preview: auto.preview },
+      effective: { name: auto.name, path: auto.path, inline: null, source: "room", preview: auto.preview, body },
       roomOptions,
       ambiguous: false,
       overridden: false,
@@ -317,6 +328,29 @@ export function removeChannelPersona(policyPath: string, channel: string): void 
 /** Directory where custom (non-room) personas are stored. */
 export function customPersonaDir(): string {
   return join(homedir(), ".buzz", "personas");
+}
+
+/**
+ * Overwrite a room's persona file (the canonical persona) with new text. This is
+ * the "edit the room persona" path — the change applies to every channel that
+ * uses it. Guarded to stay inside `<rooms>/<room>/agents/`.
+ */
+export function writeRoomPersona(env: Environment, room: string, name: string, body: string): string {
+  const NAME_RE = /^[A-Za-z0-9._-]+$/;
+  if (!NAME_RE.test(room) || !NAME_RE.test(name) || [room, name].some((s) => s === "." || s === "..")) {
+    throw new ChannelPersonaError(`invalid room or persona name`);
+  }
+  if (!body.trim()) {
+    throw new ChannelPersonaError(`persona body must not be empty`);
+  }
+  const dir = join(env.rooms, room, "agents");
+  const path = join(dir, `${name}.md`);
+  if (path !== join(dir, `${name}.md`) || !path.startsWith(dir + sep)) {
+    throw new ChannelPersonaError(`refusing to write outside the room's agents directory`);
+  }
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(path, body.endsWith("\n") ? body : `${body}\n`);
+  return path;
 }
 
 /** Write a custom persona body to `~/.buzz/personas/<channel>.md` and return its path. */

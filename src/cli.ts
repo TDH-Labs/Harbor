@@ -72,6 +72,7 @@ import {
   setChannelPersonaFile,
   syncChannelPersona,
   writeCustomPersona,
+  writeRoomPersona,
 } from "./channel-personas.ts";
 import { listGrants, saveGrant, purgeExpiredGrants, MAX_GRANT_SECONDS } from "./approval.ts";
 import {
@@ -1914,6 +1915,50 @@ const roomPersonasCmd = defineCommand({
   },
 });
 
+const roomPersonaCmd = defineCommand({
+  meta: {
+    name: "room-persona",
+    description: "Read or edit a single room persona file's full text (the canonical persona)",
+  },
+  args: {
+    ...commonArgs,
+    room: { type: "positional", required: true, description: "Room name" },
+    name: { type: "positional", required: true, description: "Persona name (agents/<name>.md)" },
+    json: { type: "boolean", description: "Emit JSON { room, name, path, body }" },
+    "set-body": { type: "string", description: "Overwrite the persona file with this text (edits the canonical persona)" },
+  },
+  run({ args }) {
+    const env = envFromArgs(args);
+    const room = args.room as string;
+    const name = args.name as string;
+
+    if (args["set-body"] != null) {
+      const path = writeRoomPersona(env, room, name, args["set-body"] as string);
+      if (args.json) {
+        printJson({ room, name, path, saved: true });
+        return;
+      }
+      console.log(`✓ Saved persona '${name}' → ${path}`);
+      return;
+    }
+
+    const path = join(env.rooms, room, "agents", `${name}.md`);
+    let body = "";
+    try {
+      body = readFileSync(path, "utf8");
+    } catch {
+      console.error(`room-persona: '${name}' not found in room '${room}' (${path})`);
+      process.exitCode = 1;
+      return;
+    }
+    if (args.json) {
+      printJson({ room, name, path, body });
+      return;
+    }
+    console.log(body);
+  },
+});
+
 const channelPersonaCmd = defineCommand({
   meta: {
     name: "channel-persona",
@@ -2100,6 +2145,7 @@ export const main: CommandDef = defineCommand({
     "channel-tools": channelToolsCmd,
     "channel-persona": channelPersonaCmd,
     "room-personas": roomPersonasCmd,
+    "room-persona": roomPersonaCmd,
     approval: approvalCmd,
   },
 });
