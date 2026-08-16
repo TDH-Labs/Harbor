@@ -163,8 +163,38 @@ For Pi (and any TypeScript/JavaScript agent with import-level extensions), use t
 path instead — a direct function call, no subprocess:
 
 ```ts
-import { gate, checkBudget, audit } from "harbor-tugboat";
+import { registerHarborSkills } from "harbor-tugboat/integrations/pi";
+
+export default function (pi: any) {
+  registerHarborSkills(pi, {
+    procEnv: {
+      AGENT_ENV_ROOM: process.env.AGENT_ENV_ROOM || "devops",
+      AGENT_ENV_SESSION: process.env.AGENT_ENV_SESSION || `pi-${Date.now()}`,
+    },
+  });
+}
 ```
+
+---
+
+## Dynamic Sequential Skill Execution
+
+Traditional skill systems dump every markdown skill into the agent's system prompt simultaneously. With 20–50 skills, this consumes **20,000–80,000+ tokens on every single turn**, causing model confusion, instruction drift, and high latency.
+
+Harbor replaces static loading with **Dynamic Sequential Execution**:
+
+1. **Search (`search_skills`)**: Agent searches available room skills by query. Harbor returns lean metadata summaries (<150 tokens) instead of full file content.
+2. **Activate (`activate_skill`)**: Agent activates exactly **one** skill. Harbor verifies room access, debits the token budget, sets active session state, and injects the skill instructions.
+3. **Execute**: The agent performs its task with focused, distraction-free context.
+4. **Deactivate (`deactivate_skill`)**: When finished, the agent clears active skill state before activating the next skill.
+
+| Tool | Purpose | Context Cost |
+|---|---|---|
+| `search_skills` | Find relevant skills by query (room-scoped) | ~50–150 tokens |
+| `activate_skill` | Load instructions for the active skill | ~500–2,000 tokens (1 skill only) |
+| `deactivate_skill`| Clear active skill from state | 0 tokens |
+| `read_skill` | Direct on-demand read (room-gated, budgeted) | Size of skill |
+| `list_skills` | List all skill names & descriptions in the room | ~100–300 tokens |
 
 ---
 
