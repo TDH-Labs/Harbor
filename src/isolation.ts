@@ -40,6 +40,9 @@ import { isPathWithin } from "./path-safety.ts";
 export enum Capability {
   READ_SKILL = "read_skill",
   LIST_SKILLS = "list_skills",
+  SEARCH_SKILLS = "search_skills",
+  ACTIVATE_SKILL = "activate_skill",
+  DEACTIVATE_SKILL = "deactivate_skill",
   READ_SKILL_DIGEST = "read_skill_digest",
   MCP_ACCESS = "mcp_access",
   MCP_MERGE = "mcp_merge",
@@ -85,6 +88,7 @@ export interface AgentSessionInit {
   capabilities?: Iterable<string>;
   sessionId?: string;
   createdAt?: number;
+  activeSkill?: string | null;
 }
 
 /** A session with an identity and a fixed capability set. */
@@ -94,12 +98,16 @@ export class AgentSession {
   readonly capabilities: Set<string>;
   readonly sessionId: string;
   readonly createdAt: number;
+  activeSkill: string | null = null;
+  activeSkillStartedAt: number | null = null;
 
   constructor(init: AgentSessionInit) {
     this.room = init.room;
     this.agentId = init.agentId ?? "";
     this.capabilities = new Set(init.capabilities ?? DEFAULT_CAPABILITIES);
     this.createdAt = init.createdAt ?? Date.now() / 1000;
+    this.activeSkill = init.activeSkill ?? null;
+    if (this.activeSkill) this.activeSkillStartedAt = this.createdAt;
     this.sessionId =
       init.sessionId ??
       createHash("sha256")

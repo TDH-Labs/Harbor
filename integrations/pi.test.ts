@@ -37,7 +37,7 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-const READ_CAPS = ["read_skill", "list_skills"];
+const READ_CAPS = ["read_skill", "list_skills", "search_skills", "activate_skill", "deactivate_skill"];
 
 function makeEnv(rooms: Record<string, unknown>, skills: Record<string, string>): Environment {
   const stateDir = join(dir, ".agent-env");
@@ -106,7 +106,7 @@ describe("readSkill (in-process → SQLite state)", () => {
 
     // Verify SQLite state: the denial is in isolation.db, and NO budget moved.
     const denials = auditRead(env, { room: "marketing" }).filter((e) => e.decision === "denied");
-    expect(denials.some((e) => e.resource === "nda-review")).toBe(true);
+    expect(denials.some((e) => e.capability === "read_skill" && e.resource === "nda-review")).toBe(true);
     expect(checkBudget("sess-mkt", "probe", 0, { env, room: "marketing" }).used).toBe(0);
   });
 
@@ -147,26 +147,12 @@ describe("readSkill (in-process → SQLite state)", () => {
   });
 });
 
-describe("listSkillsTool", () => {
-  test("lists the room's skills", async () => {
-    const env = makeEnv(
-      { legal: { skills: ["nda-review", "case-brief"], capabilities: READ_CAPS } },
-      { "nda-review": skillMd("nda-review"), "case-brief": skillMd("case-brief") },
-    );
-    const res = await listSkillsTool(ctxFor(env, "legal", "s1"));
-    expect(res.content[0]!.text).toContain("nda-review");
-    expect(res.content[0]!.text).toContain("case-brief");
-    expect(res.details?.count).toBe(2);
-  });
-
-  // B1 — a restricted session must not enumerate another room's skills via the
-  // default scope or an explicit room override. Two rooms, distinct skills, marketing
-  // session: it sees only `campaign`, and `room='legal'` is denied (audited).
-  test("does not reveal another room's skills (default scope or explicit override)", async () => {
+describe("listSkillsTool (in-process)", () => {
+  test("lists only the session room's skills; cross-room list is denied", async () => {
     const env = makeEnv(
       {
-        marketing: { skills: ["campaign"], capabilities: READ_CAPS, budget: 50000 },
-        legal: { skills: ["nda-review"], capabilities: READ_CAPS, budget: 50000 },
+        legal: { skills: ["nda-review"], capabilities: READ_CAPS },
+        marketing: { skills: ["campaign"], capabilities: READ_CAPS },
       },
       { campaign: skillMd("campaign"), "nda-review": skillMd("nda-review") },
     );
@@ -201,7 +187,7 @@ describe("piContext (env-var resolution)", () => {
 });
 
 describe("registerHarborSkills (Pi extension adapter)", () => {
-  test("registers read_skill and list_skills, and they execute", async () => {
+  test("registers all tools (search, activate, deactivate, read, list), and they execute", async () => {
     const body = "z".repeat(400);
     const env = makeEnv(
       { legal: { skills: ["nda-review"], capabilities: READ_CAPS, budget: 50000 } },
@@ -211,14 +197,34 @@ describe("registerHarborSkills (Pi extension adapter)", () => {
     const fakePi = { registerTool: (t: PiToolDefinition) => tools.push(t) };
     registerHarborSkills(fakePi, { env, procEnv: { AGENT_ENV_ROOM: "legal", AGENT_ENV_SESSION: "sess-x" } });
 
-    expect(tools.map((t) => t.name).sort()).toEqual(["list_skills", "read_skill"]);
+    expect(tools.map((t) => t.name).sort()).toEqual([
+      "activate_skill",
+      "deactivate_skill",
+      "list_skills",
+      "read_skill",
+      "search_skills",
+    ]);
     for (const t of tools) expect(t.parameters).toHaveProperty("type", "object");
+
+    // Test search_skills
+    const searchTool = tools.find((t) => t.name === "search_skills")!;
+    const searchOut = await searchTool.execute("call-s", { query: "nda" });
+    expect(searchOut.content[0]!.text).toContain("nda-review");
+
+    // Test activate_skill
+    const activateTool = tools.find((t) => t.name === "activate_skill")!;
+    const activateOut = await activateTool.execute("call-a", { skill_name: "nda-review" });
+    expect(activateOut.content[0]!.text).toContain("[HARBOR: SKILL 'nda-review' IS NOW ACTIVE]");
+    expect(checkBudget("sess-x", "probe", 0, { env, room: "legal" }).used).toBeGreaterThan(0);
+
+    // Test deactivate_skill
+    const deactivateTool = tools.find((t) => t.name === "deactivate_skill")!;
+    const deactivateOut = await deactivateTool.execute("call-d", {});
+    expect(deactivateOut.content[0]!.text).toContain("deactivated");
 
     const readTool = tools.find((t) => t.name === "read_skill")!;
     const out = await readTool.execute("call-1", { skill_name: "nda-review" });
     expect(out.content[0]!.text).toContain(body);
-    // The adapter path debited the budget under the env-var session.
-    expect(checkBudget("sess-x", "probe", 0, { env, room: "legal" }).used).toBeGreaterThan(0);
 
     const listTool = tools.find((t) => t.name === "list_skills")!;
     const listed = await listTool.execute("call-2", {});

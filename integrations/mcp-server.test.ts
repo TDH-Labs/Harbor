@@ -62,7 +62,7 @@ function skillMd(name: string, description: string, body = "Step 1. Do the thing
   return `---\nname: ${name}\ndescription: ${description}\n---\n\n# ${name}\n\n${body}\n`;
 }
 
-const READ_CAPS = ["read_skill", "list_skills"];
+const READ_CAPS = ["read_skill", "list_skills", "search_skills", "activate_skill", "deactivate_skill"];
 
 /** A server whose context always resolves to the given room/session. */
 function serverFor(env: Environment, room: string, sessionId: string) {
@@ -106,12 +106,21 @@ describe("MCP protocol", () => {
     expect(res).toBeNull();
   });
 
-  test("tools/list advertises the five tools with input schemas", async () => {
+  test("tools/list advertises the tools with input schemas", async () => {
     const server = serverFor(makeEnv({}), "general", "s1");
     const res = await server.handle({ jsonrpc: "2.0", id: 2, method: "tools/list" });
     const result = res!.result as { tools: Array<{ name: string; inputSchema: unknown }> };
     const names = result.tools.map((t) => t.name).sort();
-    expect(names).toEqual(["audit_recent", "budget_status", "list_rooms", "list_skills", "read_skill"]);
+    expect(names).toEqual([
+      "activate_skill",
+      "audit_recent",
+      "budget_status",
+      "deactivate_skill",
+      "list_rooms",
+      "list_skills",
+      "read_skill",
+      "search_skills",
+    ]);
     for (const t of result.tools) expect(t.inputSchema).toHaveProperty("type", "object");
     expect(result.tools.length).toBe(TOOL_DEFINITIONS.length);
   });
@@ -496,5 +505,69 @@ describe("a blank AGENT_ENV_ROOM falls back to the configured default room", () 
     const res = await call(server, "read_skill", { skill_name: "nda-review" });
     expect(isError(res)).toBe(true);
     expect(toolText(res)).toContain("access denied");
+  });
+});
+
+describe("sequential skill execution tools (search_skills, activate_skill, deactivate_skill)", () => {
+  const rooms = {
+    legal: { skills: ["nda-review", "saas-msa"], capabilities: ["read_skill", "list_skills", "search_skills", "activate_skill", "deactivate_skill"] },
+    marketing: { skills: ["copywriting"], capabilities: ["read_skill", "list_skills", "search_skills", "activate_skill", "deactivate_skill"] },
+  };
+
+  test("search_skills returns matching skills for current room", async () => {
+    const env = makeEnv({
+      rooms,
+      skills: {
+        "nda-review": skillMd("nda-review", "Review NDA contracts"),
+        "saas-msa": skillMd("saas-msa", "Review SaaS MSA agreements"),
+        "copywriting": skillMd("copywriting", "Write marketing copy"),
+      },
+    });
+    const server = serverFor(env, "legal", "s1");
+    const res = await call(server, "search_skills", { query: "nda" });
+    expect(isError(res)).toBe(false);
+    expect(toolText(res)).toContain("nda-review");
+    expect(toolText(res)).not.toContain("copywriting");
+  });
+
+  test("activate_skill activates a room skill and returns instructions + sequential banner", async () => {
+    const env = makeEnv({
+      rooms,
+      skills: {
+        "nda-review": skillMd("nda-review", "Review NDA contracts", "Step 1: Check parties."),
+      },
+    });
+    const server = serverFor(env, "legal", "s1");
+    const res = await call(server, "activate_skill", { skill_name: "nda-review" });
+    expect(isError(res)).toBe(false);
+    expect(toolText(res)).toContain("[HARBOR: SKILL 'nda-review' IS NOW ACTIVE]");
+    expect(toolText(res)).toContain("Step 1: Check parties.");
+  });
+
+  test("activate_skill denies cross-room activation", async () => {
+    const env = makeEnv({
+      rooms,
+      skills: {
+        "nda-review": skillMd("nda-review", "Review NDA contracts"),
+      },
+    });
+    const server = serverFor(env, "marketing", "s1");
+    const res = await call(server, "activate_skill", { skill_name: "nda-review" });
+    expect(isError(res)).toBe(true);
+    expect(toolText(res)).toContain("access denied");
+  });
+
+  test("deactivate_skill resets active skill state", async () => {
+    const env = makeEnv({
+      rooms,
+      skills: {
+        "nda-review": skillMd("nda-review", "Review NDA contracts"),
+      },
+    });
+    const server = serverFor(env, "legal", "s1");
+    await call(server, "activate_skill", { skill_name: "nda-review" });
+    const res = await call(server, "deactivate_skill", {}, 2);
+    expect(isError(res)).toBe(false);
+    expect(toolText(res)).toContain("deactivated");
   });
 });

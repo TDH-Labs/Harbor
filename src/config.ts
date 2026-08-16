@@ -179,7 +179,13 @@ export const DEFAULTS: RawConfig = {
 };
 
 /** Baseline capabilities every room holds when config grants none. */
-export const DEFAULT_CAPABILITIES: readonly string[] = ["read_skill", "list_skills"];
+export const DEFAULT_CAPABILITIES: readonly string[] = [
+  "read_skill",
+  "list_skills",
+  "search_skills",
+  "activate_skill",
+  "deactivate_skill",
+];
 
 // ── Errors ───────────────────────────────────────────────────────────────────
 

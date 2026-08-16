@@ -14,6 +14,9 @@ The npm package and import name is **`harbor-tugboat`**; the command it installs
 
 Harbor gives you:
 
+- **Dynamic sequential skill execution** — agents discover skills via keyword search (`search_skills`)
+  and activate exactly one skill at a time (`activate_skill`), keeping context lean (<150 tokens for lookup)
+  and preventing tool/prompt bloat.
 - **Room-gated skill access** — each agent session runs in a *room*; skills and MCP servers
   are scoped to rooms, and access outside the room is denied and audited.
 - **In-process budget enforcement** — token budgets are checked and debited with a direct
@@ -130,10 +133,10 @@ its own config file (`~/.gemini/config/mcp_config.json` vs the CLI's
 `~/.gemini/settings.json`) — same directory, different file. Installing one does not
 configure the other.
 
-Once installed, the agent reaches Harbor's gated tools (`read_skill`, `list_skills`,
-budget/audit queries) over a single persistent MCP connection. The room and session come
-from the `AGENT_ENV_ROOM` and `AGENT_ENV_SESSION` environment variables — but **how each
-client gets them there is client-specific and not interchangeable.** Every dialect below was
+Once installed, the agent reaches Harbor's gated tools (`search_skills`, `activate_skill`,
+`deactivate_skill`, `read_skill`, `list_skills`, `list_rooms`, budget/audit queries) over a single
+persistent MCP connection. The room and session come from the `AGENT_ENV_ROOM` and `AGENT_ENV_SESSION`
+environment variables — but **how each client gets them there is client-specific and not interchangeable.** Every dialect below was
 verified against the real client, because a client handed a syntax it does not recognize
 does not error: it passes the template text through as the room name.
 

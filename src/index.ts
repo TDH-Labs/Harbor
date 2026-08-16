@@ -185,8 +185,9 @@ export {
   getSkillDescription,
   listSkills,
   renderRoomIndex,
+  searchSkills,
 } from "./skills.ts";
-export type { SkillRecord, SkillDetail, RoomIndexResult } from "./skills.ts";
+export type { SkillRecord, SkillDetail, RoomIndexResult, SkillSearchResult } from "./skills.ts";
 
 export {
   checkCommand,

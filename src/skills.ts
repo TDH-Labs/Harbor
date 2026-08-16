@@ -77,6 +77,11 @@ export interface RoomIndexResult {
   assignments: Record<string, string>;
 }
 
+export interface SkillSearchResult extends SkillRecord {
+  /** Relevance score for ranking. */
+  score: number;
+}
+
 // ── Description parsing ───────────────────────────────────────────────────────
 
 /**
@@ -400,6 +405,63 @@ export function getSkill(env: Environment, name: string): SkillDetail | null {
     skillMd: hasMd ? skillMd : null,
     content,
   };
+}
+
+/**
+ * Search skills in the pool by query string. Returns matching skills sorted by
+ * relevance, capped at `limit` (default 5, max 50). With `room`, only skills
+ * accessible to that room are searched.
+ */
+export function searchSkills(
+  env: Environment,
+  query: string,
+  room?: string,
+  limit: number = 5,
+): SkillSearchResult[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return [];
+  const maxResults = Math.max(1, Math.min(50, limit));
+  const skills = listSkills(env, room);
+  const terms = q.split(/[\s,._\-+/]+/).filter(Boolean);
+
+  const scored: SkillSearchResult[] = [];
+  for (const s of skills) {
+    const nameLower = s.name.toLowerCase();
+    const descLower = s.description.toLowerCase();
+    let score = 0;
+
+    // Exact skill name match
+    if (nameLower === q) {
+      score += 100;
+    } else if (nameLower.includes(q)) {
+      score += 50;
+    }
+
+    // Phrase match in description
+    if (descLower.includes(q)) {
+      score += 30;
+    }
+
+    // Term-by-term matching
+    for (const t of terms) {
+      if (t.length === 0) continue;
+      if (nameLower === t) {
+        score += 25;
+      } else if (nameLower.includes(t)) {
+        score += 15;
+      }
+      if (descLower.includes(t)) {
+        score += 10;
+      }
+    }
+
+    if (score > 0) {
+      scored.push({ ...s, score });
+    }
+  }
+
+  scored.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
+  return scored.slice(0, maxResults);
 }
 
 // ── Index generation ───────────────────────────────────────────────────────--

@@ -17,6 +17,7 @@ import {
   getSkill,
   getSkillDescription,
   listSkills,
+  searchSkills,
 } from "./skills.ts";
 
 let dir: string;
@@ -379,5 +380,58 @@ describe("generateMasterIndex", () => {
     const md = generateMasterIndex(e);
     expect(md).toContain("| ops | Ops focus | 1 |");
     expect(md).toContain("Total: 1 skills across 1 rooms.");
+  });
+});
+
+describe("searchSkills", () => {
+  test("ranks exact name match higher than description matches", () => {
+    writeSkill("nda-review", 'name: nda-review\ndescription: "Review NDA agreements"');
+    writeSkill("contract-general", 'name: contract-general\ndescription: "General nda and contract review"');
+    writeSkill("devops-deploy", 'name: devops-deploy\ndescription: "Deploy infrastructure"');
+    const e = env({
+      rooms: {
+        legal: { description: "Legal room", skills: ["nda-review", "contract-general"] },
+        devops: { description: "DevOps room", skills: ["devops-deploy"] },
+      },
+    });
+
+    const results = searchSkills(e, "nda-review");
+    expect(results.length).toBeGreaterThan(0);
+    expect(results[0]?.name).toBe("nda-review");
+  });
+
+  test("filters by room", () => {
+    writeSkill("nda-review", 'name: nda-review\ndescription: "Review NDA agreements"');
+    writeSkill("devops-deploy", 'name: devops-deploy\ndescription: "Deploy infrastructure"');
+    const e = env({
+      rooms: {
+        legal: { description: "Legal room", skills: ["nda-review"] },
+        devops: { description: "DevOps room", skills: ["devops-deploy"] },
+      },
+    });
+
+    const legalResults = searchSkills(e, "review", "legal");
+    expect(legalResults.map((r) => r.name)).toEqual(["nda-review"]);
+
+    const devopsResults = searchSkills(e, "review", "devops");
+    expect(devopsResults.length).toBe(0);
+  });
+
+  test("returns empty array for empty query or no matches", () => {
+    writeSkill("s1", 'name: s1\ndescription: "alpha"');
+    const e = env({ rooms: { r: { description: "R", skills: ["s1"] } } });
+    expect(searchSkills(e, "")).toEqual([]);
+    expect(searchSkills(e, "   ")).toEqual([]);
+    expect(searchSkills(e, "zzzzzzzz")).toEqual([]);
+  });
+
+  test("respects limit argument", () => {
+    writeSkill("test-1", 'name: test-1\ndescription: "test one"');
+    writeSkill("test-2", 'name: test-2\ndescription: "test two"');
+    writeSkill("test-3", 'name: test-3\ndescription: "test three"');
+    const e = env({ rooms: { r: { description: "R", skills: ["test-1", "test-2", "test-3"] } } });
+
+    const results = searchSkills(e, "test", "r", 2);
+    expect(results.length).toBe(2);
   });
 });

@@ -49,6 +49,7 @@ import {
   estimateTokens,
   getSkill,
   listSkills,
+  searchSkills,
   AccessDeniedError,
   BudgetExceededError,
   type GateContext,
@@ -115,6 +116,43 @@ function errorResult(s: string): ToolResult {
 
 /** The tools advertised by `tools/list` (MCP `inputSchema` is JSON Schema). */
 export const TOOL_DEFINITIONS = [
+  {
+    name: "search_skills",
+    description:
+      "Search skills available to the current session's room by keyword/query with " +
+      "relevance ranking. Returns lean summaries (<150 tokens) to avoid bloating context. " +
+      "Use this to find what skill to activate for your task.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Search query or task description (e.g. 'draft NDA' or 'git commit')." },
+        room: { type: "string", description: "Optional room override (defaults to the session room)." },
+        limit: { type: "number", description: "Max results to return (default 5, max 50)." },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "activate_skill",
+    description:
+      "Activate a skill by name for sequential execution. Loads the skill's instructions " +
+      "and sets it as the single active skill in the session. Complete the task using this " +
+      "skill, then call deactivate_skill before switching to another skill.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        skill_name: { type: "string", description: "Slug of the skill to activate." },
+      },
+      required: ["skill_name"],
+    },
+  },
+  {
+    name: "deactivate_skill",
+    description:
+      "Deactivate the currently active skill, clearing active skill state and confirming " +
+      "the session is ready to activate a new skill.",
+    inputSchema: { type: "object", properties: {} },
+  },
   {
     name: "read_skill",
     description:
@@ -196,16 +234,34 @@ export interface McpServer {
 export function createMcpServer(options: McpServerOptions = {}): McpServer {
   const env = options.env ?? Environment.default();
   const procEnv = options.procEnv ?? process.env;
+  const sessionCache = new Map<string, AgentSession>();
   const resolveContext =
-    options.resolveContext ?? ((_req: JsonRpcRequest) => defaultContext(env, procEnv));
+    options.resolveContext ?? ((_req: JsonRpcRequest) => defaultContext(env, procEnv, sessionCache));
 
   // Tool functions read their session from the ambient gate context (ALS), so
   // they are gate()-wrapped once and resolve the session per async call chain.
   const readSkillGated = gate("read_skill", readSkillImpl);
   const listSkillsGated = gate("list_skills", listSkillsImpl);
+  const searchSkillsGated = gate("search_skills", searchSkillsImpl);
+  const activateSkillGated = gate("activate_skill", activateSkillImpl);
+  const deactivateSkillGated = gate("deactivate_skill", deactivateSkillImpl);
 
   async function dispatchTool(name: string, args: Record<string, unknown>): Promise<ToolResult> {
     switch (name) {
+      case "search_skills": {
+        const query = typeof args.query === "string" ? args.query.trim() : "";
+        if (!query) return errorResult("search_skills: query is required.");
+        const room = typeof args.room === "string" && args.room ? args.room : undefined;
+        const limit = typeof args.limit === "number" ? args.limit : 5;
+        return searchSkillsGated(query, room, limit);
+      }
+      case "activate_skill": {
+        const skill = typeof args.skill_name === "string" ? args.skill_name.trim() : "";
+        if (!skill) return errorResult("activate_skill: skill_name is required.");
+        return activateSkillGated(skill);
+      }
+      case "deactivate_skill":
+        return deactivateSkillGated();
       case "read_skill": {
         const skill = typeof args.skill_name === "string" ? args.skill_name.trim() : "";
         if (!skill) return errorResult("read_skill: skill_name is required.");
@@ -336,6 +392,88 @@ async function safeDispatch(
 
 // ── Tool implementations (session resolved from the ambient gate context) ─────-
 
+/** Search skills in the session's room by query. */
+async function searchSkillsImpl(
+  query: string,
+  roomOverride?: string,
+  limit: number = 5,
+): Promise<ToolResult> {
+  const { env, session } = currentGateContext();
+  if (roomOverride && roomOverride !== session.room && !session.has(Capability.ADMIN)) {
+    const reason = `room '${session.room}' may not search skills for room '${roomOverride}'`;
+    audit.deny(session.sessionId, "search_skills", roomOverride, reason, { room: session.room, env });
+    return errorResult(`access denied: ${reason}.`);
+  }
+  const room = roomOverride ?? session.room;
+  const results = searchSkills(env, query, room, limit);
+  if (results.length === 0) {
+    return text(`No skills matched query '${query}' in room '${room}'.`);
+  }
+  const lines = [`Matching skills in room '${room}' (${results.length}):`, ""];
+  for (const s of results) {
+    lines.push(`- ${s.name}: ${s.description || "(see SKILL.md)"}`);
+  }
+  lines.push("", "To load a skill sequentially, call: activate_skill({ skill_name: '<name>' })");
+  return text(lines.join("\n"));
+}
+
+/** Activate a skill for sequential execution, debiting the budget and setting session activeSkill. */
+async function activateSkillImpl(skillName: string): Promise<ToolResult> {
+  const { env, session } = currentGateContext();
+  const detail = getSkill(env, skillName);
+  if (!detail || !detail.skillMd) {
+    return errorResult(`skill '${skillName}' not found in the pool.`);
+  }
+  const tokens = estimateTokens(detail.content);
+  const budgetOpts = { env, room: session.room, tokenLimit: env.config.roomBudget(session.room) };
+
+  const check = checkBudget(session.sessionId, `skill:${skillName}`, tokens, budgetOpts);
+  if (!check.ok) {
+    audit.deny(session.sessionId, "activate_skill", skillName, check.reason ?? "budget exceeded", {
+      room: session.room,
+      env,
+    });
+    return errorResult(
+      `budget exceeded activating '${skillName}': need ${tokens}, have ${check.remaining} ` +
+        `(${check.used}/${check.limit} used).`,
+    );
+  }
+
+  spendBudget(session.sessionId, `skill:${skillName}`, tokens, budgetOpts);
+  session.activeSkill = skillName;
+  session.activeSkillStartedAt = Date.now() / 1000;
+  audit.allow(session.sessionId, "activate_skill", skillName, `activated ${tokens} tokens`, {
+    room: session.room,
+    env,
+  });
+
+  const banner = [
+    `[HARBOR: SKILL '${skillName}' IS NOW ACTIVE]`,
+    `Sequential policy: Focus exclusively on '${skillName}' until the task is complete.`,
+    `When finished, call deactivate_skill to clear context before activating another skill.`,
+    "---",
+    "",
+  ].join("\n");
+  return text(banner + detail.content);
+}
+
+/** Deactivate the currently active skill. */
+async function deactivateSkillImpl(): Promise<ToolResult> {
+  const { env, session } = currentGateContext();
+  const previous = session.activeSkill;
+  session.activeSkill = null;
+  session.activeSkillStartedAt = null;
+  audit.allow(session.sessionId, "deactivate_skill", previous ?? "none", "deactivated skill", {
+    room: session.room,
+    env,
+  });
+  return text(
+    previous
+      ? `Skill '${previous}' deactivated. Context is now clear. You may search and activate another skill.`
+      : `No active skill was set. Context is ready for a new skill.`,
+  );
+}
+
 /** Load a skill's content, debiting the session budget. Runs only if gate allows. */
 async function readSkillImpl(skillName: string): Promise<ToolResult> {
   const { env, session } = currentGateContext();
@@ -440,20 +578,27 @@ function auditRecentImpl(limit: number): ToolResult {
  * fallback in `gate.currentGateContext`, but reads from the supplied `procEnv`
  * so it is testable without touching the live process environment.
  */
-function defaultContext(env: Environment, procEnv: Record<string, string | undefined>): GateContext {
+function defaultContext(
+  env: Environment,
+  procEnv: Record<string, string | undefined>,
+  cache?: Map<string, AgentSession>,
+): GateContext {
   // `??` alone is not enough: a blank value (Gemini CLI substitutes an empty
   // string for an unset variable) or an unsubstituted "${AGENT_ENV_ROOM}"
   // literal (Goose/OpenCode/Claude Code-when-unset) is not null, so it slipped
   // past the fallback and became the session's room. See normalizeRoomEnv.
   const room = normalizeRoomEnv(procEnv.AGENT_ENV_ROOM) ?? env.config.skillDefaultRoom;
-  const sessionId = procEnv.AGENT_ENV_SESSION;
-  // No `env` passed → no `session_created` audit row per request (which would
-  // otherwise pollute audit_recent); capabilities are still room-resolved.
-  const session = createSession({
-    room,
-    capabilities: env.config.roomCapabilities(room),
-    ...(sessionId ? { sessionId } : {}),
-  });
+  const sessionId = procEnv.AGENT_ENV_SESSION ?? "";
+  const memoKey = `${room}:${sessionId}`;
+  let session = cache?.get(memoKey);
+  if (!session) {
+    session = createSession({
+      room,
+      capabilities: env.config.roomCapabilities(room),
+      ...(sessionId ? { sessionId } : {}),
+    });
+    cache?.set(memoKey, session);
+  }
   return { env, session };
 }
 

@@ -42,6 +42,7 @@ import {
   estimateTokens,
   getSkill,
   listSkills,
+  searchSkills,
   AccessDeniedError,
   BudgetExceededError,
   type GateContext,
@@ -88,6 +89,8 @@ export interface PiHarborOptions {
   procEnv?: Record<string, string | undefined>;
 }
 
+const piSessionCache = new Map<string, AgentSession>();
+
 /**
  * Resolve the gate context from `AGENT_ENV_ROOM` / `AGENT_ENV_SESSION`. No `env`
  * is passed to the session so no `session_created` audit row is written per call;
@@ -99,21 +102,123 @@ export function piContext(options: PiHarborOptions = {}): GateContext {
   // Blank or still-a-placeholder normalizes to absent — see normalizeRoomEnv
   // in ../src/config.ts for why `??` alone let those become the session's room.
   const room = normalizeRoomEnv(procEnv.AGENT_ENV_ROOM) ?? env.config.skillDefaultRoom;
-  const sessionId = procEnv.AGENT_ENV_SESSION;
-  const session = new AgentSession({
-    room,
-    capabilities: env.config.roomCapabilities(room),
-    ...(sessionId ? { sessionId } : {}),
-  });
+  const sessionId = procEnv.AGENT_ENV_SESSION ?? "";
+  const memoKey = `${room}:${sessionId}`;
+  let session = piSessionCache.get(memoKey);
+  if (!session) {
+    session = new AgentSession({
+      room,
+      capabilities: env.config.roomCapabilities(room),
+      ...(sessionId ? { sessionId } : {}),
+    });
+    piSessionCache.set(memoKey, session);
+  }
   return { env, session };
 }
 
-// ── Tool logic (session resolved from the ambient gate context) ───────────────
+// ── Wrapped gated primitives (hypervisor boundary) ───────────────────────────
 
 const readSkillGated = gate("read_skill", readSkillImpl);
 const listSkillsGated = gate("list_skills", listSkillsImpl);
+const searchSkillsGated = gate("search_skills", searchSkillsImpl);
+const activateSkillGated = gate("activate_skill", activateSkillImpl);
+const deactivateSkillGated = gate("deactivate_skill", deactivateSkillImpl);
 
-/** Load a skill's SKILL.md, gated + budgeted. Resolves the session from ALS. */
+/** Search skills in the session's room by query. */
+async function searchSkillsImpl(
+  query: string,
+  roomOverride?: string,
+  limit: number = 5,
+): Promise<PiToolResult> {
+  const { env, session } = currentGateContext();
+  if (roomOverride && roomOverride !== session.room && !session.has(Capability.ADMIN)) {
+    const reason = `room '${session.room}' may not search skills for room '${roomOverride}'`;
+    audit.deny(session.sessionId, "search_skills", roomOverride, reason, { room: session.room, env });
+    return {
+      content: [{ type: "text", text: `Access denied: ${reason}.` }],
+      details: { error: "access_denied", room: roomOverride },
+    };
+  }
+  const room = roomOverride ?? session.room;
+  const results = searchSkills(env, query, room, limit);
+  if (results.length === 0) {
+    return {
+      content: [{ type: "text", text: `No skills matched query "${query}" in room "${room}".` }],
+      details: { query, room, count: 0 },
+    };
+  }
+  const lines = [`Matching skills in room "${room}" (${results.length}):`, ""];
+  for (const s of results) lines.push(`- ${s.name}: ${s.description || "(see SKILL.md)"}`);
+  lines.push("", "To load a skill sequentially, call activate_skill with skill_name.");
+  return {
+    content: [{ type: "text", text: lines.join("\n") }],
+    details: { query, room, count: results.length, matches: results.map((r) => r.name) },
+  };
+}
+
+/** Activate a skill for sequential execution. */
+async function activateSkillImpl(skillName: string): Promise<PiToolResult> {
+  const { env, session } = currentGateContext();
+  const detail = getSkill(env, skillName);
+  if (!detail || !detail.skillMd) {
+    return {
+      content: [{ type: "text", text: `Skill '${skillName}' not found in the pool.` }],
+      details: { error: "not_found", skill: skillName },
+    };
+  }
+  const tokens = estimateTokens(detail.content);
+  const budgetOpts = { env, room: session.room, tokenLimit: env.config.roomBudget(session.room) };
+
+  const check = checkBudget(session.sessionId, `skill:${skillName}`, tokens, budgetOpts);
+  if (!check.ok) {
+    audit.deny(session.sessionId, "activate_skill", skillName, check.reason ?? "budget exceeded", {
+      room: session.room,
+      env,
+    });
+    return {
+      content: [{ type: "text", text: `Token budget exceeded: ${check.reason ?? "no budget"}.` }],
+      details: { error: "budget_exceeded", skill: skillName, remaining: check.remaining, limit: check.limit },
+    };
+  }
+
+  spendBudget(session.sessionId, `skill:${skillName}`, tokens, budgetOpts);
+  session.activeSkill = skillName;
+  session.activeSkillStartedAt = Date.now() / 1000;
+  audit.allow(session.sessionId, "activate_skill", skillName, `activated ${tokens} tokens`, {
+    room: session.room,
+    env,
+  });
+  const banner = `[HARBOR: SKILL '${skillName}' IS NOW ACTIVE]\nSequential policy: Focus exclusively on '${skillName}' until complete. Call deactivate_skill when finished.\n---\n\n`;
+  return {
+    content: [{ type: "text", text: banner + detail.content }],
+    details: { skill: skillName, tokens, room: session.room, active: true },
+  };
+}
+
+/** Deactivate active skill. */
+async function deactivateSkillImpl(): Promise<PiToolResult> {
+  const { env, session } = currentGateContext();
+  const previous = session.activeSkill;
+  session.activeSkill = null;
+  session.activeSkillStartedAt = null;
+  audit.allow(session.sessionId, "deactivate_skill", previous ?? "none", "deactivated skill", {
+    room: session.room,
+    env,
+  });
+  return {
+    content: [
+      {
+        type: "text",
+        text: previous
+          ? `Skill '${previous}' deactivated. Context is ready for a new skill.`
+          : `No active skill was set. Context is ready for a new skill.`,
+      },
+    ],
+    details: { previousSkill: previous, active: false },
+  };
+}
+
+/** Read a skill's content, gated by room + budget. */
 async function readSkillImpl(skillName: string): Promise<PiToolResult> {
   const { env, session } = currentGateContext();
   const detail = getSkill(env, skillName);
@@ -152,10 +257,6 @@ async function readSkillImpl(skillName: string): Promise<PiToolResult> {
 /** List the skills available to the session's room (or an authorized override). */
 async function listSkillsImpl(roomOverride?: string): Promise<PiToolResult> {
   const { env, session } = currentGateContext();
-  // B1 — gate the room override. A caller-supplied room that differs from the
-  // session's own is a cross-room enumeration; permit it only for an ADMIN
-  // session. Otherwise deny (audited): a restricted session must not be able to
-  // enumerate another room's skill list by passing room=<other>.
   if (roomOverride && roomOverride !== session.room && !session.has(Capability.ADMIN)) {
     const reason = `room '${session.room}' may not list skills for room '${roomOverride}'`;
     audit.deny(session.sessionId, "list_skills", roomOverride, reason, { room: session.room, env });
@@ -174,7 +275,7 @@ async function listSkillsImpl(roomOverride?: string): Promise<PiToolResult> {
   }
   const lines = [`Skills in room "${room}" (${skills.length}):`, ""];
   for (const s of skills) lines.push(`- ${s.name}: ${s.description || "(see SKILL.md)"}`);
-  lines.push("", "Load one with read_skill <skill_name>.");
+  lines.push("", "Load one with read_skill <skill_name> or activate_skill.");
   return {
     content: [{ type: "text", text: lines.join("\n") }],
     details: { room, count: skills.length },
@@ -182,6 +283,72 @@ async function listSkillsImpl(roomOverride?: string): Promise<PiToolResult> {
 }
 
 // ── Public tool functions (run inside the gate context) ───────────────────────
+
+/** Search skills in-process, bound to `context`. */
+export async function searchSkillsTool(
+  context: GateContext,
+  query: string,
+  room?: string,
+  limit?: number,
+): Promise<PiToolResult> {
+  const q = query.trim();
+  if (!q) {
+    return {
+      content: [{ type: "text", text: "Error: query is required." }],
+      details: { error: "empty_query" },
+    };
+  }
+  return runWithGateContext(context, async () => {
+    try {
+      return await searchSkillsGated(q, room, limit);
+    } catch (err) {
+      if (err instanceof AccessDeniedError) {
+        return {
+          content: [{ type: "text", text: `Access denied: ${err.message}` }],
+          details: { error: "access_denied" },
+        };
+      }
+      throw err;
+    }
+  });
+}
+
+/** Activate a skill in-process, bound to `context`. */
+export async function activateSkill(context: GateContext, skillName: string): Promise<PiToolResult> {
+  const name = skillName.trim().toLowerCase();
+  if (!name) {
+    return {
+      content: [{ type: "text", text: "Error: skill_name is required." }],
+      details: { error: "empty_skill_name" },
+    };
+  }
+  return runWithGateContext(context, async () => {
+    try {
+      return await activateSkillGated(name);
+    } catch (err) {
+      if (err instanceof AccessDeniedError) {
+        return {
+          content: [{ type: "text", text: `Access denied: ${err.message}` }],
+          details: { error: "access_denied", skill: name },
+        };
+      }
+      if (err instanceof BudgetExceededError) {
+        return {
+          content: [{ type: "text", text: `Budget exceeded: ${err.message}` }],
+          details: { error: "budget_exceeded", skill: name },
+        };
+      }
+      throw err;
+    }
+  });
+}
+
+/** Deactivate active skill in-process, bound to `context`. */
+export async function deactivateSkill(context: GateContext): Promise<PiToolResult> {
+  return runWithGateContext(context, async () => {
+    return await deactivateSkillGated();
+  });
+}
 
 /** Read a skill in-process, bound to `context`. Never throws — denials are results. */
 export async function readSkill(context: GateContext, skillName: string): Promise<PiToolResult> {
@@ -233,11 +400,73 @@ export async function listSkillsTool(context: GateContext, room?: string): Promi
 // ── Pi extension registration ─────────────────────────────────────────────────
 
 /**
- * Register Harbor's `read_skill` / `list_skills` tools on a Pi extension API.
- * Each tool resolves its session per call from `AGENT_ENV_ROOM` /
- * `AGENT_ENV_SESSION` (via {@link piContext}) and runs inside the gate context.
+ * Register Harbor's tools on a Pi extension API.
  */
 export function registerHarborSkills(pi: PiExtensionApi, options: PiHarborOptions = {}): void {
+  pi.registerTool({
+    name: "search_skills",
+    label: "Search Skills",
+    description:
+      "Search skills available to the current room by query. Returns lean summaries (<150 tokens) " +
+      "to avoid bloating context.",
+    promptSnippet: "Search skills by query (room-scoped, lean).",
+    promptGuidelines: [
+      "Use search_skills first to find the single skill you need for the task.",
+    ],
+    parameters: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Search query or task description." },
+        room: { type: "string", description: "Optional room override (defaults to session room)." },
+        limit: { type: "number", description: "Max results (default 5)." },
+      },
+      required: ["query"],
+    },
+    async execute(_toolCallId, params) {
+      const query = typeof params.query === "string" ? params.query : "";
+      const room = typeof params.room === "string" && params.room ? params.room : undefined;
+      const limit = typeof params.limit === "number" ? params.limit : undefined;
+      return searchSkillsTool(piContext(options), query, room, limit);
+    },
+  });
+
+  pi.registerTool({
+    name: "activate_skill",
+    label: "Activate Skill",
+    description:
+      "Activate a skill for sequential execution. Loads instructions and sets as single active skill.",
+    promptSnippet: "Activate a skill by name (sequential execution).",
+    promptGuidelines: [
+      "Use activate_skill to load instructions for the skill you are executing.",
+      "Work with ONE skill at a time. Call deactivate_skill when finished.",
+    ],
+    parameters: {
+      type: "object",
+      properties: {
+        skill_name: { type: "string", description: "Slug of the skill to activate." },
+      },
+      required: ["skill_name"],
+    },
+    async execute(_toolCallId, params) {
+      const skill = typeof params.skill_name === "string" ? params.skill_name : "";
+      return activateSkill(piContext(options), skill);
+    },
+  });
+
+  pi.registerTool({
+    name: "deactivate_skill",
+    label: "Deactivate Skill",
+    description: "Deactivate the currently active skill to clear context.",
+    promptSnippet: "Deactivate current skill.",
+    promptGuidelines: [
+      "Call deactivate_skill when done with a skill before activating another.",
+    ],
+    parameters: { type: "object", properties: {} },
+    async execute(_toolCallId, _params) {
+      return deactivateSkill(piContext(options));
+    },
+  });
+
   pi.registerTool({
     name: "read_skill",
     label: "Read Skill",
@@ -246,9 +475,8 @@ export function registerHarborSkills(pi: PiExtensionApi, options: PiHarborOption
       "token budget. Use this instead of expecting skill content to be in the prompt.",
     promptSnippet: "Read a skill's SKILL.md by name (on-demand, room-gated, budgeted).",
     promptGuidelines: [
-      "Use read_skill to load a skill's full instructions when the task matches its description.",
-      "Do NOT assume skill content is already in context — load what you need with read_skill.",
-      "Use list_skills to discover which skills are available in the current room.",
+      "Use read_skill or activate_skill to load instructions when the task matches its description.",
+      "Do NOT assume skill content is already in context.",
     ],
     parameters: {
       type: "object",
@@ -271,7 +499,7 @@ export function registerHarborSkills(pi: PiExtensionApi, options: PiHarborOption
       "descriptions. Call this to discover skills before loading one with read_skill.",
     promptSnippet: "List the room's available skills.",
     promptGuidelines: [
-      "Use list_skills first to discover what skills are available, then read_skill to load one.",
+      "Use search_skills or list_skills to discover skills, then activate_skill to load one.",
     ],
     parameters: {
       type: "object",

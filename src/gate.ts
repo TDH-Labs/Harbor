@@ -49,7 +49,7 @@ export { AccessDenied as AccessDeniedError } from "./isolation.ts";
 const nowSec = (): number => Date.now() / 1000;
 
 /** Tools whose first argument is a skill name and so get room-skill allowlist gating. */
-const SKILL_GATED_TOOLS = new Set<string>(["read_skill", "read_skill_digest"]);
+const SKILL_GATED_TOOLS = new Set<string>(["read_skill", "read_skill_digest", "activate_skill"]);
 
 /**
  * Tools whose first argument is an optional ROOM OVERRIDE (list-shaped tools:

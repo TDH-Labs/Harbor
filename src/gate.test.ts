@@ -31,7 +31,7 @@ function env(): Environment {
       paths: { state_dir: join(dir, ".agent-env") },
       skills: {
         rooms: {
-          legal: { skills: ["nda-review"], capabilities: ["read_skill", "list_skills"] },
+          legal: { skills: ["nda-review"], capabilities: ["read_skill", "list_skills", "activate_skill"] },
           marketing: { skills: ["case-study"], capabilities: ["list_skills"] },
         },
       },
@@ -270,5 +270,24 @@ describe("gate — concurrent session context isolation", () => {
     expect(results.some((r) => r.kind === "allowed" && r.allowed)).toBe(true);
     expect(results.some((r) => r.kind === "capDenied" && !r.allowed)).toBe(true);
     expect(results.some((r) => r.kind === "roomDenied" && !r.allowed)).toBe(true);
+  });
+
+  test("activate_skill is subject to room-skill allowlist gating", async () => {
+    const e = env();
+    const activateSkill = gate("activate_skill", async (name: string) => `activated:${name}`);
+    const legalSession = createSession({ room: "legal", env: e });
+
+    // In-room skill allowed
+    const res = await runWithGateContext({ env: e, session: legalSession }, () =>
+      activateSkill("nda-review"),
+    );
+    expect(res).toBe("activated:nda-review");
+
+    // Out-of-room skill denied
+    await expect(
+      runWithGateContext({ env: e, session: legalSession }, () =>
+        activateSkill("other-skill"),
+      ),
+    ).rejects.toThrow(AccessDeniedError);
   });
 });
