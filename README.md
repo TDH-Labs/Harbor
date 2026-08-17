@@ -30,8 +30,31 @@ Harbor gives you:
   a room so every agent working there is confined to exactly that room's skills and MCP tools,
   enforced and audited; a companion desktop panel manages it. See [docs/BUZZ.md](./docs/BUZZ.md).
 
-Harbor is built on [Bun](https://bun.sh): one runtime, built-in SQLite, a built-in test
-runner, and single-binary compilation.
+**Running Harbor-managed automations on Pi (the coding agent) — context scoping.**
+
+Recurring / scheduled agent workflows (Harbor's own scheduler, or an external scheduler
+such as n8n/launchd invoking a recipe runner) should load **only the skills each task needs**
+— not the whole agent pool — and keep the model prompt lean. That is the same dynamic
+on-demand model as interactive sessions (`activate_skill` one skill at a time), applied to
+headless runs.
+
+Known integration notes from `TDH-Labs/Harbor` on Pi (as of 2026-08):
+
+- Pi injects the *entire* auto-discovered skill pool (`~/.agents/skills`, often 400+) into its
+  system prompt at startup. Against a slow local model this balloons the prompt to ~46k tokens
+  and stalls/hangs generation. Scope it: `-ns/--no-skills` (drop the auto list) plus
+  `--skill <dir>` (load only the skills a task actually needs) — verified to drop a ~46k prompt
+  to ~2-3k tokens and restore fast, stable generation.
+- The Harbor pi-extension (`integrations/pi.ts` -> the pi `skill-accessor.ts` shim) currently
+  does **not** load reliably inside Pi: it crashes under Node (`Bun is not defined` because the
+  `harbor-tugboat` barrel re-exports Bun-only modules) and hangs under Bun during skill
+  registration. Until that extension-load path is hardened, headless automation runs should
+  not rely on the extension loading — use the scoped `-ns --skill` pattern instead, and treat
+  wiring Harbor's own `spawn()`/`scheduler` as the automation host as the follow-up so auto
+  workflows get Harbor room/budget/session ownership *and* on-demand skills.
+- Standardize the local model port (e.g. `8270`) for MTPLX/Ollama OpenAI-compatible servers to
+  avoid a stray process squatting on a common port like `8000` wedging the scheduler.
+  Reflected in the `com.mtplx.server` launchd plist, pi's `models.json`, and the recipe runner.
 
 ---
 

@@ -23,7 +23,7 @@
  * enforcement — not OS-level isolation. An agent with raw filesystem access
  * could bypass it. True unbypassable isolation is a later concern.
  */
-import { Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";

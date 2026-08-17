@@ -21,7 +21,7 @@
  *   2. Re-loading the same key double-counted: the prototype added the new
  *      token count without subtracting the old. v1 debits the old entry first.
  */
-import { Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 

@@ -17,7 +17,7 @@
  * The persisted state.json uses the camelCase {@link SessionState} shape (this
  * is a clean v1 format, not a port of the prototype's snake_case file).
  */
-import { Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
 import {
   appendFileSync,
@@ -30,6 +30,7 @@ import {
 import { join } from "node:path";
 
 import { Environment } from "./env.ts";
+import { getDatabaseConstructor } from "./sqlite.ts";
 import { AgentSession, auditLog } from "./isolation.ts";
 
 // ── Types ──────────────────────────────────────────────────────────────────--
@@ -337,9 +338,9 @@ CREATE TABLE IF NOT EXISTS session_events (
 CREATE INDEX IF NOT EXISTS idx_session_events ON session_events(session_id);
 `;
 
-function openSessionsDb(env: Environment): Database {
+function openSessionsDb(env: Environment): any {
   mkdirSync(env.stateDir, { recursive: true });
-  const db = new Database(env.sessionsDb);
+  const db = new (getDatabaseConstructor())(env.sessionsDb);
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA busy_timeout = 5000");
   db.exec(SESSIONS_SCHEMA);

@@ -28,12 +28,11 @@
  *     declared them but `_pop_next` ignored the policy and always ran priority
  *     order.
  */
-import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-
 import { Environment } from "./env.ts";
+import { getDatabaseConstructor } from "./sqlite.ts";
 
 // ── Types ──────────────────────────────────────────────────────────────────--
 
@@ -309,7 +308,7 @@ function localDate(epochSeconds: number): string {
 // ── Scheduler ────────────────────────────────────────────────────────────────
 
 export class Scheduler {
-  private readonly db: Database;
+  private readonly db: any;
   private readonly clock: () => number;
   private readonly roomDailyLimit: number;
   private _policy: SchedulingPolicy;
@@ -319,7 +318,7 @@ export class Scheduler {
   constructor(options: SchedulerOptions = {}) {
     const path = resolveDbPath(options);
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
-    this.db = new Database(path);
+    this.db = new (getDatabaseConstructor())(path);
     this.db.exec("PRAGMA journal_mode = WAL");
     this.db.exec("PRAGMA busy_timeout = 5000");
     this.db.exec(SCHEMA_SQL);
