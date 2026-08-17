@@ -37,7 +37,8 @@
 import { gate, runWithGateContext, currentGateContext, AccessDeniedError, type GateContext } from "harbor-tugboat/gate";
 import { checkBudget, spendBudget, BudgetExceededError } from "harbor-tugboat/budget";
 import { getSkill, listSkills, searchSkills } from "harbor-tugboat/skills";
-import { Environment, normalizeRoomEnv } from "harbor-tugboat/env";
+import { Environment } from "harbor-tugboat/env";
+import { normalizeRoomEnv } from "harbor-tugboat/config";
 import { Capability, AgentSession } from "harbor-tugboat/isolation";
 import { estimateTokens } from "harbor-tugboat/compaction";
 import { audit } from "harbor-tugboat/audit";
