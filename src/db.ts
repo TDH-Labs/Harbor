@@ -21,7 +21,45 @@
  * private store (a shared cache key would alias unrelated engines), so a caller
  * that passes ":memory:" always gets a fresh, owned connection that it must close.
  */
-import { Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
+
+let DatabaseConstructor: any;
+
+if (typeof Bun !== "undefined") {
+  DatabaseConstructor = (await import("bun:sqlite")).Database;
+} else {
+  const { DatabaseSync } = await import("node:sqlite");
+
+  DatabaseConstructor = class NodeSqliteDB extends DatabaseSync {
+    constructor(path: string) {
+      super(path);
+    }
+
+    query(sql: string) {
+      return this.prepare(sql);
+    }
+
+    transaction(fn: (...args: any[]) => any) {
+      const runTx = (type: string, args: any[]) => {
+        this.exec(`BEGIN ${type} TRANSACTION`);
+        try {
+          const result = fn(...args);
+          this.exec("COMMIT");
+          return result;
+        } catch (err) {
+          this.exec("ROLLBACK");
+          throw err;
+        }
+      };
+
+      const wrapped = (...args: any[]) => runTx("DEFERRED", args);
+      wrapped.immediate = (...args: any[]) => runTx("IMMEDIATE", args);
+      wrapped.exclusive = (...args: any[]) => runTx("EXCLUSIVE", args);
+      wrapped.deferred = (...args: any[]) => runTx("DEFERRED", args);
+      return wrapped;
+    }
+  };
+}
 
 /** Cached connections, keyed by absolute database path. */
 const cache = new Map<string, Database>();
@@ -50,13 +88,13 @@ export interface OpenedDb {
  */
 export function openDb(path: string, init: (db: Database) => void): OpenedDb {
   if (!isShareable(path)) {
-    const db = new Database(path);
+    const db = new DatabaseConstructor(path) as Database;
     init(db);
     return { db, shared: false };
   }
   let db = cache.get(path);
   if (db === undefined) {
-    db = new Database(path);
+    db = new DatabaseConstructor(path) as Database;
     init(db);
     cache.set(path, db);
   }
