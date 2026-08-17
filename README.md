@@ -402,3 +402,13 @@ Recipes may declare in their YAML frontmatter:
   hangs the tool-loop today). The runner reads these as the source of truth and enforces both
   deterministically — no LLM participates in the routing decision.
 Missing fields default to `sequential`/`none` (the safe single-agent, local-capable default).
+
+**Pi extension loads cleanly (Node) — cross-harness skill gating.**
+`integrations/pi.ts` now imports from NARROW submodules (`harbor-tugboat/gate`, `/budget`,
+`/skills`, `/env`, `/isolation`, `/compaction`, `/audit`) instead of the barrel. The barrel
+re-exported `dashboard.ts` (Hono + `Bun.serve`), whose `hono/dist/adapter/bun/ssg.js` references
+the global `Bun` at module-eval and crashed under Node pi ("Bun is not defined"). The narrow
+modules are Bun-free, so the pi extension (and its room-gated `read_skill`/`activate_skill`
+tools) now loads under Node — meaning Pi does NOT circumvent Harbor's dynamic skill/tool gating
+for tool-equivalent loads. (Runner still uses `-ne` for leans context; the extension path is
+available for interactive/`-no-ne` sessions.) Verified: pi loads the extension cleanly (no crash).

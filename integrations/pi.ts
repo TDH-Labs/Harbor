@@ -29,25 +29,18 @@
  * machine-specific to flag. The emitted tool `parameters` are plain JSON Schema,
  * which Pi/TypeBox accept at runtime.
  */
-import {
-  Capability,
-  Environment,
-  AgentSession,
-  audit,
-  checkBudget,
-  spendBudget,
-  gate,
-  runWithGateContext,
-  currentGateContext,
-  estimateTokens,
-  getSkill,
-  listSkills,
-  searchSkills,
-  AccessDeniedError,
-  BudgetExceededError,
-  type GateContext,
-  normalizeRoomEnv,
-} from "harbor-tugboat";
+// IMPORTANT: import from NARROW submodules, NOT the "harbor-tugboat" barrel.
+// The barrel (src/index.ts) re-exports dashboard.ts (Hono + Bun.serve) which pulls in
+// hono/dist/adapter/bun/ssg.js — a module that references the global `Bun` at evaluation
+// time and CRASHES under Node pi ("Bun is not defined"). These narrow modules do not
+// transitively import dashboard/cli/spawn/mcp/bench, so the pi extension loads cleanly.
+import { gate, runWithGateContext, currentGateContext, AccessDeniedError, type GateContext } from "harbor-tugboat/gate";
+import { checkBudget, spendBudget, BudgetExceededError } from "harbor-tugboat/budget";
+import { getSkill, listSkills, searchSkills } from "harbor-tugboat/skills";
+import { Environment, normalizeRoomEnv } from "harbor-tugboat/env";
+import { Capability, AgentSession } from "harbor-tugboat/isolation";
+import { estimateTokens } from "harbor-tugboat/compaction";
+import { audit } from "harbor-tugboat/audit";
 
 // ── Pi extension API (structural — no package dependency) ─────────────────────
 
