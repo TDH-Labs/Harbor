@@ -391,3 +391,14 @@ in. See `harbor check` and `harbor isolation rooms` to inspect the resolved conf
 ## License
 
 [MIT](./LICENSE)
+
+**Deterministic topology & tooling routing (single-agent enforcement).**
+Recipes may declare in their YAML frontmatter:
+- `topology: sequential | parallel` — `sequential` (the default) forces the automation to run as
+  **ONE agent with no parallel fan-out** (the runner injects a no-fanout directive); `parallel` is
+  allowed only when the recipe genuinely needs concurrent sub-agents.
+- `tooling: none | loop` — `none` means the local model can serve it (no tool-loop); `loop` means it
+  needs a harness tool-loop and must route to a cloud model (the local model's native tool format
+  hangs the tool-loop today). The runner reads these as the source of truth and enforces both
+  deterministically — no LLM participates in the routing decision.
+Missing fields default to `sequential`/`none` (the safe single-agent, local-capable default).
