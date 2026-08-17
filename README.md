@@ -412,3 +412,10 @@ modules are Bun-free, so the pi extension (and its room-gated `read_skill`/`acti
 tools) now loads under Node — meaning Pi does NOT circumvent Harbor's dynamic skill/tool gating
 for tool-equivalent loads. (Runner still uses `-ne` for leans context; the extension path is
 available for interactive/`-no-ne` sessions.) Verified: pi loads the extension cleanly (no crash).
+
+**Cloud routing (2026-08-17):** cloud-routed recipes (tool-loop OR >32k context) now use
+`opencode-go/mimo-v2.5` — a native-multimodal model (text/image/audio/video, 1.05M ctx) that matches
+DS Flash/Pro on all side-by-side text-judgment tests we ran AND covers the ~21 recipes that reference
+images (which text-only DeepSeek models cannot). Video judged unnecessary to test. Local stays on
+Qwen3.8 27B via the direct-API judgment helper for thin/multi-skill judgment; the local model cannot
+run accumulating tool-loops past its 32k window (neither Pi nor Goose can — verified).
