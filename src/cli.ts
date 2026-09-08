@@ -33,7 +33,7 @@ import { SessionTracker, activeSession, listSessions } from "./session.ts";
 import { runGenerate, fullSync, writeIfChanged } from "./sync.ts";
 import { runBench, formatSummary, latestReport } from "./bench.ts";
 import { startDashboard, DEFAULT_PORT } from "./dashboard.ts";
-import { runForeground, startDaemon, stopDaemon, watcherStatus } from "./watch.ts";
+import { runForeground, startDaemon, stopDaemon, watcherStatus, PidFile } from "./watch.ts";
 import { spawn } from "./spawn.ts";
 import { checkBudget, spendBudget, BudgetExceededError } from "./budget.ts";
 import { gate, runWithGateContext, AccessDeniedError } from "./gate.ts";
@@ -1505,16 +1505,74 @@ const mcpServerCmd = defineCommand({
   },
   async run({ args }) {
     const env = envFromArgs(args);
-    // Lazily import the integration so the CLI's startup path stays light and the
-    // `harbor` self-import in the server module is only resolved when serving.
-    const { createMcpServer, runStdioServer } = await import("../integrations/mcp-server.ts");
     const procEnv: Record<string, string | undefined> = {
       ...process.env,
       ...(args.room ? { AGENT_ENV_ROOM: args.room } : {}),
       ...(args.session ? { AGENT_ENV_SESSION: args.session } : {}),
     };
+
+    // ── Per-room singleton ──────────────────────────────────────────────────
+    // A stdio MCP server can't be handed off to a new parent (the pipe is
+    // owned by whoever spawned it), so we can't literally "reuse" a running
+    // instance across a reconnect. What we CAN do: a harness that reconnects
+    // without killing its old child (the observed Goose/oh-my-pi leak) leaves
+    // that child running forever. Reap any stale predecessor for this room
+    // before claiming the slot, so duplicates cap at 1-in-flight instead of
+    // accumulating indefinitely.
+    const roomKey = args.room ?? procEnv.AGENT_ENV_ROOM ?? "default";
+    const pidfile = new PidFile(join(env.stateDir, "mcp-server", `${roomKey}.pid`));
+    const stalePid = pidfile.read();
+    if (stalePid !== null && stalePid !== process.pid && pidfile.isRunning()) {
+      try {
+        process.kill(stalePid, "SIGTERM");
+      } catch {
+        // already gone
+      }
+    }
+    pidfile.write(process.pid);
+    let cleaned = false;
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      if (pidfile.read() === process.pid) pidfile.remove();
+    };
+    process.on("exit", cleanup);
+    process.on("SIGINT", () => {
+      cleanup();
+      process.exit(0);
+    });
+    process.on("SIGTERM", () => {
+      cleanup();
+      process.exit(0);
+    });
+
+    // ── Idle self-timeout ───────────────────────────────────────────────────
+    // Covers the case where the harness abandons this connection without ever
+    // sending a signal at all (it just stops writing to stdin). Exit on our
+    // own rather than waiting to be reaped by the *next* invocation's
+    // singleton check. Override with HARBOR_MCP_IDLE_TIMEOUT_MS; 0 disables.
+    const idleTimeoutMs = Number(process.env.HARBOR_MCP_IDLE_TIMEOUT_MS ?? 15 * 60_000);
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    const resetIdleTimer = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        cleanup();
+        process.exit(0);
+      }, idleTimeoutMs).unref();
+    };
+    if (idleTimeoutMs > 0) resetIdleTimer();
+
+    // Lazily import the integration so the CLI's startup path stays light and the
+    // `harbor` self-import in the server module is only resolved when serving.
+    // `write` is injectable on runStdioServer specifically so we can piggyback
+    // the idle-reset here instead of attaching a second consumer to stdin
+    // (stdin is already locked by runStdioServer's own async-iterator read).
+    const { createMcpServer, runStdioServer } = await import("../integrations/mcp-server.ts");
     const server = createMcpServer({ env, procEnv });
-    await runStdioServer(server);
+    await runStdioServer(server, undefined, (line) => {
+      if (idleTimeoutMs > 0) resetIdleTimer();
+      process.stdout.write(line);
+    });
   },
 });
 
