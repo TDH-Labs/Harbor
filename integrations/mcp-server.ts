@@ -55,6 +55,7 @@ import {
   type GateContext,
   createSession,
   normalizeRoomEnv,
+  AgentSession,
 } from "harbor-tugboat";
 import pkg from "../package.json" with { type: "json" };
 
