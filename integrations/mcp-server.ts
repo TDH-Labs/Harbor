@@ -48,6 +48,7 @@ import {
   spendBudget,
   estimateTokens,
   getSkill,
+  getReflexionLessons,
   listSkills,
   searchSkills,
   AccessDeniedError,
@@ -448,13 +449,33 @@ async function activateSkillImpl(skillName: string): Promise<ToolResult> {
     env,
   });
 
-  const banner = [
+  const bannerParts = [
     `[HARBOR: SKILL '${skillName}' IS NOW ACTIVE]`,
     `Sequential policy: Focus exclusively on '${skillName}' until the task is complete.`,
+  ];
+
+  if (detail.recommendedTools && detail.recommendedTools.length > 0) {
+    bannerParts.push(`Recommended tools for this skill: ${detail.recommendedTools.join(", ")}`);
+  }
+
+  try {
+    const priorLessons = getReflexionLessons(env, session.room, skillName);
+    if (priorLessons.length > 0) {
+      bannerParts.push(`Prior Reflexion Lessons:`);
+      for (const lesson of priorLessons) {
+        bannerParts.push(`- [${lesson.failureCategory}] ${lesson.sanitizedRemedy}`);
+      }
+    }
+  } catch {
+    // Non-blocking: failure to read lessons never blocks skill activation
+  }
+
+  bannerParts.push(
     `When finished, call deactivate_skill to clear context before activating another skill.`,
     "---",
     "",
-  ].join("\n");
+  );
+  const banner = bannerParts.join("\n");
   return text(banner + detail.content);
 }
 

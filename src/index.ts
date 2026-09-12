@@ -183,11 +183,16 @@ export {
   getAllSkillNames,
   getSkill,
   getSkillDescription,
+  getSkillRecommendedTools,
   listSkills,
   renderRoomIndex,
   searchSkills,
 } from "./skills.ts";
 export type { SkillRecord, SkillDetail, RoomIndexResult, SkillSearchResult } from "./skills.ts";
+
+// ── Reflexion episodic memory ───────────────────────────────────────────────
+export { logReflexionEvent, getReflexionLessons, sanitizeRemedy } from "./reflexion.ts";
+export type { ReflexionEntry, ReflexionRecord, FailureCategory } from "./reflexion.ts";
 
 export {
   checkCommand,

@@ -1,6 +1,6 @@
 {
   "name": "harbor-tugboat",
-  "version": "0.1.1",
+  "version": "1.1.0",
   "description": "Agent control plane — scheduler, compaction, isolation, session tracking.",
   "type": "module",
   "license": "MIT",
@@ -47,6 +47,7 @@
     "./audit": "./src/audit.ts",
     "./evict": "./src/evict.ts",
     "./skills": "./src/skills.ts",
+    "./reflexion": "./src/reflexion.ts",
     "./mcp": "./src/mcp.ts",
     "./skill-create": "./src/skill-create.ts",
     "./skill-install": "./src/skill-install.ts",

@@ -59,6 +59,8 @@ export interface SkillRecord {
   rooms: string[];
   /** Absolute path to the skill directory. */
   dir: string;
+  /** Optional recommended tools from frontmatter. */
+  recommendedTools?: string[];
 }
 
 export interface SkillDetail extends SkillRecord {
@@ -142,6 +144,81 @@ export function getSkillDescription(path: string): string {
     }
   }
   return "";
+}
+
+/**
+ * Extract `recommended_tools:`, `allowed_tools:`, or `tools:` from a SKILL.md's YAML frontmatter.
+ * Handles YAML lists (- item), flow arrays [a, b], or comma-separated strings.
+ * Returns an array of trimmed tool name strings. Returns [] if none or on parse error.
+ */
+export function getSkillRecommendedTools(path: string): string[] {
+  let mdPath = path;
+  try {
+    if (statSync(path).isDirectory()) mdPath = join(path, "SKILL.md");
+  } catch {
+    return [];
+  }
+  if (!existsSync(mdPath)) return [];
+
+  let text: string;
+  try {
+    text = readFileSync(mdPath, "utf8");
+  } catch {
+    return [];
+  }
+
+  const lines = text.split("\n");
+  let inFrontmatter = false;
+  for (let i = 0; i < lines.length; i++) {
+    const stripped = lines[i]!.trim();
+    if (stripped === "---") {
+      if (inFrontmatter) break; // end of frontmatter
+      inFrontmatter = true;
+      continue;
+    }
+    if (
+      inFrontmatter &&
+      (stripped.startsWith("recommended_tools:") ||
+        stripped.startsWith("allowed_tools:") ||
+        stripped.startsWith("allowed-tools:") ||
+        stripped.startsWith("tools:"))
+    ) {
+      const colonIdx = stripped.indexOf(":");
+      let val = stripped.slice(colonIdx + 1).trim();
+      val = stripQuotes(val);
+
+      // Case 1: Flow array, e.g. [toolA, toolB]
+      if (val.startsWith("[") && val.endsWith("]")) {
+        return val
+          .slice(1, -1)
+          .split(",")
+          .map((t) => stripQuotes(t.trim()))
+          .filter(Boolean);
+      }
+
+      // Case 2: Inline comma-separated list, e.g. toolA, toolB
+      if (val.length > 0 && !val.startsWith("|") && !val.startsWith(">") && !val.startsWith("-")) {
+        return val
+          .split(",")
+          .map((t) => stripQuotes(t.trim()))
+          .filter(Boolean);
+      }
+
+      // Case 3: Block list (- item) on subsequent indented lines
+      const items: string[] = [];
+      for (let j = i + 1; j < lines.length; j++) {
+        const next = lines[j]!;
+        if (next.length > 0 && !/^\s/.test(next)) break; // unindented line terminates block
+        const itemLine = next.trim();
+        if (itemLine.startsWith("-")) {
+          const itemVal = stripQuotes(itemLine.slice(1).trim());
+          if (itemVal) items.push(itemVal);
+        }
+      }
+      return items;
+    }
+  }
+  return [];
 }
 
 function stripQuotes(s: string): string {
@@ -404,6 +481,7 @@ export function getSkill(env: Environment, name: string): SkillDetail | null {
     dir,
     skillMd: hasMd ? skillMd : null,
     content,
+    recommendedTools: getSkillRecommendedTools(dir),
   };
 }
 
