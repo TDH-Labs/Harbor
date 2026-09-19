@@ -739,3 +739,239 @@ function isRealDir(p: string): boolean {
     return false;
   }
 }
+
+// ── Dynamic Turn-Sieve ───────────────────────────────────────────────────────
+
+export interface TurnSieveResult {
+  selectedSkills: string[];
+  selectedTools: string[];
+  promptTokenSavingsPct: number;
+}
+
+export interface RouteSkillsOptions {
+  endpoint?: string;
+  timeoutMs?: number;
+}
+
+const STOP_WORDS = new Set([
+  "a", "about", "above", "after", "again", "all", "am", "an", "and", "any", "are",
+  "as", "at", "be", "because", "been", "before", "being", "below", "between", "both",
+  "but", "by", "can", "could", "did", "do", "does", "doing", "down", "during", "each",
+  "few", "for", "from", "further", "had", "has", "have", "having", "he", "her", "here",
+  "hers", "herself", "him", "himself", "his", "how", "i", "if", "in", "into", "is", "it",
+  "its", "itself", "just", "me", "more", "most", "my", "myself", "no", "nor", "not",
+  "now", "of", "off", "on", "once", "only", "or", "other", "our", "ours", "ourselves",
+  "out", "over", "own", "s", "same", "she", "should", "so", "some", "such", "than",
+  "that", "the", "their", "theirs", "them", "themselves", "then", "there", "these",
+  "they", "this", "those", "through", "to", "too", "under", "until", "up", "very",
+  "was", "we", "were", "what", "when", "where", "which", "while", "who", "whom", "why",
+  "will", "with", "would", "you", "your", "yours", "yourself", "yourselves",
+]);
+
+function calculateSavingsPct(availableCount: number, selectedCount: number): number {
+  if (availableCount === 0) return 0;
+  if (selectedCount >= availableCount) return 0;
+  return Math.max(0, Math.min(100, Math.round(((availableCount - selectedCount) / availableCount) * 100)));
+}
+
+/**
+ * Deterministically match available skills against the turn prompt using keyword heuristics.
+ */
+export function matchSkillsDeterministically(
+  turnPrompt: string,
+  room: string,
+  availableSkills: SkillRecord[],
+): TurnSieveResult {
+  if (availableSkills.length === 0) {
+    return { selectedSkills: [], selectedTools: [], promptTokenSavingsPct: 0 };
+  }
+
+  const promptLower = turnPrompt.toLowerCase().trim();
+  if (!promptLower) {
+    return {
+      selectedSkills: [],
+      selectedTools: [],
+      promptTokenSavingsPct: 100,
+    };
+  }
+
+  const rawTokens = promptLower.split(/[^a-zA-Z0-9_\-]+/).filter(Boolean);
+  const meaningfulTokens = rawTokens.filter((t) => t.length >= 2 && !STOP_WORDS.has(t));
+
+  const scored: Array<{ skill: SkillRecord; score: number }> = [];
+
+  for (const skill of availableSkills) {
+    const nameLower = skill.name.toLowerCase();
+    const descLower = (skill.description || "").toLowerCase();
+    const nameTokens = nameLower.split(/[-_]+/).filter(Boolean);
+    let score = 0;
+
+    // Exact skill name in prompt
+    if (promptLower.includes(nameLower)) {
+      score += 100;
+    }
+
+    // Name tokens phrase match (e.g. "audit xls" for "audit-xls")
+    const namePhrase = nameTokens.join(" ");
+    if (namePhrase && promptLower.includes(namePhrase)) {
+      score += 80;
+    }
+
+    // Individual name tokens match
+    let matchedNameTokens = 0;
+    for (const token of nameTokens) {
+      if (rawTokens.includes(token)) {
+        score += 30;
+        matchedNameTokens++;
+      } else if (token.length >= 3 && promptLower.includes(token)) {
+        score += 15;
+        matchedNameTokens++;
+      }
+    }
+    if (nameTokens.length > 1 && matchedNameTokens === nameTokens.length) {
+      score += 40;
+    }
+
+    // Description matching with meaningful prompt tokens
+    for (const token of meaningfulTokens) {
+      if (descLower.includes(token)) {
+        score += 10;
+      }
+    }
+
+    // Recommended tools match
+    if (skill.recommendedTools) {
+      for (const tool of skill.recommendedTools) {
+        if (promptLower.includes(tool.toLowerCase())) {
+          score += 15;
+        }
+      }
+    }
+
+    if (score > 0) {
+      scored.push({ skill, score });
+    }
+  }
+
+  scored.sort((a, b) => b.score - a.score || a.skill.name.localeCompare(b.skill.name));
+
+  const selectedSkills = scored.map((s) => s.skill.name);
+
+  const toolsSet = new Set<string>();
+  for (const item of scored) {
+    if (item.skill.recommendedTools) {
+      for (const tool of item.skill.recommendedTools) {
+        toolsSet.add(tool);
+      }
+    }
+  }
+  const selectedTools = Array.from(toolsSet);
+
+  const promptTokenSavingsPct = calculateSavingsPct(
+    availableSkills.length,
+    selectedSkills.length,
+  );
+
+  return {
+    selectedSkills,
+    selectedTools,
+    promptTokenSavingsPct,
+  };
+}
+
+/**
+ * Route relevant skills and tools for an agent turn.
+ * Calls daemon at http://127.0.0.1:8000/v1/route-skills with sub-50ms timeout.
+ * Falls back gracefully to deterministic keyword matching if daemon is unreachable or times out.
+ */
+export async function routeSkillsForTurn(
+  turnPrompt: string,
+  room: string,
+  availableSkills: SkillRecord[],
+  options?: RouteSkillsOptions,
+): Promise<TurnSieveResult> {
+  if (availableSkills.length === 0) {
+    return { selectedSkills: [], selectedTools: [], promptTokenSavingsPct: 0 };
+  }
+
+  const endpoint =
+    options?.endpoint ??
+    process.env.HARBOR_ROUTE_SKILLS_ENDPOINT ??
+    "http://127.0.0.1:8000/v1/route-skills";
+  const timeoutMs = options?.timeoutMs ?? 45;
+
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt: turnPrompt,
+          room,
+          availableSkills: availableSkills.map((s) => ({
+            name: s.name,
+            description: s.description,
+            recommendedTools: s.recommendedTools,
+          })),
+        }),
+        signal: controller.signal,
+      });
+
+      if (res.ok) {
+        const data = (await res.json()) as any;
+        if (data && typeof data === "object") {
+          const selectedSkills: string[] = Array.isArray(data.selectedSkills)
+            ? data.selectedSkills
+            : Array.isArray(data.selected_skills)
+            ? data.selected_skills
+            : Array.isArray(data.skills)
+            ? data.skills
+            : [];
+
+          let selectedTools: string[] = Array.isArray(data.selectedTools)
+            ? data.selectedTools
+            : Array.isArray(data.selected_tools)
+            ? data.selected_tools
+            : Array.isArray(data.tools)
+            ? data.tools
+            : [];
+
+          if (selectedTools.length === 0) {
+            const skillMap = new Map(availableSkills.map((s) => [s.name, s]));
+            const toolsSet = new Set<string>();
+            for (const name of selectedSkills) {
+              const rec = skillMap.get(name);
+              if (rec?.recommendedTools) {
+                for (const t of rec.recommendedTools) toolsSet.add(t);
+              }
+            }
+            selectedTools = Array.from(toolsSet);
+          }
+
+          const promptTokenSavingsPct: number =
+            typeof data.promptTokenSavingsPct === "number"
+              ? data.promptTokenSavingsPct
+              : typeof data.prompt_token_savings_pct === "number"
+              ? data.prompt_token_savings_pct
+              : calculateSavingsPct(availableSkills.length, selectedSkills.length);
+
+          return {
+            selectedSkills,
+            selectedTools,
+            promptTokenSavingsPct,
+          };
+        }
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch {
+    // Daemon unreachable, timed out, or network failure -> fallback to deterministic matching
+  }
+
+  return matchSkillsDeterministically(turnPrompt, room, availableSkills);
+}
+

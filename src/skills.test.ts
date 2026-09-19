@@ -17,8 +17,11 @@ import {
   getSkill,
   getSkillDescription,
   listSkills,
+  matchSkillsDeterministically,
+  routeSkillsForTurn,
   searchSkills,
 } from "./skills.ts";
+import type { SkillRecord } from "./skills.ts";
 
 let dir: string;
 beforeEach(() => {
@@ -435,3 +438,157 @@ describe("searchSkills", () => {
     expect(results.length).toBe(2);
   });
 });
+
+describe("routeSkillsForTurn & deterministic turn-sieve", () => {
+  const mockSkills: SkillRecord[] = [
+    {
+      name: "audit-xls",
+      description: "Audit a spreadsheet for formula accuracy, errors, and model integrity",
+      room: "bookkeeping",
+      rooms: ["bookkeeping", "finance_real_estate"],
+      dir: "/tmp/skills/audit-xls",
+      recommendedTools: ["read_file", "run_command"],
+    },
+    {
+      name: "clean-data-xls",
+      description: "Clean up messy spreadsheet data, whitespace, formatting, dedupe rows",
+      room: "bookkeeping",
+      rooms: ["bookkeeping"],
+      dir: "/tmp/skills/clean-data-xls",
+      recommendedTools: ["read_file"],
+    },
+    {
+      name: "cookie-sync",
+      description: "Synchronize authentication cookies and session tokens for portal integration",
+      room: "devops",
+      rooms: ["devops"],
+      dir: "/tmp/skills/cookie-sync",
+      recommendedTools: ["curl", "run_command"],
+    },
+    {
+      name: "stripe-high-ticket-billing-engine",
+      description: "Automate high ticket B2B payment collection, Stripe deposits, invoices",
+      room: "finance_real_estate",
+      rooms: ["finance_real_estate"],
+      dir: "/tmp/skills/stripe-high-ticket-billing-engine",
+      recommendedTools: ["stripe_api"],
+    },
+  ];
+
+  test("empty availableSkills returns empty selections and 0% savings", async () => {
+    const res = await routeSkillsForTurn("audit spreadsheet", "bookkeeping", []);
+    expect(res.selectedSkills).toEqual([]);
+    expect(res.selectedTools).toEqual([]);
+    expect(res.promptTokenSavingsPct).toBe(0);
+  });
+
+  test("fallback: deterministic keyword matching selects relevant skill and tools", async () => {
+    // Daemon is down on an unused high port
+    const res = await routeSkillsForTurn(
+      "Please audit-xls my spreadsheet for balance errors",
+      "bookkeeping",
+      mockSkills,
+      { endpoint: "http://127.0.0.1:59999/v1/route-skills", timeoutMs: 30 },
+    );
+
+    expect(res.selectedSkills).toContain("audit-xls");
+    expect(res.selectedTools).toContain("read_file");
+    expect(res.selectedTools).toContain("run_command");
+    expect(res.promptTokenSavingsPct).toBeGreaterThanOrEqual(50);
+  });
+
+  test("fallback: matches description keywords when name is not explicit", async () => {
+    const res = await routeSkillsForTurn(
+      "Fix messy duplicate rows and formatting in my accounts",
+      "bookkeeping",
+      mockSkills,
+      { endpoint: "http://127.0.0.1:59999/v1/route-skills", timeoutMs: 30 },
+    );
+
+    expect(res.selectedSkills).toContain("clean-data-xls");
+    expect(res.selectedTools).toContain("read_file");
+  });
+
+  test("fallback: returns 100% token savings when prompt matches no skills", async () => {
+    const res = await routeSkillsForTurn(
+      "What is the weather like in Seattle today?",
+      "bookkeeping",
+      mockSkills,
+      { endpoint: "http://127.0.0.1:59999/v1/route-skills", timeoutMs: 30 },
+    );
+
+    expect(res.selectedSkills).toEqual([]);
+    expect(res.selectedTools).toEqual([]);
+    expect(res.promptTokenSavingsPct).toBe(100);
+  });
+
+  test("fallback: sub-50ms timeout aborts slow daemon and uses deterministic matching", async () => {
+    // Start a server that deliberately delays for 100ms
+    const slowServer = Bun.serve({
+      port: 0,
+      async fetch() {
+        await new Promise((r) => setTimeout(r, 100));
+        return Response.json({
+          selectedSkills: ["cookie-sync"],
+          selectedTools: ["curl"],
+          promptTokenSavingsPct: 75,
+        });
+      },
+    });
+
+    try {
+      const res = await routeSkillsForTurn(
+        "Please audit-xls formula accuracy",
+        "bookkeeping",
+        mockSkills,
+        { endpoint: `http://127.0.0.1:${slowServer.port}/v1/route-skills`, timeoutMs: 20 },
+      );
+
+      // Should have timed out and matched audit-xls rather than the slow server's cookie-sync
+      expect(res.selectedSkills).toContain("audit-xls");
+    } finally {
+      slowServer.stop(true);
+    }
+  });
+
+  test("daemon success: returns daemon response when server responds in time", async () => {
+    const fastServer = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        const body = await req.json() as any;
+        expect(body.prompt).toBe("collect high ticket stripe invoice");
+        return Response.json({
+          selectedSkills: ["stripe-high-ticket-billing-engine"],
+          selectedTools: ["stripe_api"],
+          promptTokenSavingsPct: 75,
+        });
+      },
+    });
+
+    try {
+      const res = await routeSkillsForTurn(
+        "collect high ticket stripe invoice",
+        "finance_real_estate",
+        mockSkills,
+        { endpoint: `http://127.0.0.1:${fastServer.port}/v1/route-skills`, timeoutMs: 45 },
+      );
+
+      expect(res.selectedSkills).toEqual(["stripe-high-ticket-billing-engine"]);
+      expect(res.selectedTools).toEqual(["stripe_api"]);
+      expect(res.promptTokenSavingsPct).toBe(75);
+    } finally {
+      fastServer.stop(true);
+    }
+  });
+
+  test("deterministic matcher ranks multi-token matching higher", () => {
+    const res = matchSkillsDeterministically(
+      "clean data and dedupe rows in spreadsheet",
+      "bookkeeping",
+      mockSkills,
+    );
+    expect(res.selectedSkills[0]).toBe("clean-data-xls");
+    expect(res.selectedTools).toContain("read_file");
+  });
+});
+
