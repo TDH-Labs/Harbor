@@ -68,7 +68,7 @@ Coding agents typically inject all available skills (often 150–400+ markdown f
 
 ### 3. Room-Gated Capability Isolation
 Harbor organizes agent work into isolated **Rooms** (`~/rooms/<domain>/`):
-- **Domain Scoping:** Skills, database credentials, and MCP servers are mapped strictly to specific domains (e.g., `devops`, `legal`, `finance_real_estate`, `childcare_operations`).
+- **Domain Scoping:** Skills, database credentials, and MCP servers are mapped strictly to specific domains (e.g., `devops`, `legal`, `finance`, `data_engineering`).
 - **Access Trapping:** If an agent operating in the `finance` room attempts to invoke tools or read files mapped to the `legal` room, Harbor traps the call, logs an audit violation, and blocks execution.
 - **Sub-Millisecond Token Budgeting:** Token limits are checked and debited via in-process memory hooks ($<1\text{ms}$), stopping runaway recursive loops before they incur excessive API costs.
 

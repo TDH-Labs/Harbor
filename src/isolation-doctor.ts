@@ -18,6 +18,7 @@
  *      restricted uid — the reason "isolate everything" is the wrong plan here.
  *   4. A concrete, PRINTED-not-applied assessment for each room.
  */
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
@@ -30,6 +31,15 @@ export interface HostBoundSkill {
   room: string;
   /** The signals found in its SKILL.md (e.g. "osascript", "imessage"). */
   signals: string[];
+}
+
+/** Working tree hygiene status for one room directory. */
+export interface RoomHygieneFinding {
+  room: string;
+  path: string;
+  isGit: boolean;
+  dirtyCount: number;
+  sampleDirtyFiles: string[];
 }
 
 export interface IsolationReport {
@@ -46,6 +56,8 @@ export interface IsolationReport {
   hostBound: HostBoundSkill[];
   /** Configured rooms. */
   rooms: string[];
+  /** Working tree hygiene across room directories. */
+  roomHygiene?: RoomHygieneFinding[];
   /** Human-facing findings, most-important first. */
   findings: Finding[];
 }
@@ -185,6 +197,33 @@ export function analyzeIsolation(env: Environment): IsolationReport {
     });
   }
 
+  // 4. Room working tree hygiene and parallel session worktree isolation.
+  const roomHygiene = checkRoomHygiene(env);
+  const dirtyRooms = roomHygiene.filter((h) => h.dirtyCount > 0);
+  if (dirtyRooms.length > 0) {
+    const summary = dirtyRooms
+      .map((d) => `${d.room} (${d.dirtyCount} uncommitted change(s))`)
+      .join(", ");
+    findings.push({
+      severity: "warn",
+      title: `${dirtyRooms.length} room(s) contain uncommitted changes — worktree isolation recommended`,
+      detail:
+        `Uncommitted git changes found in: ${summary}. ` +
+        "When parallel agent sessions run concurrently in a shared room without worktree isolation, " +
+        "uncommitted changes cause state cross-contamination, test suite race conditions, and verification gate failures. " +
+        "Use git worktrees ('git worktree add') to give each concurrent agent session an isolated working tree.",
+    });
+  } else if (roomHygiene.length > 0) {
+    findings.push({
+      severity: "info",
+      title: "Room working trees are clean",
+      detail:
+        "No uncommitted changes detected in room repositories. " +
+        "For concurrent agent workflows, ensure each parallel agent session operates in a dedicated git worktree " +
+        "to prevent cross-session file contamination.",
+    });
+  }
+
   return {
     poolPath,
     poolExists,
@@ -193,8 +232,71 @@ export function analyzeIsolation(env: Environment): IsolationReport {
     totalSkills,
     hostBound,
     rooms,
+    roomHygiene,
     findings,
   };
+}
+
+/**
+ * Inspects room working tree directories for uncommitted git changes.
+ * Shared dirty working trees cause attribution confusion and test races
+ * when multiple agent sessions run concurrently.
+ */
+export function checkRoomHygiene(env: Environment): RoomHygieneFinding[] {
+  const findings: RoomHygieneFinding[] = [];
+  const roomsDir = env.rooms;
+  if (!existsSync(roomsDir)) return findings;
+
+  for (const name of safeReaddir(roomsDir)) {
+    const roomPath = join(roomsDir, name);
+    try {
+      if (!statSync(roomPath).isDirectory()) continue;
+    } catch {
+      continue;
+    }
+
+    const gitDir = join(roomPath, ".git");
+    const isGit = existsSync(gitDir);
+    if (!isGit) {
+      findings.push({
+        room: name,
+        path: roomPath,
+        isGit: false,
+        dirtyCount: 0,
+        sampleDirtyFiles: [],
+      });
+      continue;
+    }
+
+    try {
+      const proc = spawnSync("git", ["status", "--porcelain"], {
+        cwd: roomPath,
+        encoding: "utf8",
+        timeout: 2000,
+      });
+      if (proc.status === 0 && proc.stdout) {
+        const lines = proc.stdout.trim().split("\n").filter((l) => l.trim().length > 0);
+        findings.push({
+          room: name,
+          path: roomPath,
+          isGit: true,
+          dirtyCount: lines.length,
+          sampleDirtyFiles: lines.slice(0, 3).map((l) => l.trim()),
+        });
+      } else {
+        findings.push({
+          room: name,
+          path: roomPath,
+          isGit: true,
+          dirtyCount: 0,
+          sampleDirtyFiles: [],
+        });
+      }
+    } catch {
+      // Non-fatal if git fails or is unavailable
+    }
+  }
+  return findings;
 }
 
 /** readdir that yields [] instead of throwing on a missing/denied dir. */

@@ -11,7 +11,7 @@ import { join } from "node:path";
 
 import { Config, DEFAULTS, deepMerge } from "./config.ts";
 import { Environment } from "./env.ts";
-import { analyzeIsolation, formatReport } from "./isolation-doctor.ts";
+import { analyzeIsolation, checkRoomHygiene, formatReport } from "./isolation-doctor.ts";
 
 let dir: string;
 beforeEach(() => {
@@ -100,5 +100,53 @@ describe("analyzeIsolation", () => {
     const text = formatReport(analyzeIsolation(env({ ops: { skills: ["aa"] } })));
     expect(text).toContain("REPORT ONLY");
     expect(text.toLowerCase()).toContain("nothing was changed");
+  });
+
+  test("checkRoomHygiene flags dirty git repository in room directory and warns on worktree isolation", () => {
+    const roomPath = join(dir, "rooms", "ops");
+    mkdirSync(roomPath, { recursive: true });
+    // Initialize git repository
+    Bun.spawnSync(["git", "init"], { cwd: roomPath });
+    Bun.spawnSync(["git", "config", "user.email", "test@test.com"], { cwd: roomPath });
+    Bun.spawnSync(["git", "config", "user.name", "Tester"], { cwd: roomPath });
+    writeFileSync(join(roomPath, "tracked.txt"), "hello");
+    Bun.spawnSync(["git", "add", "."], { cwd: roomPath });
+    Bun.spawnSync(["git", "commit", "-m", "init"], { cwd: roomPath });
+
+    // Add uncommitted file
+    writeFileSync(join(roomPath, "dirty.txt"), "uncommitted");
+
+    const e = env({ ops: { skills: [] } });
+    const hygiene = checkRoomHygiene(e);
+    expect(hygiene.length).toBe(1);
+    expect(hygiene[0]?.room).toBe("ops");
+    expect(hygiene[0]?.dirtyCount).toBe(1);
+
+    const r = analyzeIsolation(e);
+    const finding = r.findings.find((f) => f.title.includes("uncommitted changes"));
+    expect(finding).toBeDefined();
+    expect(finding!.severity).toBe("warn");
+    expect(finding!.detail).toContain("git worktrees");
+  });
+
+  test("checkRoomHygiene reports clean repository as info finding", () => {
+    const roomPath = join(dir, "rooms", "ops");
+    mkdirSync(roomPath, { recursive: true });
+    Bun.spawnSync(["git", "init"], { cwd: roomPath });
+    Bun.spawnSync(["git", "config", "user.email", "test@test.com"], { cwd: roomPath });
+    Bun.spawnSync(["git", "config", "user.name", "Tester"], { cwd: roomPath });
+    writeFileSync(join(roomPath, "tracked.txt"), "hello");
+    Bun.spawnSync(["git", "add", "."], { cwd: roomPath });
+    Bun.spawnSync(["git", "commit", "-m", "init"], { cwd: roomPath });
+
+    const e = env({ ops: { skills: [] } });
+    const hygiene = checkRoomHygiene(e);
+    expect(hygiene.length).toBe(1);
+    expect(hygiene[0]?.dirtyCount).toBe(0);
+
+    const r = analyzeIsolation(e);
+    const finding = r.findings.find((f) => f.title.includes("working trees are clean"));
+    expect(finding).toBeDefined();
+    expect(finding!.severity).toBe("info");
   });
 });
