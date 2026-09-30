@@ -263,3 +263,84 @@ the fix (checked by removing the fix):
   shapes, not tested against those clients.
 - **System One itself.** Only its client contract was built and tested, against
   local fake daemons. Nothing was run against the real daemon.
+
+## 10. Mixed agents, people, and shared files
+
+Context: a team where some members bring their own agent and others use a
+house agent on the operator's VPS, sharing files through a synced drive. The
+requirement: permissioned access honored either way and never exceeded, and
+people with their own agent must not be able to ingest sensitive information.
+
+### The constraint that shapes everything
+
+A person's own agent runs on their machine as them, so anything that person can
+read, their agent can read. Access can therefore only be controlled **at
+delivery** (who receives content, how much, how fast, with what trail), never at
+**use**. "Not ingested" means "not delivered": restricted content must not be
+in a folder they can open, nor served to their token. Stated in `CLOUD.md`.
+
+The second, subtler risk is the house agent: broad access acting for a
+low-clearance requester (a confused deputy), and lower-privilege people writing
+into folders it reads (prompt injection; `proposals/` → skill install is a
+privilege-escalation path).
+
+### Decisions
+
+| # | Decision | Why |
+|---|---|---|
+| D10 | **One collaboration folder** in the drive (`context/`, `inbox/`, `proposals/`). Skills and room rules are **not** synced. People reach skills through Harbor (own agent over a token, or by asking the house agent). | Skills are gated, quota'd and audited by Harbor; a synced folder is none of those, and every member's agent reads everything in it. Removes the skill export/apply/quarantine/conflict machinery from the drive design. |
+| D11 | **Identity is a person, not just a token.** Tokens name a principal; audit rows carry it; suspend/revoke per person; quotas counted per person. | Attribution and offboarding must follow the human across tokens and sessions. |
+| D12 | **Daily delivery quotas are per person, per UTC day, enforced at the tool, atomically.** | Per-session budgets are bypassed by opening sessions; the allowance has to be keyed by who, not by session. |
+| D13 | **`harbor guard`** is the pre-sync check for the shared folder. `export-shared` is **deferred**. | Skills are not synced (D10), so there is nothing to export; the folder still needs a secret scan. |
+
+### Built
+
+- `principal` on tokens; `agentId` on every server session and **every audit
+  call site** (the MCP server, Pi integration and Turn-Sieve all omitted it, so
+  tool-level rows had an empty `agent_id`); `harbor principal
+  list|suspend|resume|revoke`.
+- Per-person daily quotas (`--daily-token-quota`, `--daily-read-quota`) enforced
+  in `read_skill`/`activate_skill` via a `DeliveryQuota` on the gate context;
+  charged in one `BEGIN IMMEDIATE` transaction. A refusal carries no content and
+  is audited.
+- `harbor guard <dir>` with filename and content rules, entropy check, symlinks
+  flagged not followed, oversized/binary/unreadable reported as skipped,
+  `--files-from` confined to the root, and output that never contains the secret.
+- `control.db` from the previous release is migrated in place.
+
+### How it was verified
+
+- Attribution, per-person accounting and tool enforcement were each broken on
+  purpose (drop `agentId`; count per token; count per session; remove the check
+  in `read_skill`) and the intended tests failed each time.
+- The quota transaction: six racing **processes** × 40 attempts against a
+  100-unit allowance admit exactly 100; with a deferred transaction instead of
+  `IMMEDIATE` they crash. That test is why the charge is `IMMEDIATE`.
+- Guard: every fake credential in the tests is assembled at runtime (a
+  repository's push protection would refuse realistic literals). My first test
+  generator was an LCG that emitted near-constant strings (entropy 0.18), so the
+  "random" fixtures were far weaker than they looked; it was replaced and a test
+  now asserts the fixtures are actually high-entropy.
+- Self-scan: running the guard over this repository first produced six findings.
+  None was a real credential (fake test fixtures, a lockfile integrity hash, and
+  `secret = made.token.slice(...)` — code). Detection was tightened where real
+  credentials differ (they do not spell "EXAMPLE"; they are not `camelCase`
+  identifiers) and both sides are pinned by tests. It now flags only the two
+  files literally named `secrets.*`, which is the blunt filename rule working as
+  designed.
+- Drive: `copyRequiresWriterPermission` / the download restriction applies to
+  readers and commenters, not editors, and is enforced on API download too. How
+  it interacts with the desktop client's offline sync was **not** verified.
+
+### Not built (needs a decision or is deliberately deferred)
+
+- **Sensitivity labels** — per-skill `public`/`internal`/`restricted` with a
+  ceiling per token. Open: should an unlabeled skill be denied to bring-your-own
+  tokens (safe, needs labeling) or allowed?
+- **On-behalf-of** for the house agent: open its session with the requester's
+  entitlements (intersection, not the agent's own). Open: how does it learn who
+  is asking, and does it stay on Harbor Core or move to Harbor Server?
+- **Owner approval for skill installs** that originate from a shared folder.
+- **Output-audience control** (a house agent posting restricted content where the
+  audience is broader than the asker) — an application-layer policy Harbor
+  cannot enforce.

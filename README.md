@@ -145,7 +145,8 @@ Harbor ships the client and the trust boundary around it.
 | Enforcement | `isolation` (`check`, `rooms`, `audit`, `denials`, `doctor`), `gate`, `budget`, `audit`, `approval`, `spawn` (`--confine` pins the child to its room) |
 | Runtime | `scheduler`, `compaction`, `session`, `bench` |
 | Secrets | `secrets` (`set`, `get`, `list`, `rm`, `export`, `doctor`) |
-| Server | `serve`, `tenant` (`create`, `add-room`, `list`, `suspend`, `resume`), `token` (`create`, `list`, `revoke`), `service print` |
+| Server | `serve`, `tenant` (`create`, `add-room`, `list`, `suspend`, `resume`), `token` (`create`, `list`, `revoke`; `--principal`, daily quotas), `principal` (`list`, `suspend`, `resume`, `revoke`), `service print` |
+| Sharing | `guard <folder>` — scan for credentials and never-sync files before a folder is shared (never prints the secret) |
 
 `harbor dashboard` serves on loopback by default. Binding it elsewhere requires
 `HARBOR_DASHBOARD_TOKEN` (at least 16 characters); the token is read from the

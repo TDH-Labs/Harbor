@@ -38,6 +38,7 @@
     "./tenants": "./src/tenants.ts",
     "./http-server": "./src/http-server.ts",
     "./service": "./src/service.ts",
+    "./guard": "./src/guard.ts",
     "./session": "./src/session.ts",
     "./config": "./src/config.ts",
     "./env": "./src/env.ts",

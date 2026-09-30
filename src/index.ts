@@ -171,7 +171,7 @@ export { checkBudget, spendBudget, BudgetExceededError } from "./budget.ts";
 export type { BudgetResult, BudgetOptions } from "./budget.ts";
 
 export { gate, AccessDeniedError, runWithGateContext, currentGateContext } from "./gate.ts";
-export type { GateContext } from "./gate.ts";
+export type { DeliveryQuota, GateContext } from "./gate.ts";
 
 export {
   audit,
@@ -221,16 +221,22 @@ export type {
 // ── Multi-tenant control plane + service definitions (Harbor Server) ─────────
 // The HTTP server itself (`harbor-tugboat/http-server`) is a subpath export, like
 // the MCP server: it imports this barrel, so it cannot also be re-exported from it.
-export { ControlPlane, TENANT_ID_RE, TOKEN_PREFIX, TenantError, tokenHandle } from "./tenants.ts";
+export { ControlPlane, PRINCIPAL_RE, TENANT_ID_RE, TOKEN_PREFIX, TenantError, tokenHandle, usageSubject, utcDay } from "./tenants.ts";
 export type {
   AuthFailure,
   AuthResult,
+  ChargeResult,
   CreateTokenOptions,
+  PrincipalRecord,
+  PrincipalStatus,
+  UsageLimits,
   TenantErrorCode,
   TenantRecord,
   TenantStatus,
   TokenRecord,
 } from "./tenants.ts";
+export { DEFAULT_EXCLUDE, DEFAULT_MAX_BYTES, guardPassed, scanFilename, scanText, scanTree } from "./guard.ts";
+export type { GuardFinding, GuardOptions, GuardReport, GuardSkip } from "./guard.ts";
 export { SERVICE_TARGETS, SERVICE_UNITS, ServiceError, renderService, splitCommand } from "./service.ts";
 export type { RenderedService, ServiceOptions, ServiceTarget, ServiceUnit } from "./service.ts";
 

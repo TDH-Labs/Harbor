@@ -323,6 +323,97 @@ describe("harbor token --principal / quotas, and harbor principal", () => {
   });
 });
 
+describe("harbor guard", () => {
+  // Assembled at runtime so no realistic credential is ever a literal in this file.
+  const secret = () => "gh" + "p_" + "aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bD2fH4jL6";
+  const guardDir = () => join(dir, "shared");
+  const put = (rel: string, body: string | Buffer) => {
+    const p = join(guardDir(), rel);
+    mkdirSync(join(p, ".."), { recursive: true });
+    writeFileSync(p, body);
+  };
+  const run = (args: string[], stdin?: string) => {
+    const p = Bun.spawnSync(["bun", CLI, "guard", ...args], {
+      stdout: "pipe",
+      stderr: "pipe",
+      ...(stdin !== undefined ? { stdin: Buffer.from(stdin) } : {}),
+    });
+    return { code: p.exitCode ?? -1, out: p.stdout.toString(), err: p.stderr.toString() };
+  };
+
+  test("a clean folder exits 0", () => {
+    put("context/plan.md", "# Plan\n");
+    const r = run([guardDir()]);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("guard: no findings.");
+  });
+
+  test("a secret exits 1, names the path, line and rule — and prints NONE of the secret", () => {
+    put("context/notes.md", `one\ntwo\nkey: ${secret()}\n`);
+    put(".env", "A=b\n");
+    const r = run([guardDir()]);
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("BLOCK  context/notes.md:3  content  github-token");
+    expect(r.out).toContain("BLOCK  .env  filename  dotenv-file");
+    expect(r.out).toContain("ROTATE");
+    expect(r.out + r.err).not.toContain(secret());
+  });
+
+  test("--json carries the verdict and still no secret", () => {
+    put("a.md", `${secret()}\n`);
+    const p = Bun.spawnSync(["bun", CLI, "guard", guardDir(), "--json"], { stdout: "pipe", stderr: "pipe" });
+    expect(p.exitCode).toBe(1);
+    const report = JSON.parse(p.stdout.toString()) as { passed: boolean; findings: Array<{ rule: string }> };
+    expect(report.passed).toBe(false);
+    expect(report.findings.map((f) => f.rule)).toContain("github-token");
+    expect(p.stdout.toString()).not.toContain(secret());
+  });
+
+  test("a missing folder or a bad option is exit 2 (an error), never a clean pass", () => {
+    expect(run([join(dir, "does-not-exist")]).code).toBe(2);
+    put("a.md", "x");
+    expect(run([guardDir(), "--max-bytes", "abc"]).code).toBe(2);
+    expect(run([guardDir(), "--files-from", join(dir, "no-such-list")]).code).toBe(2);
+  });
+
+  test("--strict turns 'could not inspect' into a failure; without it the skip is reported but passes", () => {
+    put("big.md", "x".repeat(500));
+    const lenient = run([guardDir(), "--max-bytes", "100"]);
+    expect(lenient.code).toBe(0);
+    expect(lenient.out).toContain("skip   big.md  (too-large)");
+    expect(lenient.out).toContain("--strict");
+    const strict = run([guardDir(), "--max-bytes", "100", "--strict"]);
+    expect(strict.code).toBe(1);
+    expect(strict.out).toContain("could not be inspected");
+  });
+
+  test("--allow exempts known-good paths; --exclude none scans .git too", () => {
+    put("notes/token-budget.md", "how many tokens\n");
+    expect(run([guardDir()]).code).toBe(1);
+    expect(run([guardDir(), "--allow", "notes/*token*.md"]).code).toBe(0);
+    put(".git/config", `${secret()}\n`);
+    expect(run([guardDir(), "--allow", "notes/*token*.md"]).code).toBe(0); // .git excluded by default
+    expect(run([guardDir(), "--allow", "notes/*token*.md", "--exclude", "none"]).code).toBe(1);
+  });
+
+  test("--files-from (a file, or '-' for stdin) scans only the listed paths and refuses ones that leave the folder", () => {
+    put("a.md", `${secret()}\n`);
+    put("b.md", `${secret()}\n`);
+    const listFile = join(dir, "changed.txt");
+    writeFileSync(listFile, "a.md\n");
+    const fromFile = run([guardDir(), "--files-from", listFile]);
+    expect(fromFile.code).toBe(1);
+    expect(fromFile.out).toContain("a.md");
+    expect(fromFile.out).not.toContain("b.md");
+
+    const fromStdin = run([guardDir(), "--files-from", "-"], "b.md\n../shared/../../etc/passwd\n/etc/hostname\n");
+    expect(fromStdin.out).toContain("BLOCK  b.md");
+    expect(fromStdin.out).toContain("skip   ../shared/../../etc/passwd  (outside-root)");
+    expect(fromStdin.out).toContain("skip   /etc/hostname  (outside-root)");
+    expect(fromStdin.out).not.toContain("a.md");
+  });
+});
+
 describe("harbor service print", () => {
   test("renders a systemd unit for the server", async () => {
     const r = await cli("service", "print", "--unit", "serve", "--target", "systemd", "--harbor-bin", "/usr/local/bin/harbor", "--port", "9000", "--data-dir", "/var/lib/harbor");

@@ -180,10 +180,16 @@ harbor tenant list [--json]
 harbor tenant suspend <id>         # every token of the tenant stops working immediately
 harbor tenant resume <id>
 
-harbor token create --tenant <id> --room <room> \
+harbor token create --tenant <id> --room <room> [--principal <person>] \
+       [--daily-token-quota N] [--daily-read-quota N] \
        [--label TEXT] [--ttl-days N] [--capabilities a,b] [--allow-admin]
-harbor token list [--tenant <id>]  # handles and state only — never secrets
+harbor token list [--tenant <id>]  # handles, person, state, quotas — never secrets
 harbor token revoke <token-id>     # the 12 hex chars after hbr_
+
+harbor principal list [--tenant <id>]           # people, live tokens, today's delivery
+harbor principal suspend <person> --tenant <id> # reversible: all their tokens refused
+harbor principal resume  <person> --tenant <id>
+harbor principal revoke  <person> --tenant <id> # offboarding: permanent
 ```
 
 - The secret is **256 random bits shown once**. Only its SHA-256 is stored, so a
@@ -193,8 +199,115 @@ harbor token revoke <token-id>     # the 12 hex chars after hbr_
   capabilities intersected with it, never more.
 - `admin` bypasses room gating. It is never granted to a network caller by a
   room's config, and a token can carry it only if you pass `--allow-admin`.
-- Revoking a token or suspending a tenant cuts off its open sessions on their
-  next request.
+- Revoking a token, suspending a tenant, or suspending/revoking a person cuts off
+  open sessions on their next request.
+
+## People, quotas, and what they can and cannot guarantee
+
+A token can name the **person** it was issued to (`--principal kim@example.com`).
+Everything below hangs off that.
+
+### The limit you cannot engineer around
+
+Nothing can stop a person's own agent from using content that person is allowed
+to read: the agent runs on their machine, as them. So for people who bring their
+own agent, control is exercised **at delivery, not at use**:
+
+| Layer | Enforceable? | How |
+|---|---|---|
+| **Who** receives a piece of content | **Yes** | A token is bound to one room; skills outside it are never delivered. Drive folder permissions decide who can open a synced folder. |
+| **How much and how fast** | **Yes** | Per-person daily quotas, per-token rate limit, session cap. |
+| **Who did what** | **Yes** | Every audit row names the person. |
+| **What their agent does with what it received** | **No** | It is their machine, their agent, their vendor. |
+
+The practical rule: **anything a bring-your-own agent must not ingest must never
+be delivered to that person** — keep it in a room they hold no token for, and out
+of every folder they can open. Harbor cannot make a delivered skill "human-eyes
+only".
+
+### Attribution
+
+Every audit row for a person's session carries the person in `agent_id`
+(`session_open`, allowed reads, gate denials, quota refusals, routing). A token
+with no person is attributed to the token (`token:<id>`). The operator's access
+log names the person too, never the token. Before this, tool-level audit rows had
+an empty `agent_id`.
+
+### Daily delivery quotas
+
+```bash
+harbor token create --tenant acme --room legal --principal kim@example.com \
+    --daily-token-quota 20000 --daily-read-quota 15
+```
+
+- Counts **skill content actually delivered** by `read_skill` and
+  `activate_skill` (tokens as estimated for the session budget, and number of
+  loads). Listing, searching and routing return short descriptions and are not
+  counted. A refused or unknown request costs nothing.
+- Counted **per person** across all their tokens and sessions, per **UTC day**
+  (resets 00:00 UTC). Opening more sessions, or holding a second token, does not
+  buy more content. A token with no person is counted per token.
+- Once spent, the tool returns a `quota exceeded` error **with none of the
+  content**, and the refusal is audited (`decision=denied`, reason names the
+  quota). One skill larger than the whole daily allowance can never be delivered.
+- Unset means unlimited. **Set a quota on every token you issue to a
+  bring-your-own agent.**
+- The charge is one atomic `BEGIN IMMEDIATE` transaction: concurrent requests —
+  even from separate processes — cannot both pass the last unit of an allowance
+  (tested with six racing processes).
+- Harbor Core (stdio) has no quota; nothing changes for a single-user install.
+
+`harbor principal list` shows each person's live tokens and today's delivery.
+
+### Offboarding
+
+`harbor principal revoke <person> --tenant <id>` permanently revokes every token
+they hold; `suspend`/`resume` is the reversible version. Both take effect on the
+person's next request. Then, outside Harbor: remove them from any shared folders,
+and **rotate anything they could read** — a revoked token stops future delivery;
+it cannot recall what their agent already received.
+
+### Not built yet
+
+- **Sensitivity labels** (`public`/`internal`/`restricted` per skill, with a
+  ceiling per token). Today the room is the only boundary: put restricted skills
+  in their own room and issue no bring-your-own token for it.
+- **Acting on behalf of a person.** A house agent that serves several people
+  should open its Harbor session with *the requester's* entitlements, not its
+  own broad ones (otherwise it can be asked to fetch what the asker could not).
+  Today, give it a separate token per person it serves; there is no delegation.
+- **Owner approval for skill installs** arriving through a shared folder.
+
+## Sharing files (a synced folder, e.g. Google Drive)
+
+Keep the shared folder small and dull: **one collaboration folder** holding
+notes, an inbox and proposals. Skills and room rules do **not** go in it — people
+get skills through Harbor (their own agent over a token, or by asking the house
+agent), which is gated, quota'd and audited. A synced folder is none of those.
+
+- **Everything in a folder syncs to every member's machine**, so assume every
+  member's agent can read all of it.
+- Run **`harbor guard <folder>`** before each sync and block on a non-zero exit.
+  It scans by filename and content (private keys, cloud/API tokens, JWTs, Harbor
+  tokens, `.env` files, credential-shaped assignments, high-entropy blobs) and
+  prints paths, line numbers and rule names — **never the secret**. Exit `0`
+  clean, `1` findings, `2` error. `--strict` also fails on anything it could not
+  inspect; `--files-from` scans only changed files and refuses paths that leave
+  the folder; `--allow` exempts known-good paths. It does not follow symlinks and
+  flags them.
+- If it fires on a real credential, **rotate the credential**: it was readable by
+  every member from the moment it was saved. Blocking the sync does not un-expose
+  it.
+- A clean scan means "nothing obvious". A password in a sentence, or a token in
+  an unknown format, will pass. The filename rules are blunt on purpose (a note
+  called `token-budget.md` is flagged) — exempt it with `--allow`.
+- Treat the folder as **untrusted input** to the house agent: anyone who can
+  write to it can put text in front of it. Don't let it act on `proposals/`
+  (in particular, install skills) without an owner's approval.
+- Drive's "disable download, print and copy" option applies to viewers and
+  commenters, not editors, and stops nobody reading the file in a browser. It is
+  friction, not a control, and how it behaves with the desktop client's offline
+  sync was not verified.
 
 ## Security model — what is and is not enforced
 
@@ -238,9 +351,12 @@ harbor token revoke <token-id>     # the 12 hex chars after hbr_
 - This is **cooperative, tool-level enforcement**, not OS confinement. It
   governs what an agent can do *through Harbor*. Run the server as an
   unprivileged user in a container (as shipped) for the OS-level layer.
-- **Budgets are cooperative cost control, not a hard tenant quota.** A client can
-  open new sessions (bounded by the per-token session cap and rate limit). Hard
-  quotas and billing are not implemented.
+- **Per-session budgets are cooperative cost control.** A client can open new
+  sessions (bounded by the per-token session cap and rate limit). The hard cap is
+  the per-person **daily delivery quota** above — opt-in per token. Billing is not
+  implemented.
+- **Harbor cannot control what a person's own agent does with content it was
+  entitled to receive** (see "People, quotas…").
 - **No per-IP protection for unauthenticated traffic.** The rate limit is per
   token. Put IP-level limiting at the proxy.
 - **TLS is the proxy's job.**

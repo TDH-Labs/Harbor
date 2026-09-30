@@ -35,6 +35,7 @@ import { runGenerate, fullSync, writeIfChanged } from "./sync.ts";
 import { runBench, formatSummary, latestReport } from "./bench.ts";
 import { startDashboard, DEFAULT_PORT, isLoopbackHost } from "./dashboard.ts";
 import { closeAllDbs } from "./db.ts";
+import { DEFAULT_EXCLUDE, DEFAULT_MAX_BYTES, guardPassed, scanTree } from "./guard.ts";
 import { ControlPlane, TenantError, tokenHandle } from "./tenants.ts";
 import { SERVICE_TARGETS, SERVICE_UNITS, ServiceError, renderService, splitCommand, type ServiceTarget, type ServiceUnit } from "./service.ts";
 import { runForeground, startDaemon, stopDaemon, watcherStatus, PidFile } from "./watch.ts";
@@ -2561,6 +2562,80 @@ const principalCmd = defineCommand({
   },
 });
 
+const guardCmd = defineCommand({
+  meta: {
+    name: "guard",
+    description:
+      "Scan a folder for credentials and never-sync files before it is shared. Prints paths and rule names, NEVER the secret.",
+  },
+  args: {
+    dir: { type: "positional", required: true, description: "Folder to scan" },
+    json: { type: "boolean", description: "Emit JSON" },
+    strict: { type: "boolean", description: "Also fail when something could not be inspected (too large, binary, unreadable)" },
+    allow: { type: "string", description: "Comma-separated globs (relative paths; * within a segment, ** across) exempt from findings" },
+    exclude: {
+      type: "string",
+      description: `Comma-separated names never entered (default ${DEFAULT_EXCLUDE.join(",")}; pass 'none' to scan everything)`,
+    },
+    "max-bytes": { type: "string", description: `Skip files larger than this (default ${DEFAULT_MAX_BYTES})` },
+    "files-from": {
+      type: "string",
+      description: "Scan only the paths listed in this file (relative to <dir>, one per line; '-' reads stdin). Paths leaving <dir> are refused.",
+    },
+  },
+  run({ args }) {
+    let maxBytes: number | undefined;
+    if (args["max-bytes"]) {
+      maxBytes = intOption("guard", "--max-bytes", args["max-bytes"], 1, Number.MAX_SAFE_INTEGER);
+      if (maxBytes === undefined) {
+        process.exitCode = 2;
+        return;
+      }
+    }
+    let files: string[] | undefined;
+    if (args["files-from"]) {
+      try {
+        files = readFileSync(args["files-from"] === "-" ? 0 : args["files-from"], "utf8").split("\n");
+      } catch (err) {
+        console.error(`guard: cannot read --files-from: ${err instanceof Error ? err.message : String(err)}`);
+        process.exitCode = 2;
+        return;
+      }
+    }
+    const exclude = args.exclude === undefined ? undefined : args.exclude === "none" ? [] : parseCommaList(args.exclude);
+    let report;
+    try {
+      report = scanTree(args.dir, {
+        ...(maxBytes !== undefined ? { maxBytes } : {}),
+        ...(files ? { files } : {}),
+        ...(exclude ? { exclude } : {}),
+        allow: parseCommaList(args.allow),
+      });
+    } catch (err) {
+      console.error(`guard: ${err instanceof Error ? err.message : String(err)}`);
+      process.exitCode = 2;
+      return;
+    }
+    const passed = guardPassed(report, Boolean(args.strict));
+    if (!passed) process.exitCode = 1;
+    if (args.json) return printJson({ ...report, passed });
+
+    console.log(`guard: scanned ${report.scanned} file(s) in ${report.root}${report.excluded ? ` (${report.excluded} excluded)` : ""}`);
+    for (const f of report.findings) {
+      console.log(`  BLOCK  ${f.path}${f.line ? `:${f.line}` : ""}  ${f.kind}  ${f.rule}`);
+    }
+    for (const sk of report.skipped) console.log(`  skip   ${sk.path}  (${sk.reason})`);
+    if (report.findings.length > 0) {
+      console.log(`guard: ${report.findings.length} finding(s) — do NOT share this folder as is.`);
+      console.log("guard: if a real credential was pasted, ROTATE IT: everyone with access to the folder could already read it.");
+    } else if (!passed) {
+      console.log(`guard: ${report.skipped.length} item(s) could not be inspected and --strict is set.`);
+    } else {
+      console.log(report.skipped.length ? `guard: no findings (${report.skipped.length} item(s) not inspected — see above; use --strict to fail on them)` : "guard: no findings.");
+    }
+  },
+});
+
 const serviceCmd = defineCommand({
   meta: { name: "service", description: "Render launchd / systemd definitions for Harbor's long-running parts" },
   subCommands: {
@@ -2696,6 +2771,7 @@ export const main: CommandDef = defineCommand({
     tenant: tenantCmd,
     token: tokenCmd,
     principal: principalCmd,
+    guard: guardCmd,
     service: serviceCmd,
   },
 });
