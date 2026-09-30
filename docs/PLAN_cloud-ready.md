@@ -376,6 +376,27 @@ privilege-escalation path).
   shown the true reason; label editing skipping its pool/tier checks) were each
   caught by the tests. A migration test builds a control.db from before the column
   existed. I did not exercise this against a real Drive-synced setup.
+- **Three independent adversarial reviews** (separate reviewer agents on a different model
+  from the author, each in its own checkout: authz/isolation, input/deploy, and a
+  claims-versus-tests audit that ran the suite five times and applied 64 mutations)
+  found real defects that my own reviews missed, all now fixed with tests that fail
+  without them: (1) **a server token or delegate grant for the unconfigured default
+  room could read every skill in the tenant**, because the default room was treated as
+  unrestricted on strict sessions too — I had pinned that exemption in a test as
+  intentional; (2) `audit_recent` was scoped to the person, not the session, so a
+  person's capped session could read what their uncapped token or the house agent had
+  loaded, and `audit_read` was never enforced; (3) open sessions kept stale
+  capabilities after a config edit; (4) delivery was not recorded for a credential
+  without a quota, so a second token or a grant without one was both unlimited and
+  invisible to `principal list`, contradicting the docs; (5) the delegate client opened
+  one session per concurrent request after a 404; (6) a proposal containing a nested
+  `SKILL.md` installed an extra skill into the default room; (7) `guard --strict` passed
+  a token inside `.git/`; (8) `guard` printed hostile file names raw; (9) the smoke
+  script had checks that could not fail. The reviewers also found 5 mutations my tests
+  did not catch (admin without the capability, idle-session sweep, protocol-version
+  check, expiry boundary, unbounded 404 retry) and a dozen doc statements that were
+  false; those are fixed or corrected. The lesson recorded for future work: a test that
+  pins a behaviour as "intended" is not a review of that behaviour.
 - Security review of the whole branch (read-only, before opening the PR) found two
   things in my own new code, both fixed and pinned by tests that fail without the fix:
   (1) `audit_recent` was open to every session and returned the room-wide log with an
@@ -388,10 +409,16 @@ privilege-escalation path).
   override could make the reviewer's screen differ from the bytes approved; hidden
   characters now make a candidate unapprovable and are printed as `\u{…}`.
 - Deployment: `scripts/smoke.sh local` drives a real `harbor serve` process through
-  provisioning, authentication, a ceiling and a delegate token (25 checks pass) and
-  fails when the gate is broken on purpose. `scripts/smoke.sh docker` exists but has
-  **not been run**; I tried to start a Docker daemon in the session sandbox and the
-  environment refused, so the image remains unbuilt.
+  provisioning, authentication, both room gates, a sensitivity ceiling and a delegate
+  token (29 checks). **An earlier version of this claim was false**: a reviewer broke the
+  room gate on purpose and the script still passed, because its "a skill outside the
+  room is refused" check asked for a skill that does not exist. It now reads a real skill
+  from another room (with a positive control), checks the HTTP status line rather than
+  grepping the whole response, and was re-verified to fail when the room gate, and when
+  the sensitivity gate, is broken. `scripts/smoke.sh docker` exists, was rewritten so no
+  container check can pass when `exec` fails, and has **not been run**: I tried to start
+  a Docker daemon in the session sandbox and the environment refused, so the image remains
+  unbuilt.
 - Drive: `copyRequiresWriterPermission` / the download restriction applies to
   readers and commenters, not editors, and is enforced on API download too. How
   it interacts with the desktop client's offline sync was **not** verified.

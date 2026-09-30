@@ -264,13 +264,37 @@ describe("scanTree", () => {
     }
   });
 
-  test("excludes .git and node_modules by default (and counts them); the list is configurable", () => {
-    put(".git/config", `${fake.github()}\n`);
+  test("node_modules is excluded by default and LISTED; a .git directory is itself a finding, never a silent pass", () => {
+    put(".git/config", `[remote "origin"]\n\turl = https://x-access-token:${fake.github()}@github.com/o/r\n`);
     put("node_modules/pkg/index.js", `${fake.github()}\n`);
     put("ok.md", "fine");
-    expect(scanTree(dir)).toMatchObject({ findings: [], excluded: 2, scanned: 1 });
-    const strict = scanTree(dir, { exclude: [] });
-    expect(strict.findings.some((f) => f.path.startsWith(".git/"))).toBe(true);
+    const r = scanTree(dir);
+    expect(r.findings).toEqual([{ path: ".git", kind: "filename", rule: "git-directory" }]);
+    expect(r.excluded).toBe(2); // .git and node_modules were stepped over...
+    expect(r.excludedPaths.sort()).toEqual([".git", "node_modules"]); // ...and the report says so
+    expect(guardPassed(r)).toBe(false); // the repository is the problem
+    // scanning inside it too (nothing excluded) finds the token itself
+    const all = scanTree(dir, { exclude: [] });
+    expect(all.findings.some((f) => f.path === ".git/config")).toBe(true);
+    expect(all.findings.some((f) => f.path.startsWith("node_modules/"))).toBe(true);
+    expect(all.excluded).toBe(0);
+  });
+
+  test("a .git FILE (a worktree or submodule pointer) is flagged too, and --allow can exempt it", () => {
+    put("sub/.git", "gitdir: ../.git/modules/sub\n");
+    expect(scanTree(dir).findings).toEqual([{ path: "sub/.git", kind: "filename", rule: "git-directory" }]);
+    expect(scanTree(dir, { allow: ["sub/.git"] }).findings).toEqual([]);
+  });
+
+  test("--strict also fails when anything was excluded: a token in node_modules/ is still in the folder", () => {
+    put("node_modules/pkg/index.js", `${fake.github()}\n`);
+    put("ok.md", "fine");
+    const r = scanTree(dir);
+    expect(r.findings).toEqual([]);
+    expect(r.excluded).toBe(1);
+    expect(guardPassed(r)).toBe(true); // default mode: reported, not failed
+    expect(guardPassed(r, true)).toBe(false); // strict: unexamined means not passed
+    expect(guardPassed(scanTree(dir, { exclude: [] }), true)).toBe(false); // ...because scanning it finds the token
   });
 
   test("things it cannot inspect are SKIPPED and reported — never silently passed", () => {

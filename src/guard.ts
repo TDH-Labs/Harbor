@@ -56,8 +56,10 @@ export interface GuardReport {
   findings: GuardFinding[];
   /** Things that could not be inspected. Not a pass: see `strict`. */
   skipped: GuardSkip[];
-  /** Entries skipped by the exclude list (e.g. `.git`). */
+  /** Entries skipped by the exclude list (e.g. `node_modules`). */
   excluded: number;
+  /** Which entries those were (relative paths, at most {@link MAX_EXCLUDED_LISTED}), so a skip is never silent. */
+  excludedPaths: string[];
 }
 
 export interface GuardOptions {
@@ -73,6 +75,7 @@ export interface GuardOptions {
 
 export const DEFAULT_MAX_BYTES = 5 * 1024 * 1024;
 export const DEFAULT_EXCLUDE: readonly string[] = [".git", "node_modules"];
+export const MAX_EXCLUDED_LISTED = 50;
 
 // ── Filename rules ───────────────────────────────────────────────────────────
 
@@ -264,7 +267,7 @@ export function scanTree(root: string, options: GuardOptions = {}): GuardReport 
   const allow = (options.allow ?? []).map(globToRegExp);
   const isAllowed = (rel: string): boolean => allow.some((re) => re.test(rel));
 
-  const report: GuardReport = { root, scanned: 0, findings: [], skipped: [], excluded: 0 };
+  const report: GuardReport = { root, scanned: 0, findings: [], skipped: [], excluded: 0, excludedPaths: [] };
 
   const inspect = (rel: string): void => {
     const abs = join(root, ...rel.split("/"));
@@ -338,8 +341,15 @@ export function scanTree(root: string, options: GuardOptions = {}): GuardReport 
       entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
       for (const e of entries) {
         const rel = dirRel ? `${dirRel}/${e.name}` : e.name;
+        // A `.git` directory in a shared folder is itself the problem: its history holds
+        // every secret ever committed (and remote URLs with tokens in `.git/config`), and
+        // it would sync to every member. Reported whether or not it is also excluded.
+        if (e.name === ".git" && !isAllowed(rel)) {
+          report.findings.push({ path: rel, kind: "filename", rule: "git-directory" });
+        }
         if (exclude.has(e.name)) {
           report.excluded++;
+          if (report.excludedPaths.length < MAX_EXCLUDED_LISTED) report.excludedPaths.push(rel);
           continue;
         }
         if (e.isDirectory()) stack.push(rel);
@@ -353,7 +363,11 @@ export function scanTree(root: string, options: GuardOptions = {}): GuardReport 
   return report;
 }
 
-/** Did the scan pass? `strict` also fails on anything it could not inspect. */
+/**
+ * Did the scan pass? `strict` also fails on anything it could not inspect — files it
+ * skipped AND entries the exclude list stepped over (a token in `node_modules/` or a
+ * vendored directory is still in the folder).
+ */
 export function guardPassed(report: GuardReport, strict = false): boolean {
-  return report.findings.length === 0 && (!strict || report.skipped.length === 0);
+  return report.findings.length === 0 && (!strict || (report.skipped.length === 0 && report.excluded === 0));
 }

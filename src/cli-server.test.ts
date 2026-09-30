@@ -392,7 +392,16 @@ describe("harbor guard", () => {
     expect(run([guardDir()]).code).toBe(1);
     expect(run([guardDir(), "--allow", "notes/*token*.md"]).code).toBe(0);
     put(".git/config", `${secret()}\n`);
-    expect(run([guardDir(), "--allow", "notes/*token*.md"]).code).toBe(0); // .git excluded by default
+    // a .git directory in a shared folder is itself a finding (its history, its remote URLs)...
+    const withGit = run([guardDir(), "--allow", "notes/*token*.md"]);
+    expect(withGit.code).toBe(1);
+    expect(withGit.out).toContain("BLOCK  .git  filename  git-directory");
+    // ...the operator can knowingly allow it (it is then stepped over, and LISTED)...
+    const allowed = run([guardDir(), "--allow", "notes/*token*.md,.git"]);
+    expect(allowed.code).toBe(0);
+    expect(allowed.out).toMatch(/excl\s+\.git/);
+    expect(run([guardDir(), "--allow", "notes/*token*.md,.git", "--strict"]).code).toBe(1); // strict: stepped over is not a pass
+    // ...and scanning inside it (nothing excluded) finds the secret itself
     expect(run([guardDir(), "--allow", "notes/*token*.md", "--exclude", "none"]).code).toBe(1);
   });
 

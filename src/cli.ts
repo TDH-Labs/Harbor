@@ -38,6 +38,7 @@ import { closeAllDbs } from "./db.ts";
 import { DEFAULT_EXCLUDE, DEFAULT_MAX_BYTES, guardPassed, scanTree } from "./guard.ts";
 import { ConfigEditError } from "./config-edit.ts";
 import { labelReport, setRoomLabel, setSkillLabel } from "./labels.ts";
+import { visiblePath } from "./printable.ts";
 import { ProposalError, approveProposal, listProposals, showProposal } from "./proposals.ts";
 import type { Sensitivity } from "./sensitivity.ts";
 import { ControlPlane, TenantError, tokenHandle } from "./tenants.ts";
@@ -2801,7 +2802,7 @@ const proposalCmd = defineCommand({
           console.log(`# digest ${proposal.digest}`);
           for (const why of proposal.problems) console.log(`# NOT APPROVABLE: ${why}`);
           for (const [path, text] of contents) console.log(`\n===== ${path} =====\n${text}`);
-          console.log(`\n# To install exactly this:\n#   harbor proposal approve ${proposal.name} --inbox ${args.inbox} --room <room> --digest ${proposal.digest}`);
+          console.log(`\n# To install exactly this (pass the TENANT's --config, or it installs into your own Harbor home):\n#   harbor proposal approve ${proposal.name} --inbox ${args.inbox} --room <room> --digest ${proposal.digest} --config <config.toml>`);
         } catch (err) {
           proposalFailure("proposal show", err);
         }
@@ -2903,16 +2904,19 @@ const guardCmd = defineCommand({
     if (!passed) process.exitCode = 1;
     if (args.json) return printJson({ ...report, passed });
 
-    console.log(`guard: scanned ${report.scanned} file(s) in ${report.root}${report.excluded ? ` (${report.excluded} excluded)` : ""}`);
+    // Paths are chosen by whoever can write to the folder: never print one raw (a file
+    // named with a terminal escape would otherwise run on every pre-sync check).
+    console.log(`guard: scanned ${report.scanned} file(s) in ${visiblePath(report.root)}${report.excluded ? ` (${report.excluded} excluded, NOT scanned)` : ""}`);
     for (const f of report.findings) {
-      console.log(`  BLOCK  ${f.path}${f.line ? `:${f.line}` : ""}  ${f.kind}  ${f.rule}`);
+      console.log(`  BLOCK  ${visiblePath(f.path)}${f.line ? `:${f.line}` : ""}  ${f.kind}  ${f.rule}`);
     }
-    for (const sk of report.skipped) console.log(`  skip   ${sk.path}  (${sk.reason})`);
+    for (const sk of report.skipped) console.log(`  skip   ${visiblePath(sk.path)}  (${sk.reason})`);
+    for (const x of report.excludedPaths) console.log(`  excl   ${visiblePath(x)}  (not scanned; --exclude none scans it)`);
     if (report.findings.length > 0) {
       console.log(`guard: ${report.findings.length} finding(s) — do NOT share this folder as is.`);
       console.log("guard: if a real credential was pasted, ROTATE IT: everyone with access to the folder could already read it.");
     } else if (!passed) {
-      console.log(`guard: ${report.skipped.length} item(s) could not be inspected and --strict is set.`);
+      console.log(`guard: ${report.skipped.length} item(s) could not be inspected and ${report.excluded} excluded, and --strict is set.`);
     } else {
       console.log(report.skipped.length ? `guard: no findings (${report.skipped.length} item(s) not inspected — see above; use --strict to fail on them)` : "guard: no findings.");
     }

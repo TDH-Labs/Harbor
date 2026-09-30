@@ -71,9 +71,17 @@ describe("systemd", () => {
     expect(r.content).toContain("Description=System One router daemon");
   });
 
-  test("systemd specials are neutralised: % and $ are doubled, quotes escaped", () => {
+  test("systemd specials are neutralised: % is doubled everywhere, $ only where systemd expands it", () => {
     const r = renderService(base({ env: { GREETING: `50% of $HOME "quoted"` } }));
-    expect(r.content).toContain(`Environment="GREETING=50%% of $$HOME \\"quoted\\""`);
+    // Environment= does not expand $, so it stays a single $ (a doubled one would be stored literally)
+    expect(r.content).toContain(`Environment="GREETING=50%% of $HOME \\"quoted\\""`);
+    expect(r.content).not.toContain("$$HOME");
+    // ExecStart= does expand $VARS, so a literal $ in an argument is doubled there
+    const x = renderService(base({ unit: "system-one", command: ["/usr/bin/env", "echo", "cost: $5 100%"] }));
+    expect(x.content).toMatch(/ExecStart=.*\$\$5 100%%/);
+    // WorkingDirectory= behaves like Environment=
+    const w = renderService(base({ workingDir: "/srv/$app 50%" }));
+    expect(w.content).toContain(`WorkingDirectory="/srv/$app 50%%"`);
   });
 
   test("a newline in a value cannot inject a directive", () => {

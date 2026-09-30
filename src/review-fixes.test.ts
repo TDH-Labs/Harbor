@@ -3,10 +3,13 @@
  * of this branch found (and mutations they showed the suite did not catch).
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { runCommand } from "citty";
+
+import { main } from "./cli.ts";
 import { closeAllDbs } from "./db.ts";
 import { Environment } from "./env.ts";
 import { createServerHandler, ON_BEHALF_OF_HEADER, sessionCapabilities, type ServerHandler } from "./http-server.ts";
@@ -186,5 +189,92 @@ describe("pinned by mutations the suite used to miss", () => {
     expect(cp.authenticate(token, at - 0.001).ok).toBe(true);
     expect(cp.authenticate(token, at)).toEqual({ ok: false, reason: "expired" });
     expect(cp.authenticate(token, at + 1)).toEqual({ ok: false, reason: "expired" });
+  });
+});
+
+describe("harbor guard output is safe to print", () => {
+  async function guardOut(...args: string[]): Promise<{ code: number; out: string }> {
+    const logs: string[] = [];
+    const origLog = console.log;
+    const origErr = console.error;
+    const savedExit = process.exitCode;
+    console.log = ((...a: unknown[]) => void logs.push(a.join(" "))) as typeof console.log;
+    console.error = console.log;
+    process.exitCode = 0;
+    try {
+      await runCommand(main, { rawArgs: ["guard", ...args] });
+    } finally {
+      console.log = origLog;
+      console.error = origErr;
+    }
+    const code = typeof process.exitCode === "number" ? process.exitCode : 0;
+    process.exitCode = savedExit;
+    return { code, out: logs.join("\n") };
+  }
+
+  test("a file named with a terminal escape is reported as text, never sent to the terminal", async () => {
+    const shared = join(dir, "shared");
+    mkdirSync(shared);
+    // a name that always produces a finding (it says "token") and carries OSC 52 (clipboard write) and a line eraser
+    writeFileSync(join(shared, "token\u001b]52;c;cm0gLXJmIH4=\u0007\u001b[2K\u001b[1A.md"), "hello");
+    const r = await guardOut(shared);
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("BLOCK");
+    expect(r.out).not.toContain("\u001b");
+    expect(r.out).not.toContain("\u0007");
+    expect(r.out).toContain("\\u{1b}]52;c;cm0gLXJmIH4=\\u{7}");
+  });
+
+  test("excluded entries are listed, and --strict fails on them", async () => {
+    const shared = join(dir, "shared2");
+    mkdirSync(join(shared, "node_modules"), { recursive: true });
+    writeFileSync(join(shared, "node_modules", "x.js"), "fine");
+    writeFileSync(join(shared, "ok.md"), "fine");
+    const lax = await guardOut(shared);
+    expect(lax.code).toBe(0);
+    expect(lax.out).toMatch(/excl\s+node_modules/);
+    expect(lax.out).toContain("1 excluded, NOT scanned");
+    const strict = await guardOut(shared, "--strict");
+    expect(strict.code).toBe(1);
+    expect(strict.out).toContain("--strict is set");
+  });
+});
+
+describe("this repository's own sources", () => {
+  // Hidden characters in OUR code are the same attack (Trojan Source) we refuse in a skill: a
+  // regex that lists them must spell them as escapes, and nothing else may contain one. Built
+  // from code points so this file itself contains none.
+  const HIDDEN = new RegExp(
+    "[" +
+      [0xad, 0x61c, 0x180e, 0x200b, 0x200e, 0x200f, 0x2060, 0x2061, 0x2062, 0x2063, 0x2064, 0x3164, 0xfeff]
+        .map((c) => "\\u" + c.toString(16).padStart(4, "0"))
+        .join("") +
+      "\\u202a-\\u202e\\u2066-\\u2069\\u0000-\\u0008\\u000b\\u000c\\u000e-\\u001f\\u007f-\\u009f]|[\\u{e0000}-\\u{e007f}\\u{e0100}-\\u{e01ef}]",
+    "u",
+  );
+
+  function* files(d: string): Generator<string> {
+    for (const name of readdirSync(d)) {
+      if (["node_modules", ".git", ".claude", "dist"].includes(name)) continue;
+      const p = join(d, name);
+      const st = statSync(p);
+      if (st.isDirectory()) yield* files(p);
+      else if (/\.(ts|md|sh|json|ya?ml|toml|example)$|^Dockerfile$/.test(name)) yield p;
+    }
+  }
+
+  test("no source, doc or script contains a hidden or bidirectional character", () => {
+    const root = join(import.meta.dir, "..");
+    const offenders: string[] = [];
+    let scanned = 0;
+    for (const f of files(root)) {
+      scanned++;
+      const lines = readFileSync(f, "utf8").split("\n");
+      lines.forEach((l, i) => {
+        if (HIDDEN.test(l)) offenders.push(`${f.slice(root.length + 1)}:${i + 1}`);
+      });
+    }
+    expect(scanned).toBeGreaterThan(50);
+    expect(offenders).toEqual([]);
   });
 });

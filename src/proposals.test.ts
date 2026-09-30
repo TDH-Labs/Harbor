@@ -228,11 +228,46 @@ describe("what a reviewer cannot see", () => {
     const d = candidate("named");
     writeFileSync(join(d, "\u001b[31mred.md"), "x");
     const p = one("named");
-    expect(p.problems.some((x) => x.startsWith("hidden characters in a file name"))).toBe(true);
+    expect(p.problems.some((x) => x.startsWith("hidden or line-breaking characters in a file name"))).toBe(true);
     expect(p.problems.join("\n")).not.toContain("\u001b");
     const shown = showProposal(inbox, "named");
     expect([...shown.contents.keys()].join("")).not.toContain("\u001b");
     expect(shown.proposal.problems.join("\n")).not.toContain("\u001b");
+  });
+
+  test("a file name with a NEWLINE or TAB is refused and cannot forge a section header in `show`", () => {
+    const d = candidate("forged");
+    writeFileSync(join(d, "a\n===== SKILL.md =====.md"), "x");
+    writeFileSync(join(d, "b\tc.md"), "y");
+    const p = one("forged");
+    expect(p.problems.filter((x) => x.startsWith("hidden or line-breaking")).length).toBe(2);
+    const keys = [...showProposal(inbox, "forged").contents.keys()];
+    expect(keys.some((k) => k.includes("\n"))).toBe(false);
+    expect(keys.some((k) => k.includes("\t"))).toBe(false);
+    expect(keys).toContain("a\\n===== SKILL.md =====.md");
+  });
+
+  test("more invisible characters: Arabic letter mark, Mongolian vowel separator, Hangul filler", () => {
+    for (const [i, ch] of ["\u061C", "\u180E", "\u3164"].entries()) {
+      candidate(`inv${i}`, { "n.md": `a${ch}b` });
+      expect(one(`inv${i}`).problems.some((x) => x.startsWith("hidden characters")), `U+${ch.codePointAt(0)!.toString(16)}`).toBe(true);
+    }
+  });
+
+  test("a nested SKILL.md would install a SECOND skill into the default room, so the candidate is refused", () => {
+    const d = candidate("helper", { "onboarding/SKILL.md": SKILL("onboarding") });
+    const p = one("helper");
+    expect(p.problems).toContain("nested SKILL.md (the pool would install it as a separate skill): onboarding/SKILL.md");
+    const env = envWithRoom();
+    expect(() => approveProposal(env, inbox, "helper", { room: "legal", digest: p.digest })).toThrow(/nested SKILL\.md/);
+    expect(existsSync(join(env.skillsDir, "helper"))).toBe(false);
+    // the same file one level deeper is refused too: nothing named SKILL.md may live below the top
+    mkdirSync(join(d, "a", "b"), { recursive: true });
+    writeFileSync(join(d, "a", "b", "SKILL.md"), "x");
+    expect(one("helper").problems.filter((x) => x.startsWith("nested SKILL.md")).length).toBe(2);
+    // a top-level SKILL.md alone is fine, and other nested files are fine
+    candidate("fine", { "refs/notes.md": "ok" });
+    expect(one("fine").problems).toEqual([]);
   });
 
   test("ordinary text is untouched: accents, CJK, emoji, joiners, tabs, CRLF", () => {

@@ -37,6 +37,7 @@ import { dirname, join, sep } from "node:path";
 import { audit } from "./audit.ts";
 import type { Environment } from "./env.ts";
 import { scanFilename, scanText, type GuardFinding } from "./guard.ts";
+import { hasHidden, hasHiddenInName, visible, visiblePath } from "./printable.ts";
 import { isRealPathWithin } from "./sandbox.ts";
 import { install, type InstallResult } from "./skill-install.ts";
 
@@ -75,27 +76,7 @@ export interface Proposal {
   findings: GuardFinding[];
 }
 
-/**
- * Characters that make what a person reads differ from what is installed, or carry
- * text nobody reads: C0/C1 controls (a terminal escape can redraw the screen and hide
- * lines), soft hyphen, zero-width space, left/right marks, bidirectional overrides and
- * isolates, invisible operators, the BOM, and the Unicode Tags and variation-selector-
- * supplement blocks (invisible text an LLM still reads). Tab and newline are fine;
- * zero-width joiner/non-joiner are left alone (emoji and several scripts need them).
- */
-const HIDDEN_RE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u00AD\u200B\u200E\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]|[\u{E0000}-\u{E007F}\u{E0100}-\u{E01EF}]/u;
-/** A carriage return that is not half of CRLF rewinds the line and lets later text overwrite earlier text. */
-const LONE_CR_RE = /\r(?!\n)/;
-const HIDDEN_G = new RegExp(HIDDEN_RE.source, "gu");
-
-const hasHidden = (s: string): boolean => HIDDEN_RE.test(s) || LONE_CR_RE.test(s);
-
-/** Text made safe to print: every hidden character (and a lone CR) is shown as `\u{…}`. */
-export function visible(s: string): string {
-  return s
-    .replace(HIDDEN_G, (c) => `\\u{${c.codePointAt(0)!.toString(16)}}`)
-    .replace(/\r(?!\n)/g, "\\r");
-}
+export { visible };
 
 const sha256 = (b: Uint8Array | string): string => createHash("sha256").update(b).digest("hex");
 
@@ -142,8 +123,8 @@ function readCandidate(dir: string, name: string): Read {
       const childRel = rel ? `${rel}/${e.name}` : e.name;
       const childAbs = join(abs, e.name);
       // Paths reach a terminal in messages: never print one raw.
-      const shown = visible(childRel);
-      if (hasHidden(childRel)) problems.push(`hidden characters in a file name: ${shown}`);
+      const shown = visiblePath(childRel);
+      if (hasHiddenInName(childRel)) problems.push(`hidden or line-breaking characters in a file name: ${shown}`);
       if (e.isSymbolicLink()) {
         problems.push(`symlink: ${shown}`);
       } else if (e.isDirectory()) {
@@ -151,6 +132,11 @@ function readCandidate(dir: string, name: string): Read {
       } else if (!e.isFile()) {
         problems.push(`not a regular file: ${shown}`);
       } else {
+        // The pool reads `<dir>/<sub>/SKILL.md` as a SEPARATE skill (a category layout), so a
+        // nested SKILL.md would install a second skill the owner never approved for this room.
+        if (e.name === "SKILL.md" && rel !== "") {
+          problems.push(`nested SKILL.md (the pool would install it as a separate skill): ${shown}`);
+        }
         if (files.length >= MAX_PROPOSAL_FILES) {
           if (!truncated) problems.push(`more than ${MAX_PROPOSAL_FILES} files`);
           truncated = true;
@@ -229,7 +215,7 @@ export function showProposal(inbox: string, name: string): { proposal: Proposal;
   // what would be installed.
   return {
     proposal,
-    contents: new Map([...contents].map(([p, b]) => [visible(p), b.includes(0) ? "(binary)" : visible(b.toString("utf8"))])),
+    contents: new Map([...contents].map(([p, b]) => [visiblePath(p), b.includes(0) ? "(binary)" : visible(b.toString("utf8"))])),
   };
 }
 

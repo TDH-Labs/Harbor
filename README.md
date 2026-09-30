@@ -106,7 +106,9 @@ AGENT_ENV_ROOM=legal harbor mcp-server
 
 The MCP server exposes: `route_skills`, `search_skills`, `list_skills`,
 `read_skill`, `activate_skill`, `deactivate_skill`, `list_rooms`,
-`budget_status`, `audit_recent` — each gated by the session's room and budget.
+`budget_status`, `audit_recent` — each gated by the session's room and budget. On a
+Server session `audit_recent` shows only that session's rows and needs the
+`audit_read` capability, which no room has by default.
 
 ## Quickstart — Harbor Server
 

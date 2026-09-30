@@ -103,9 +103,14 @@ export function splitCommand(line: string): string[] {
 const xml = (s: string): string =>
   s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
 
-/** Quote one word for a systemd ExecStart line (`%` and `$` are special there). */
-function systemdWord(s: string): string {
-  const esc = s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/%/g, "%%").replace(/\$/g, "$$$$");
+/**
+ * Quote one word for a systemd unit line. `%` (a specifier) is special everywhere; `$`
+ * (variable expansion) only in `ExecStart` — in `Environment=` and `WorkingDirectory=`
+ * it is an ordinary character, and doubling it there would put a literal `$$` in the value.
+ */
+function systemdWord(s: string, where: "exec" | "plain" = "exec"): string {
+  let esc = s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/%/g, "%%");
+  if (where === "exec") esc = esc.replace(/\$/g, "$$$$");
   return /[\s"'\\]/.test(s) || s === "" ? `"${esc}"` : esc;
 }
 
@@ -215,11 +220,11 @@ export function renderService(o: ServiceOptions): RenderedService {
 
   // systemd (per-user unit)
   const filename = `${stem}.service`;
-  const envLines = Object.entries(env).map(([k, v]) => `Environment=${systemdWord(`${k}=${v}`)}`);
+  const envLines = Object.entries(env).map(([k, v]) => `Environment=${systemdWord(`${k}=${v}`, "plain")}`);
   const content =
     `[Unit]\nDescription=${DESCRIPTIONS[o.unit]}\nAfter=network-online.target\nWants=network-online.target\n\n` +
-    `[Service]\nType=simple\nExecStart=${argv.map(systemdWord).join(" ")}\n` +
-    (o.workingDir ? `WorkingDirectory=${systemdWord(o.workingDir)}\n` : "") +
+    `[Service]\nType=simple\nExecStart=${argv.map((a) => systemdWord(a)).join(" ")}\n` +
+    (o.workingDir ? `WorkingDirectory=${systemdWord(o.workingDir, "plain")}\n` : "") +
     (envLines.length ? envLines.join("\n") + "\n" : "") +
     `Restart=on-failure\nRestartSec=5\n` +
     `NoNewPrivileges=yes\nPrivateTmp=yes\n\n` +

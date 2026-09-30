@@ -107,8 +107,9 @@ claude mcp add --transport http harbor https://harbor.example.com/mcp \
 ```
 
 The agent then has `route_skills`, `search_skills`, `list_skills`, `read_skill`,
-`activate_skill`, `deactivate_skill`, `list_rooms`, `budget_status` and
-`audit_recent`, all scoped to its token's tenant and room.
+`activate_skill`, `deactivate_skill`, `list_rooms` and `budget_status`, all scoped to
+its token's tenant and room, and `audit_recent` **only if its room grants the
+`audit_read` capability** (no room does by default; see "Attribution").
 
 ### With TLS
 
@@ -241,18 +242,23 @@ only".
 
 ### Attribution
 
-A session reads back only **its own** audit rows (`audit_recent`, at most 100) and
-sees only **its own room** in `list_rooms`: the room-wide log would otherwise show a
-bring-your-own agent who else is working, which skills they loaded, and — from the
-denial reasons — which skill names sit above its ceiling. A sensitivity denial is
-shown to the agent in the words it was given at the time. Harbor Core (one operator,
-no identity) keeps the room-wide view.
+On a Harbor Server, `audit_recent` needs the **`audit_read` capability** (add it to a
+room's `capabilities`, or to a token's `--capabilities` ceiling; without it the call
+is refused and the refusal audited) and returns only the rows of **that session** —
+not the person's other sessions or credentials, and not other people's. That matters
+because one person can hold a capped bring-your-own token and a house agent acting for
+them: what the uncapped one loaded must not be readable by the capped one. A server
+session also sees only **its own room** in `list_rooms`. The room-wide log would
+otherwise show a bring-your-own agent who else is working, which skills they loaded
+and — from the denial reasons — which skill names sit above its ceiling. A
+sensitivity denial is shown to the agent in the words it was given at the time.
+Harbor Core (one operator, no identity) keeps the room-wide view.
 
 Every audit row for a person's session carries the person in `agent_id`
 (`session_open`, allowed reads, gate denials, quota refusals, routing). A token
 with no person is attributed to the token (`token:<id>`). The operator's access
-log names the person too, never the token. Before this, tool-level audit rows had
-an empty `agent_id`.
+log names the person and the token's public **handle** (`hbr_<id>_…`), never the
+secret. Before this, tool-level audit rows had an empty `agent_id`.
 
 ### Daily delivery quotas
 
@@ -265,14 +271,22 @@ harbor token create --tenant acme --room legal --principal kim@example.com \
   `activate_skill` (tokens as estimated for the session budget, and number of
   loads). Listing, searching and routing return short descriptions and are not
   counted. A refused or unknown request costs nothing.
-- Counted **per person** across all their tokens and sessions, per **UTC day**
-  (resets 00:00 UTC). Opening more sessions, or holding a second token, does not
-  buy more content. A token with no person is counted per token.
+- Everything delivered is **recorded against the person** (across all their tokens,
+  sessions and delegate grants), per **UTC day** (resets 00:00 UTC); a token with no
+  person is recorded against the token. `harbor principal list` therefore shows what
+  was actually delivered, whether or not a credential carried a limit.
+- A **limit belongs to the credential** that carries it (a token's `--daily-*-quota`,
+  or a delegate grant's), and is checked against the person's total for the day. So
+  opening more sessions buys nothing, and a limited credential is also counted
+  against what the person received through their other credentials — but a
+  credential with **no** limit is unlimited: a second, un-quota'd token, or a grant
+  without quotas, is a way around the limit on the first. Put a limit on every
+  credential a person holds.
 - Once spent, the tool returns a `quota exceeded` error **with none of the
   content**, and the refusal is audited (`decision=denied`, reason names the
   quota). One skill larger than the whole daily allowance can never be delivered.
-- Unset means unlimited. **Set a quota on every token you issue to a
-  bring-your-own agent.**
+- Unset means unlimited (but still recorded). **Set a quota on every token you issue
+  to a bring-your-own agent, and on every delegate grant.**
 - The charge is one atomic `BEGIN IMMEDIATE` transaction: concurrent requests —
   even from separate processes — cannot both pass the last unit of an allowance
   (tested with six racing processes).
@@ -403,8 +417,10 @@ What Harbor does with it, per request:
   the client re-initializes) so no session outlives the entitlements it was opened with.
 - A session belongs to the person it was opened for. Presenting it with a
   different `Harbor-On-Behalf-Of` gets `404`, so a session cannot be borrowed.
-- Delivery is counted against **the person's** daily allowance, the same one their
-  own tokens draw from: asking the house agent is not a way around a quota.
+- Delivery is recorded against **the person's** daily total, the same one their own
+  tokens count toward, and the grant's quotas are checked against that total. A grant
+  with no quotas is unlimited, so give every grant the limits you would give their own
+  token.
 - The audit trail names the **person** on every row; the `session_open` row also
   records `via=delegate:<token handle>`. Request and session limits are per person,
   so one busy person does not spend everyone's allowance.
@@ -483,9 +499,11 @@ harbor proposal approve nda-review --inbox <folder> --room legal \
   private directory and installed from there, never from the shared folder, so a
   collaborator cannot swap a file between your review and the install.
 - A candidate containing a **symlink** or other non-regular file, a **binary**, an
-  oversized file, too many files, no `SKILL.md`, or anything `harbor guard` flags
-  (a credential, a secret-shaped filename) **cannot be approved**. Unreviewable
-  content cannot be approved by review.
+  oversized file, too many files, no `SKILL.md`, a **second `SKILL.md` inside it**
+  (the pool would install that as a separate skill the owner never approved), a file
+  name containing a newline or tab, or anything `harbor guard` flags (a credential, a
+  secret-shaped filename) **cannot be approved**. Unreviewable content cannot be
+  approved by review.
 - **Hidden characters** also make a candidate unapprovable: terminal escapes and other
   control characters (which can redraw the screen so the file you read is not the one
   you approve), a lone carriage return (overwrites the line), bidirectional overrides,
@@ -526,9 +544,14 @@ agent), which is gated, quota'd and audited. A synced folder is none of those.
   tokens, `.env` files, credential-shaped assignments, high-entropy blobs) and
   prints paths, line numbers and rule names — **never the secret**. Exit `0`
   clean, `1` findings, `2` error. `--strict` also fails on anything it could not
-  inspect; `--files-from` scans only changed files and refuses paths that leave
-  the folder; `--allow` exempts known-good paths. It does not follow symlinks and
-  flags them.
+  inspect **or stepped over** (`node_modules` and `.git` are excluded by default and
+  are listed in the output as `excl`, never silently passed); `--files-from` scans
+  only changed files and refuses paths that leave the folder; `--allow` exempts
+  known-good paths. It does not follow symlinks and flags them. **A `.git`
+  directory in a shared folder is itself a finding** (its history holds every
+  secret ever committed, and a remote URL with a token lives in `.git/config`).
+  Paths are printed with terminal escapes made visible (`\u{1b}`), since whoever can
+  write to the folder chooses the file names.
 - If it fires on a real credential, **rotate the credential**: it was readable by
   every member from the moment it was saved. Blocking the sync does not un-expose
   it.
@@ -558,8 +581,12 @@ agent), which is gated, quota'd and audited. A synced folder is none of those.
   means "no restriction", which a single-user install relies on. On the server
   that would be a cross-room read (remove the last skill from `finance` and a
   `finance` token could `read_skill` anything in the pool), so server sessions
-  treat a configured-but-empty room as granting nothing. `tenant add-room`
-  therefore gives you a room that can read nothing until you install skills.
+  treat an empty room as granting nothing. That includes the **default room**
+  (`general`) when it has no `[skills.rooms.general]` section: Core runs there
+  unrestricted on a fresh install, but a server token or grant for it reads nothing
+  until you configure it with a skill list (`token create` and `principal grant` say
+  so). `tenant add-room` likewise gives you a room that can read nothing until you
+  install skills.
 - Session binding: a session id is useless without the token that opened it.
 - Symlink-safe room containment (`realpath`) for any file/data/`spawn` path that
   goes through Harbor's checks. The server itself exposes **no file or shell
@@ -634,6 +661,6 @@ tool's answer says which one produced it.
   stderr. Denials carry a `deny` reason (`bad_secret`, `revoked`, `expired`,
   `tenant_suspended`, `rate_limited`, …) that clients never see.
 - **Health:** point liveness at `/healthz` and readiness at `/readyz`.
-- **Dashboard:** `harbor dashboard --root <tenant root>` serves one tenant's
-  view on loopback. It is not exposed by the server. If you bind it beyond
+- **Dashboard:** `harbor dashboard --config <tenant config.toml>` serves one tenant's
+  view on loopback (`--root` would load built-in defaults, not the tenant's rooms). It is not exposed by the server. If you bind it beyond
   loopback it refuses to start without `HARBOR_DASHBOARD_TOKEN` (≥ 16 chars).
