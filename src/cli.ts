@@ -191,13 +191,38 @@ const stopCmd = defineCommand({
 });
 
 const dashboardCmd = defineCommand({
-  meta: { name: "dashboard", description: "Serve the health dashboard" },
-  args: { ...commonArgs, port: { type: "string", description: `Port (default ${DEFAULT_PORT})` } },
+  meta: { name: "dashboard", description: "Serve the health dashboard (loopback by default)" },
+  args: {
+    ...commonArgs,
+    port: { type: "string", description: `Port (default ${DEFAULT_PORT})` },
+    host: {
+      type: "string",
+      description:
+        "Bind address (default 127.0.0.1). A non-loopback host is refused unless HARBOR_DASHBOARD_TOKEN is set.",
+    },
+  },
   async run({ args }) {
     const env = envFromArgs(args);
     const port = args.port ? Number.parseInt(args.port, 10) : DEFAULT_PORT;
-    const server = startDashboard(env, { port });
-    console.log(`dashboard: http://127.0.0.1:${server.port}`);
+    // The token comes from the environment, never argv: an argv secret sits in
+    // the process table for every local user to read (same rule as `harbor secrets`).
+    const token = process.env.HARBOR_DASHBOARD_TOKEN || undefined;
+    let server: ReturnType<typeof startDashboard>;
+    try {
+      server = startDashboard(env, {
+        port,
+        ...(args.host ? { host: args.host } : {}),
+        ...(token ? { token } : {}),
+      });
+    } catch (err) {
+      console.error(`dashboard: ${err instanceof Error ? err.message : String(err)}`);
+      process.exitCode = 1;
+      return;
+    }
+    console.log(`dashboard: http://${server.host.includes(":") ? `[${server.host}]` : server.host}:${server.port}`);
+    if (token) {
+      console.log("dashboard: token required — send `Authorization: Bearer <token>`, or open /?token=<token> once in a browser");
+    }
     await awaitInterrupt();
     server.stop();
   },
