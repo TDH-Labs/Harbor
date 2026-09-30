@@ -1,0 +1,303 @@
+/**
+ * cli-server.test.ts — `harbor serve | tenant | token | service` and the
+ * dashboard's bind policy, through the real command tree.
+ *
+ * Most cases run IN-PROCESS (citty `runCommand`, as cli.test.ts does). The two
+ * end-to-end cases spawn the real binary, because stream separation (the token
+ * on stdout, notes on stderr) and SIGTERM draining are properties of a process.
+ * Every case passes an explicit `--data-dir`/`--home`: nothing here touches the
+ * real user's home.
+ */
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { runCommand } from "citty";
+
+import { main } from "./cli.ts";
+import { closeAllDbs } from "./db.ts";
+
+const CLI = join(import.meta.dir, "cli.ts");
+
+let dir: string;
+let data: string;
+beforeEach(() => {
+  dir = mkdtempSync(join(tmpdir(), "harbor-cli-server-"));
+  data = join(dir, "data");
+});
+afterEach(() => {
+  closeAllDbs();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+async function cli(...args: string[]): Promise<{ code: number; out: string }> {
+  const logs: string[] = [];
+  const sink = (...a: unknown[]) => {
+    logs.push(a.map((x) => (typeof x === "string" ? x : String(x))).join(" "));
+  };
+  const origLog = console.log;
+  const origErr = console.error;
+  const origWrite = process.stdout.write.bind(process.stdout);
+  const savedExit = process.exitCode;
+  console.log = sink as typeof console.log;
+  console.error = sink as typeof console.error;
+  process.stdout.write = ((chunk: string | Uint8Array) => {
+    logs.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
+    return true;
+  }) as typeof process.stdout.write;
+  process.exitCode = 0;
+  let threw = false;
+  try {
+    await runCommand(main, { rawArgs: args });
+  } catch (err) {
+    threw = true;
+    sink(err instanceof Error ? err.message : String(err));
+  } finally {
+    console.log = origLog;
+    console.error = origErr;
+    process.stdout.write = origWrite;
+  }
+  const code = threw ? 1 : typeof process.exitCode === "number" ? process.exitCode : 0;
+  process.exitCode = savedExit;
+  return { code, out: logs.join("\n") };
+}
+
+const D = () => ["--data-dir", data];
+
+/**
+ * `--json` output goes through printJson, which writes straight to fd 1 (so a
+ * large payload cannot be truncated on a pipe) and therefore cannot be captured
+ * in-process. Those cases run the real binary.
+ */
+function harborJson<T>(...args: string[]): T {
+  const p = Bun.spawnSync(["bun", CLI, ...args], { stdout: "pipe", stderr: "pipe" });
+  if (p.exitCode !== 0) throw new Error(`harbor ${args.join(" ")} exited ${p.exitCode}: ${p.stderr.toString()}`);
+  return JSON.parse(p.stdout.toString()) as T;
+}
+
+describe("harbor tenant", () => {
+  test("create builds the tenant and prints how to use it", async () => {
+    const r = await cli("tenant", "create", "acme", ...D());
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("tenant 'acme' created");
+    expect(r.out).toContain(join(data, "tenants", "acme"));
+    expect(r.out).toContain("--config");
+    expect(existsSync(join(data, "tenants", "acme", ".agent-env", "config.toml"))).toBe(true);
+    expect(readFileSync(join(data, "tenants", "acme", ".agent-env", "config.toml"), "utf8")).toContain("[paths]");
+  });
+
+  test("a duplicate id and a hostile id fail with a message and a non-zero exit", async () => {
+    await cli("tenant", "create", "acme", ...D());
+    const dup = await cli("tenant", "create", "acme", ...D());
+    expect(dup.code).toBe(1);
+    expect(dup.out).toContain("already exists");
+    for (const bad of ["../escape", "A", "a_b", "x".repeat(41)]) {
+      const r = await cli("tenant", "create", bad, ...D());
+      expect(r.code, bad).toBe(1);
+      expect(r.out, bad).toContain("invalid tenant id");
+    }
+    expect(existsSync(join(dir, "escape"))).toBe(false);
+  });
+
+  test("list (text and --json), suspend, resume", async () => {
+    await cli("tenant", "create", "acme", ...D());
+    await cli("tenant", "create", "globex", ...D());
+    await cli("token", "create", "--tenant", "acme", "--room", "general", ...D());
+    const json = harborJson<Array<{ id: string; status: string; tokens: number }>>("tenant", "list", "--json", ...D());
+    expect(json.map((t) => [t.id, t.status, t.tokens])).toEqual([["acme", "active", 1], ["globex", "active", 0]]);
+
+    expect((await cli("tenant", "suspend", "acme", ...D())).out).toContain("suspended");
+    expect((await cli("tenant", "list", ...D())).out).toMatch(/acme\s+suspended/);
+    expect((await cli("tenant", "resume", "acme", ...D())).out).toContain("resumed");
+    const missing = await cli("tenant", "suspend", "nobody", ...D());
+    expect(missing.code).toBe(1);
+    expect(missing.out).toContain("no such tenant");
+  });
+
+  test("an empty install lists nothing, gracefully", async () => {
+    expect((await cli("tenant", "list", ...D())).out).toContain("(no tenants)");
+  });
+});
+
+describe("harbor token", () => {
+  beforeEach(async () => {
+    await cli("tenant", "create", "acme", ...D());
+  });
+
+  test("create prints a token; --json adds the record but no hash", async () => {
+    const plain = await cli("token", "create", "--tenant", "acme", "--room", "general", "--label", "ci", ...D());
+    expect(plain.code).toBe(0);
+    expect(plain.out).toMatch(/hbr_[0-9a-f]{12}_[A-Za-z0-9_-]{43}/);
+    expect(plain.out).toContain("only time the secret is shown");
+
+    const j = harborJson<Record<string, unknown>>("token", "create", "--tenant", "acme", "--room", "general", "--json", ...D());
+    expect(String(j.token)).toMatch(/^hbr_/);
+    expect(j.tenantId).toBe("acme");
+    expect(JSON.stringify(j)).not.toMatch(/secret_hash|secretHash/);
+  });
+
+  test("required flags and bad values are refused", async () => {
+    expect((await cli("token", "create", "--room", "general", ...D())).code).toBe(1);
+    expect((await cli("token", "create", "--tenant", "acme", ...D())).code).toBe(1);
+    const unconfigured = await cli("token", "create", "--tenant", "acme", "--room", "legal", ...D());
+    expect(unconfigured.code).toBe(1);
+    expect(unconfigured.out).toContain("not configured");
+    expect((await cli("token", "create", "--tenant", "acme", "--room", "legal", "--allow-unconfigured-room", ...D())).code).toBe(0);
+    expect((await cli("token", "create", "--tenant", "acme", "--room", "general", "--ttl-days", "0", ...D())).code).toBe(1);
+    expect((await cli("token", "create", "--tenant", "acme", "--room", "general", "--capabilities", "bogus", ...D())).out).toContain("unknown capability");
+    const admin = await cli("token", "create", "--tenant", "acme", "--room", "general", "--capabilities", "read_skill,admin", ...D());
+    expect(admin.code).toBe(1);
+    expect(admin.out).toContain("allowAdmin");
+    expect((await cli("token", "create", "--tenant", "acme", "--room", "general", "--capabilities", "read_skill,admin", "--allow-admin", ...D())).code).toBe(0);
+  });
+
+  test("list shows handles and state, never secrets; revoke flips it", async () => {
+    const made = harborJson<{ token: string; id: string }>("token", "create", "--tenant", "acme", "--room", "general", "--label", "ci-bot", "--json", ...D());
+    const secret = made.token.slice(`hbr_${made.id}_`.length);
+    const listed = await cli("token", "list", ...D());
+    expect(listed.out).toContain(`hbr_${made.id}_…`);
+    expect(listed.out).toContain("active");
+    expect(listed.out).toContain("ci-bot");
+    expect(listed.out).not.toContain(secret);
+
+    expect((await cli("token", "revoke", made.id, ...D())).out).toContain("revoked");
+    expect((await cli("token", "list", "--tenant", "acme", ...D())).out).toContain("revoked");
+    const unknown = await cli("token", "revoke", "deadbeef0000", ...D());
+    expect(unknown.code).toBe(1);
+    expect(unknown.out).toContain("no such token");
+  });
+});
+
+describe("harbor service print", () => {
+  test("renders a systemd unit for the server", async () => {
+    const r = await cli("service", "print", "--unit", "serve", "--target", "systemd", "--harbor-bin", "/usr/local/bin/harbor", "--port", "9000", "--data-dir", "/var/lib/harbor");
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("ExecStart=/usr/local/bin/harbor serve");
+    expect(r.out).toContain("Environment=HARBOR_PORT=9000");
+    expect(r.out).toContain("systemctl --user enable --now harbor-serve.service");
+  });
+
+  test("renders a launchd plist for System One with the operator's command", async () => {
+    const r = await cli("service", "print", "--unit", "system-one", "--target", "launchd", "--command", '/usr/local/bin/node "/opt/system one/server.js"', "--label", "com.example.router");
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("<string>com.example.router</string>");
+    expect(r.out).toContain("<string>/opt/system one/server.js</string>");
+    expect(r.out).toContain("RunAtLoad");
+  });
+
+  test("refuses what would fail at boot: relative paths, missing command, bad unit/target/port", async () => {
+    expect((await cli("service", "print", "--unit", "serve", "--target", "systemd", "--harbor-bin", "harbor")).out).toContain("absolute path");
+    expect((await cli("service", "print", "--unit", "system-one", "--target", "systemd")).out).toContain("not part of this repository");
+    expect((await cli("service", "print", "--target", "systemd")).code).toBe(1);
+    expect((await cli("service", "print", "--unit", "bogus")).code).toBe(1);
+    expect((await cli("service", "print", "--unit", "serve", "--target", "cron", "--harbor-bin", "/x")).code).toBe(1);
+    expect((await cli("service", "print", "--unit", "serve", "--target", "systemd", "--harbor-bin", "/x", "--port", "99999")).code).toBe(1);
+  });
+
+  test("--write puts the file under --home, activates nothing, and will not clobber a different file", async () => {
+    const home = join(dir, "home");
+    const args = ["service", "print", "--unit", "watcher", "--target", "systemd", "--harbor-bin", "/usr/local/bin/harbor", "--home", home, "--write"];
+    const first = await cli(...args);
+    expect(first.code).toBe(0);
+    const path = join(home, ".config", "systemd", "user", "harbor-watcher.service");
+    expect(readFileSync(path, "utf8")).toContain("ExecStart=/usr/local/bin/harbor watch");
+    expect((await cli(...args)).code).toBe(0); // identical content: idempotent
+    rmSync(path);
+    (await import("node:fs")).writeFileSync(path, "# hand-edited\n");
+    const clobber = await cli(...args);
+    expect(clobber.code).toBe(1);
+    expect(clobber.out).toContain("not overwriting");
+    expect(readFileSync(path, "utf8")).toBe("# hand-edited\n");
+  });
+});
+
+describe("harbor serve — argument validation", () => {
+  test("a bad port or rate limit is a clean error", async () => {
+    expect((await cli("serve", "--port", "70000", ...D())).out).toContain("--port must be an integer");
+    expect((await cli("serve", "--port", "abc", ...D())).code).toBe(1);
+    expect((await cli("serve", "--rate-limit", "0", ...D())).code).toBe(1);
+  });
+});
+
+describe("harbor dashboard — bind policy through the CLI", () => {
+  test("a non-loopback host without HARBOR_DASHBOARD_TOKEN is refused (and the token is never an argv flag)", async () => {
+    const saved = process.env.HARBOR_DASHBOARD_TOKEN;
+    delete process.env.HARBOR_DASHBOARD_TOKEN;
+    try {
+      const r = await cli("dashboard", "--host", "0.0.0.0", "--port", "0", "--root", dir);
+      expect(r.code).toBe(1);
+      expect(r.out).toContain("without a token");
+      expect(r.out).toContain("HARBOR_DASHBOARD_TOKEN");
+    } finally {
+      if (saved !== undefined) process.env.HARBOR_DASHBOARD_TOKEN = saved;
+    }
+    const help = readFileSync(CLI, "utf8");
+    expect(help).not.toMatch(/dashboard[\s\S]{0,400}"token":\s*\{\s*type: "string"/); // no --token flag: argv leaks
+  });
+});
+
+// ── real processes ───────────────────────────────────────────────────────────
+
+describe("end to end (real processes)", () => {
+  function harbor(...args: string[]) {
+    const p = Bun.spawnSync(["bun", CLI, ...args], { stdout: "pipe", stderr: "pipe" });
+    return { code: p.exitCode ?? -1, out: p.stdout.toString(), err: p.stderr.toString() };
+  }
+
+  test("token create: the secret alone on stdout, notes on stderr", () => {
+    expect(harbor("tenant", "create", "acme", "--data-dir", data).code).toBe(0);
+    const r = harbor("token", "create", "--tenant", "acme", "--room", "general", "--data-dir", data);
+    expect(r.code).toBe(0);
+    expect(r.out.trim()).toMatch(/^hbr_[0-9a-f]{12}_[A-Za-z0-9_-]{43}$/); // capturable with $(...)
+    expect(r.err).toContain("only time the secret is shown");
+  });
+
+  test("serve: answers an authenticated MCP session over the network, then drains on SIGTERM", async () => {
+    harbor("tenant", "create", "acme", "--data-dir", data);
+    const token = harbor("token", "create", "--tenant", "acme", "--room", "general", "--data-dir", data).out.trim();
+
+    const proc = Bun.spawn(["bun", CLI, "serve", "--data-dir", data, "--port", "0"], {
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, HARBOR_HOST: "127.0.0.1" },
+    });
+    try {
+      // Learn the port from the human line on stderr.
+      const reader = proc.stderr.getReader();
+      let seen = "";
+      const deadline = Date.now() + 10_000;
+      let port = 0;
+      while (!port && Date.now() < deadline) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        seen += new TextDecoder().decode(value);
+        port = Number(/listening on http:\/\/127\.0\.0\.1:(\d+)/.exec(seen)?.[1] ?? 0);
+      }
+      expect(port, `serve did not report a port: ${seen}`).toBeGreaterThan(0);
+      const base = `http://127.0.0.1:${port}`;
+
+      expect((await fetch(base + "/readyz")).status).toBe(200);
+      expect((await fetch(base + "/mcp", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).status).toBe(401);
+
+      const init = await fetch(base + "/mcp", {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }),
+      });
+      expect(init.status).toBe(200);
+      expect(init.headers.get("mcp-session-id")).toMatch(/^[0-9a-f]{32}$/);
+
+      proc.kill("SIGTERM");
+      const code = await Promise.race([proc.exited, new Promise<number>((r) => setTimeout(() => r(-999), 8000))]);
+      expect(code).toBe(0); // a clean drain, not a kill
+      // The access log is JSON lines on stdout and never contains the token.
+      const out = await new Response(proc.stdout).text();
+      const lines = out.trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>);
+      expect(lines.some((l) => l.path === "/mcp" && l.status === 200 && l.tenant === "acme")).toBe(true);
+      expect(out).not.toContain(token);
+    } finally {
+      proc.kill("SIGKILL");
+    }
+  });
+});

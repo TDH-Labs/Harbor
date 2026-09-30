@@ -32,7 +32,7 @@
  *    room's config lists it.
  */
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { existsSync, mkdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import type { Database } from "bun:sqlite";
@@ -244,6 +244,11 @@ export class ControlPlane {
     return TENANT_ID_RE.test(id);
   }
 
+  /** Where the tenant's `config.toml` lives (it may not exist yet for an unseeded tenant). */
+  tenantConfigPath(id: string): string {
+    return join(this.tenantRoot(id), ".agent-env", "config.toml");
+  }
+
   /** The tenant's Environment root. Validates the id first: it becomes a path segment. */
   tenantRoot(id: string): string {
     if (!TENANT_ID_RE.test(id)) throw new TenantError("invalid_tenant_id", `invalid tenant id: ${JSON.stringify(id)}`);
@@ -255,6 +260,21 @@ export class ControlPlane {
     if (this.getTenant(id)) throw new TenantError("tenant_exists", `tenant '${id}' already exists`);
     for (const sub of [".agent-env", ".agents/skills", "rooms", "workspace", "data", "archive"]) {
       mkdirSync(join(root, sub), { recursive: true });
+    }
+    // Seed the tenant's config so the ordinary CLI can manage it safely:
+    // `harbor skill-install --config <this file> ...` roots at `paths.home`,
+    // which would otherwise default to the OPERATOR's home directory. (The
+    // server itself never reads `paths.home` — it roots every tenant explicitly.)
+    // `wx`: never overwrite a config that is already there.
+    try {
+      writeFileSync(
+        this.tenantConfigPath(id),
+        `# Harbor tenant "${id}". Manage with: harbor <command> --config <this file>\n` +
+          `[paths]\nhome = ${JSON.stringify(root)}\n`,
+        { flag: "wx" },
+      );
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
     }
     try {
       this.db
@@ -419,7 +439,7 @@ export class ControlPlane {
   tenantEnvironment(id: string): Environment {
     const root = this.tenantRoot(id);
     this.requireTenant(id);
-    const cfgPath = join(root, ".agent-env", "config.toml");
+    const cfgPath = this.tenantConfigPath(id);
     const mtime = existsSync(cfgPath) ? statSync(cfgPath).mtimeMs : 0;
     const cached = this.envCache.get(id);
     if (cached && cached.configMtimeMs === mtime) return cached.env;

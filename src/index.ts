@@ -218,6 +218,22 @@ export type {
   RouteSkillsOptions,
 } from "./skills.ts";
 
+// ── Multi-tenant control plane + service definitions (Harbor Server) ─────────
+// The HTTP server itself (`harbor-tugboat/http-server`) is a subpath export, like
+// the MCP server: it imports this barrel, so it cannot also be re-exported from it.
+export { ControlPlane, TENANT_ID_RE, TOKEN_PREFIX, TenantError, tokenHandle } from "./tenants.ts";
+export type {
+  AuthFailure,
+  AuthResult,
+  CreateTokenOptions,
+  TenantErrorCode,
+  TenantRecord,
+  TenantStatus,
+  TokenRecord,
+} from "./tenants.ts";
+export { SERVICE_TARGETS, SERVICE_UNITS, ServiceError, renderService, splitCommand } from "./service.ts";
+export type { RenderedService, ServiceOptions, ServiceTarget, ServiceUnit } from "./service.ts";
+
 // ── System One router client + session-scoped Turn-Sieve ─────────────────────
 export {
   DEFAULT_RESERVED_PORTS,

@@ -63,6 +63,21 @@ describe("createTenant", () => {
     expect(cp.tenantRoot("acme")).toBe(root);
   });
 
+  test("seeds a config whose paths.home is the tenant root, so the ordinary CLI roots there (not at the operator's home)", () => {
+    cp.createTenant("acme");
+    const cfgPath = cp.tenantConfigPath("acme");
+    expect(readFileSync(cfgPath, "utf8")).toContain(`home = ${JSON.stringify(cp.tenantRoot("acme"))}`);
+    // and is loadable as an ordinary config whose root resolves to the tenant
+    expect(Environment.load(cfgPath).root).toBe(cp.tenantRoot("acme"));
+  });
+
+  test("never overwrites an existing tenant config", () => {
+    mkdirSync(join(cp.tenantRoot("acme"), ".agent-env"), { recursive: true });
+    writeFileSync(cp.tenantConfigPath("acme"), "# operator wrote this first\n[skills.rooms.legal]\nskills = []\n");
+    cp.createTenant("acme");
+    expect(readFileSync(cp.tenantConfigPath("acme"), "utf8")).toContain("operator wrote this first");
+  });
+
   test("a duplicate id is an error, and listing is stable", () => {
     cp.createTenant("acme");
     cp.createTenant("globex");
@@ -237,15 +252,16 @@ describe("tenantEnvironment — no bleed between tenants or from the operator", 
     const spy = spyOn(Config, "load");
     try {
       cp.createTenant("acme");
+      const cfg = cp.tenantConfigPath("acme");
       cp.tenantEnvironment("acme");
-      expect(spy).not.toHaveBeenCalled(); // no tenant config → built-in defaults, no file lookup at all
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(spy.mock.calls[0]![0]).toBe(cfg); // always the tenant's own file…
 
-      const cfg = join(cp.tenantRoot("acme"), ".agent-env", "config.toml");
       writeFileSync(cfg, '[skills.rooms.legal]\nskills = []\n');
       utimesSync(cfg, new Date(), new Date(Date.now() + 5000));
       cp.tenantEnvironment("acme");
-      expect(spy).toHaveBeenCalledTimes(1);
-      expect(spy.mock.calls[0]![0]).toBe(cfg);
+      expect(spy).toHaveBeenCalledTimes(2);
+      for (const call of spy.mock.calls) expect(call[0]).toBe(cfg); // …never `Config.load(null)`
     } finally {
       spy.mockRestore();
     }

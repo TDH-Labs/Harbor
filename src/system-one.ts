@@ -24,6 +24,8 @@
  * defined by the daemon, which this repository does not contain.
  */
 
+import { declaredLength, readBodyCapped } from "./http-util.ts";
+
 /** Default System One base URL. */
 export const SYSTEM_ONE_DEFAULT_URL = "http://127.0.0.1:8150";
 export const ROUTE_SKILLS_PATH = "/v1/route-skills";
@@ -138,26 +140,12 @@ export function parseRouteSkillsResponse(data: unknown): RouteSkillsAnswer | nul
 
 /** Read a response body, refusing more than `max` bytes (no unbounded buffering). */
 async function readCapped(res: Response, max: number): Promise<string | null> {
-  const declared = Number(res.headers.get("content-length"));
-  if (Number.isFinite(declared) && declared > max) {
+  const declared = declaredLength(res.headers);
+  if (declared !== null && declared > max) {
     await res.body?.cancel().catch(() => {});
     return null;
   }
-  if (!res.body) return "";
-  const reader = res.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > max) {
-      await reader.cancel().catch(() => {});
-      return null;
-    }
-    chunks.push(value);
-  }
-  return new TextDecoder().decode(Buffer.concat(chunks));
+  return readBodyCapped(res.body, max);
 }
 
 export interface RouteRequest {
