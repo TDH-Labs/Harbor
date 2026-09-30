@@ -48,6 +48,8 @@
     "./audit": "./src/audit.ts",
     "./evict": "./src/evict.ts",
     "./skills": "./src/skills.ts",
+    "./system-one": "./src/system-one.ts",
+    "./turn-sieve": "./src/turn-sieve.ts",
     "./reflexion": "./src/reflexion.ts",
     "./mcp": "./src/mcp.ts",
     "./skill-create": "./src/skill-create.ts",

@@ -204,6 +204,10 @@ export {
   renderRoomIndex,
   routeSkillsForTurn,
   searchSkills,
+  sieveLimits,
+  MIN_DETERMINISTIC_SCORE,
+  TURN_SIEVE_DEFAULT_MAX,
+  TURN_SIEVE_ESCALATED_MAX,
 } from "./skills.ts";
 export type {
   SkillRecord,
@@ -213,6 +217,19 @@ export type {
   TurnSieveResult,
   RouteSkillsOptions,
 } from "./skills.ts";
+
+// ── System One router client + session-scoped Turn-Sieve ─────────────────────
+export {
+  DEFAULT_RESERVED_PORTS,
+  ROUTE_SKILLS_PATH,
+  SYSTEM_ONE_DEFAULT_URL,
+  parseRouteSkillsResponse,
+  requestRouteSkills,
+  resolveRouteSkillsEndpoint,
+} from "./system-one.ts";
+export type { EndpointResolution, RouteSkillsAnswer } from "./system-one.ts";
+export { formatTurnRoute, routeTurn } from "./turn-sieve.ts";
+export type { RouteTurnResult } from "./turn-sieve.ts";
 
 // ── Reflexion episodic memory ───────────────────────────────────────────────
 export { logReflexionEvent, getReflexionLessons, sanitizeRemedy } from "./reflexion.ts";

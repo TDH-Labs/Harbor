@@ -92,6 +92,17 @@ export interface RawConfig {
     /** Per-room session budget overrides. */
     rooms: Record<string, number>;
   };
+  /** Optional System One router daemon (Turn-Sieve). Absent daemon ⇒ keyword fallback. */
+  system_one: {
+    /** Base URL; "" ⇒ the built-in default (see system-one.ts). Env vars override. */
+    url: string;
+    /** Per-turn wait budget in ms before falling back. */
+    timeout_ms: number;
+    /** Skills per turn (clamped 1..5). */
+    max_skills: number;
+    /** Skills per turn when the router flags it cross-domain (clamped max_skills..5). */
+    max_skills_escalated: number;
+  };
 }
 
 // ── Built-in defaults ────────────────────────────────────────────────────────
@@ -175,6 +186,12 @@ export const DEFAULTS: RawConfig = {
     default_session_limit: 100_000,
     default_room_daily_limit: 500_000,
     rooms: {},
+  },
+  system_one: {
+    url: "",
+    timeout_ms: 45,
+    max_skills: 3,
+    max_skills_escalated: 5,
   },
 };
 
@@ -434,6 +451,21 @@ export class Config {
   }
   get defaultRoomDailyLimit(): number {
     return Number(this.data.budgets.default_room_daily_limit);
+  }
+
+  /**
+   * Turn-Sieve / System One settings, with a config that predates `[system_one]`
+   * (or holds a non-number) falling back to the defaults rather than NaN.
+   */
+  get systemOne(): { url: string; timeoutMs: number; maxSkills: number; escalatedMaxSkills: number } {
+    const so = (this.data.system_one ?? {}) as Partial<RawConfig["system_one"]>;
+    const num = (v: unknown, d: number): number => (typeof v === "number" && Number.isFinite(v) ? v : d);
+    return {
+      url: typeof so.url === "string" ? so.url : DEFAULTS.system_one.url,
+      timeoutMs: num(so.timeout_ms, DEFAULTS.system_one.timeout_ms),
+      maxSkills: num(so.max_skills, DEFAULTS.system_one.max_skills),
+      escalatedMaxSkills: num(so.max_skills_escalated, DEFAULTS.system_one.max_skills_escalated),
+    };
   }
 
   /**

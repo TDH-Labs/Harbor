@@ -119,6 +119,7 @@ describe("MCP protocol", () => {
       "list_rooms",
       "list_skills",
       "read_skill",
+      "route_skills",
       "search_skills",
     ]);
     for (const t of result.tools) expect(t.inputSchema).toHaveProperty("type", "object");
@@ -569,5 +570,94 @@ describe("sequential skill execution tools (search_skills, activate_skill, deact
     const res = await call(server, "deactivate_skill", {}, 2);
     expect(isError(res)).toBe(false);
     expect(toolText(res)).toContain("deactivated");
+  });
+});
+
+// ── route_skills (Turn-Sieve) ─────────────────────────────────────────────────
+
+describe("route_skills (Turn-Sieve tool)", () => {
+  // The suite must never depend on a router the developer happens to be running.
+  let savedUrl: string | undefined;
+  beforeEach(() => {
+    savedUrl = process.env.HARBOR_SYSTEM_ONE_URL;
+    process.env.HARBOR_SYSTEM_ONE_URL = "http://127.0.0.1:59994"; // nothing listens here
+  });
+  afterEach(() => {
+    if (savedUrl === undefined) delete process.env.HARBOR_SYSTEM_ONE_URL;
+    else process.env.HARBOR_SYSTEM_ONE_URL = savedUrl;
+  });
+
+  const rooms = {
+    legal: { skills: ["nda-review", "case-brief"], capabilities: READ_CAPS, budget: 50000 },
+    finance: { skills: ["payroll-secrets"], capabilities: READ_CAPS, budget: 50000 },
+    locked: { skills: ["nda-review"], capabilities: ["read_skill"], budget: 50000 },
+  };
+  const skills = {
+    "nda-review": skillMd("nda-review", "Review NDA agreements"),
+    "case-brief": skillMd("case-brief", "Summarize a court case"),
+    "payroll-secrets": skillMd("payroll-secrets", "Run payroll and read salary data"),
+  };
+
+  test("is advertised with a required prompt", async () => {
+    const server = serverFor(makeEnv({ rooms, skills }), "legal", "s1");
+    const res = await server.handle({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+    const tool = (res!.result as { tools: Array<{ name: string; inputSchema: { required?: string[] } }> }).tools.find(
+      (t) => t.name === "route_skills",
+    );
+    expect(tool?.inputSchema.required).toEqual(["prompt"]);
+  });
+
+  test("routes to the room's skills and names its source; another room's skill never appears", async () => {
+    const server = serverFor(makeEnv({ rooms, skills }), "legal", "s1");
+    const res = await call(server, "route_skills", { prompt: "please run nda-review on this contract" });
+    expect(isError(res)).toBe(false);
+    const out = toolText(res);
+    expect(out).toContain("nda-review: Review NDA agreements");
+    expect(out).toContain("keyword match");
+    expect(out).toContain("activate_skill");
+    expect(out).not.toContain("payroll-secrets");
+  });
+
+  test("requires a prompt", async () => {
+    const server = serverFor(makeEnv({ rooms, skills }), "legal", "s1");
+    const res = await call(server, "route_skills", { prompt: "   " });
+    expect(isError(res)).toBe(true);
+    expect(toolText(res)).toContain("prompt is required");
+  });
+
+  test("rides the search_skills capability: a room without it is denied", async () => {
+    const server = serverFor(makeEnv({ rooms, skills }), "locked", "s1");
+    const res = await call(server, "route_skills", { prompt: "nda-review" });
+    expect(isError(res)).toBe(true);
+    expect(toolText(res)).toContain("access denied");
+  });
+
+  test("a cross-room override is denied and audited", async () => {
+    const env = makeEnv({ rooms, skills });
+    const server = serverFor(env, "legal", "s1");
+    const res = await call(server, "route_skills", { prompt: "payroll", room: "finance" });
+    expect(isError(res)).toBe(true);
+    expect(toolText(res)).toContain("may not route skills for room 'finance'");
+    expect(auditRead(env, { room: "legal" }).some((a) => a.capability === "route_skills" && a.decision === "denied")).toBe(
+      true,
+    );
+  });
+
+  test("a hostile daemon on the wire cannot smuggle another room's skill through the tool", async () => {
+    const liar = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch: () => Response.json({ selectedSkills: ["payroll-secrets", "case-brief"], crossDomain: true }),
+    });
+    process.env.HARBOR_SYSTEM_ONE_URL = `http://127.0.0.1:${liar.port}`;
+    try {
+      const server = serverFor(makeEnv({ rooms, skills }), "legal", "s1");
+      const out = toolText(await call(server, "route_skills", { prompt: "summarize the case" }));
+      expect(out).toContain("via System One");
+      expect(out).toContain("case-brief");
+      expect(out).not.toContain("payroll-secrets");
+    } finally {
+      liar.stop(true);
+    }
   });
 });

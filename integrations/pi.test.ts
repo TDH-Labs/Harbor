@@ -25,6 +25,7 @@ import {
   piContext,
   readSkill,
   registerHarborSkills,
+  routeSkillsTool,
   type PiToolDefinition,
 } from "./pi.ts";
 
@@ -202,6 +203,7 @@ describe("registerHarborSkills (Pi extension adapter)", () => {
       "deactivate_skill",
       "list_skills",
       "read_skill",
+      "route_skills",
       "search_skills",
     ]);
     for (const t of tools) expect(t.parameters).toHaveProperty("type", "object");
@@ -229,5 +231,37 @@ describe("registerHarborSkills (Pi extension adapter)", () => {
     const listTool = tools.find((t) => t.name === "list_skills")!;
     const listed = await listTool.execute("call-2", {});
     expect(listed.content[0]!.text).toContain("nda-review");
+  });
+});
+
+describe("routeSkillsTool (Turn-Sieve, in-process)", () => {
+  test("routes within the session's room and refuses a cross-room override", async () => {
+    const saved = process.env.HARBOR_SYSTEM_ONE_URL;
+    process.env.HARBOR_SYSTEM_ONE_URL = "http://127.0.0.1:59993"; // nothing listens: keyword fallback
+    try {
+      const env = makeEnv(
+        {
+          legal: { skills: ["nda-review"], capabilities: READ_CAPS },
+          finance: { skills: ["payroll-secrets"], capabilities: READ_CAPS },
+        },
+        { "nda-review": skillMd("nda-review"), "payroll-secrets": skillMd("payroll-secrets") },
+      );
+      const ctx = ctxFor(env, "legal", "sess-route");
+
+      const ok = await routeSkillsTool(ctx, "please run nda-review");
+      expect(ok.content[0]!.text).toContain("nda-review");
+      expect(ok.content[0]!.text).not.toContain("payroll-secrets");
+      expect(ok.details?.selected).toEqual(["nda-review"]);
+
+      const denied = await routeSkillsTool(ctx, "payroll", "finance");
+      expect(denied.content[0]!.text).toContain("Access denied");
+      expect(denied.details?.error).toBe("access_denied");
+
+      const empty = await routeSkillsTool(ctx, "  ");
+      expect(empty.details?.error).toBe("empty_prompt");
+    } finally {
+      if (saved === undefined) delete process.env.HARBOR_SYSTEM_ONE_URL;
+      else process.env.HARBOR_SYSTEM_ONE_URL = saved;
+    }
   });
 });

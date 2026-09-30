@@ -35,6 +35,11 @@ import { isAbsolute, join, resolve as resolvePath } from "node:path";
 import type { Config } from "./config.ts";
 import { Environment } from "./env.ts";
 import { isPathWithin } from "./path-safety.ts";
+import {
+  DEFAULT_TIMEOUT_MS,
+  requestRouteSkills,
+  resolveRouteSkillsEndpoint,
+} from "./system-one.ts";
 
 /** Max length of a one-line description before truncation (prototype: 100). */
 const DESC_MAX = 100;
@@ -742,15 +747,61 @@ function isRealDir(p: string): boolean {
 
 // ── Dynamic Turn-Sieve ───────────────────────────────────────────────────────
 
+/** Skills a turn may load by default. */
+export const TURN_SIEVE_DEFAULT_MAX = 3;
+/**
+ * Ceiling when System One flags the turn `crossDomain`. The flag comes from the
+ * classifier's answer, never from the prompt, and the deterministic fallback
+ * never escalates — a prompt cannot talk its way into a bigger context budget.
+ */
+export const TURN_SIEVE_ESCALATED_MAX = 5;
+/**
+ * A deterministic match scoring under this is noise (a single stray description
+ * word scores 10). Requiring 20 means two description hits or one name token.
+ */
+export const MIN_DETERMINISTIC_SCORE = 20;
+
 export interface TurnSieveResult {
   selectedSkills: string[];
   selectedTools: string[];
   promptTokenSavingsPct: number;
+  /** Who produced the selection. */
+  source: "system-one" | "deterministic";
+  /** System One flagged the turn as spanning domains (selection may exceed the base cap). */
+  crossDomain: boolean;
+  /**
+   * Skill names System One returned that are NOT in the room's available skills
+   * and were discarded. For server-side audit only — do not show to the agent
+   * (the names belong to other rooms).
+   */
+  dropped: string[];
+  /** Why the deterministic fallback ran instead of System One, when it did. */
+  fallbackReason?: string;
 }
 
 export interface RouteSkillsOptions {
+  /** Full route-skills URL (or base URL). See system-one.ts for precedence. */
   endpoint?: string;
   timeoutMs?: number;
+  /** Base URL from config (`[system_one] url`). */
+  configUrl?: string;
+  reservedPorts?: readonly number[];
+  /** Base cap (default {@link TURN_SIEVE_DEFAULT_MAX}, clamped to 1..5). */
+  maxSkills?: number;
+  /** Cross-domain cap (default {@link TURN_SIEVE_ESCALATED_MAX}, clamped to base..5). */
+  escalatedMaxSkills?: number;
+}
+
+/** Clamp the configured caps into a sane, ordered pair (base ≤ escalated ≤ 5). */
+export function sieveLimits(maxSkills?: number, escalatedMaxSkills?: number): { base: number; escalated: number } {
+  const int = (v: number | undefined, dflt: number): number =>
+    typeof v === "number" && Number.isFinite(v) ? Math.trunc(v) : dflt;
+  const base = Math.min(TURN_SIEVE_ESCALATED_MAX, Math.max(1, int(maxSkills, TURN_SIEVE_DEFAULT_MAX)));
+  const escalated = Math.min(
+    TURN_SIEVE_ESCALATED_MAX,
+    Math.max(base, int(escalatedMaxSkills, TURN_SIEVE_ESCALATED_MAX)),
+  );
+  return { base, escalated };
 }
 
 const STOP_WORDS = new Set([
@@ -774,25 +825,33 @@ function calculateSavingsPct(availableCount: number, selectedCount: number): num
   return Math.max(0, Math.min(100, Math.round(((availableCount - selectedCount) / availableCount) * 100)));
 }
 
+/** Union of `recommendedTools` across `skills`, in first-seen order. */
+function toolsOf(skills: Iterable<SkillRecord>): string[] {
+  const out = new Set<string>();
+  for (const s of skills) for (const t of s.recommendedTools ?? []) out.add(t);
+  return [...out];
+}
+
 /**
- * Deterministically match available skills against the turn prompt using keyword heuristics.
+ * Deterministically match available skills against the turn prompt using keyword
+ * heuristics, returning at most `maxSkills` (default {@link TURN_SIEVE_DEFAULT_MAX};
+ * pass `Infinity` for every match). Weak matches (< {@link MIN_DETERMINISTIC_SCORE})
+ * are dropped. Never escalates: only System One can flag a turn cross-domain.
  */
 export function matchSkillsDeterministically(
   turnPrompt: string,
   room: string,
   availableSkills: SkillRecord[],
+  maxSkills: number = TURN_SIEVE_DEFAULT_MAX,
 ): TurnSieveResult {
+  const base = { source: "deterministic" as const, crossDomain: false, dropped: [] as string[] };
   if (availableSkills.length === 0) {
-    return { selectedSkills: [], selectedTools: [], promptTokenSavingsPct: 0 };
+    return { selectedSkills: [], selectedTools: [], promptTokenSavingsPct: 0, ...base };
   }
 
   const promptLower = turnPrompt.toLowerCase().trim();
   if (!promptLower) {
-    return {
-      selectedSkills: [],
-      selectedTools: [],
-      promptTokenSavingsPct: 100,
-    };
+    return { selectedSkills: [], selectedTools: [], promptTokenSavingsPct: 100, ...base };
   }
 
   const rawTokens = promptLower.split(/[^a-zA-Z0-9_\-]+/).filter(Boolean);
@@ -848,130 +907,114 @@ export function matchSkillsDeterministically(
       }
     }
 
-    if (score > 0) {
+    if (score >= MIN_DETERMINISTIC_SCORE) {
       scored.push({ skill, score });
     }
   }
 
   scored.sort((a, b) => b.score - a.score || a.skill.name.localeCompare(b.skill.name));
 
-  const selectedSkills = scored.map((s) => s.skill.name);
-
-  const toolsSet = new Set<string>();
-  for (const item of scored) {
-    if (item.skill.recommendedTools) {
-      for (const tool of item.skill.recommendedTools) {
-        toolsSet.add(tool);
-      }
-    }
-  }
-  const selectedTools = Array.from(toolsSet);
-
-  const promptTokenSavingsPct = calculateSavingsPct(
-    availableSkills.length,
-    selectedSkills.length,
-  );
+  const cap = Number.isFinite(maxSkills) ? Math.max(0, Math.trunc(maxSkills)) : scored.length;
+  const picked = scored.slice(0, cap).map((s) => s.skill);
+  const selectedSkills = picked.map((s) => s.name);
 
   return {
     selectedSkills,
-    selectedTools,
-    promptTokenSavingsPct,
+    selectedTools: toolsOf(picked),
+    promptTokenSavingsPct: calculateSavingsPct(availableSkills.length, selectedSkills.length),
+    ...base,
   };
 }
 
 /**
  * Route relevant skills and tools for an agent turn.
- * Calls daemon at http://127.0.0.1:8000/v1/route-skills with sub-50ms timeout.
- * Falls back gracefully to deterministic keyword matching if daemon is unreachable or times out.
+ *
+ * `availableSkills` MUST already be limited to what the caller's room may load
+ * (e.g. `listSkills(env, room)`): the router's answer is intersected with it,
+ * which is what stops a wrong or hostile daemon from naming another room's
+ * skills. System One is asked first (sub-50ms budget); on any failure — down,
+ * slow, refused endpoint, malformed or all-foreign answer — this falls back to
+ * {@link matchSkillsDeterministically}, and `fallbackReason` says why.
+ *
+ * Caps: {@link TURN_SIEVE_DEFAULT_MAX} skills, {@link TURN_SIEVE_ESCALATED_MAX}
+ * only when System One flags the turn `crossDomain`. Tool names come from the
+ * selected skills' own frontmatter; a tool the router adds is accepted only if
+ * some available skill already recommends it, so the router cannot inject
+ * arbitrary text into the advisory tool list.
  */
 export async function routeSkillsForTurn(
   turnPrompt: string,
   room: string,
   availableSkills: SkillRecord[],
-  options?: RouteSkillsOptions,
+  options: RouteSkillsOptions = {},
 ): Promise<TurnSieveResult> {
   if (availableSkills.length === 0) {
-    return { selectedSkills: [], selectedTools: [], promptTokenSavingsPct: 0 };
+    return {
+      selectedSkills: [],
+      selectedTools: [],
+      promptTokenSavingsPct: 0,
+      source: "deterministic",
+      crossDomain: false,
+      dropped: [],
+    };
   }
 
-  const endpoint =
-    options?.endpoint ??
-    process.env.HARBOR_ROUTE_SKILLS_ENDPOINT ??
-    "http://127.0.0.1:8000/v1/route-skills";
-  const timeoutMs = options?.timeoutMs ?? 45;
+  const limits = sieveLimits(options.maxSkills, options.escalatedMaxSkills);
+  const fallback = (reason: string, dropped: string[] = []): TurnSieveResult => ({
+    ...matchSkillsDeterministically(turnPrompt, room, availableSkills, limits.base),
+    dropped,
+    fallbackReason: reason,
+  });
 
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const resolved = resolveRouteSkillsEndpoint({
+    ...(options.endpoint ? { endpoint: options.endpoint } : {}),
+    ...(options.configUrl ? { configUrl: options.configUrl } : {}),
+    ...(options.reservedPorts ? { reservedPorts: options.reservedPorts } : {}),
+  });
+  if (!resolved.ok) return fallback(resolved.reason);
 
-    try {
-      const res = await fetch(endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          prompt: turnPrompt,
-          room,
-          availableSkills: availableSkills.map((s) => ({
-            name: s.name,
-            description: s.description,
-            recommendedTools: s.recommendedTools,
-          })),
-        }),
-        signal: controller.signal,
-      });
+  const outcome = await requestRouteSkills(
+    resolved.endpoint,
+    {
+      prompt: turnPrompt,
+      room,
+      availableSkills: availableSkills.map((s) => ({
+        name: s.name,
+        description: s.description,
+        recommendedTools: s.recommendedTools,
+      })),
+    },
+    options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+  );
+  if (!outcome.ok) return fallback(outcome.reason);
 
-      if (res.ok) {
-        const data = (await res.json()) as any;
-        if (data && typeof data === "object") {
-          const selectedSkills: string[] = Array.isArray(data.selectedSkills)
-            ? data.selectedSkills
-            : Array.isArray(data.selected_skills)
-            ? data.selected_skills
-            : Array.isArray(data.skills)
-            ? data.skills
-            : [];
-
-          let selectedTools: string[] = Array.isArray(data.selectedTools)
-            ? data.selectedTools
-            : Array.isArray(data.selected_tools)
-            ? data.selected_tools
-            : Array.isArray(data.tools)
-            ? data.tools
-            : [];
-
-          if (selectedTools.length === 0) {
-            const skillMap = new Map(availableSkills.map((s) => [s.name, s]));
-            const toolsSet = new Set<string>();
-            for (const name of selectedSkills) {
-              const rec = skillMap.get(name);
-              if (rec?.recommendedTools) {
-                for (const t of rec.recommendedTools) toolsSet.add(t);
-              }
-            }
-            selectedTools = Array.from(toolsSet);
-          }
-
-          const promptTokenSavingsPct: number =
-            typeof data.promptTokenSavingsPct === "number"
-              ? data.promptTokenSavingsPct
-              : typeof data.prompt_token_savings_pct === "number"
-              ? data.prompt_token_savings_pct
-              : calculateSavingsPct(availableSkills.length, selectedSkills.length);
-
-          return {
-            selectedSkills,
-            selectedTools,
-            promptTokenSavingsPct,
-          };
-        }
-      }
-    } finally {
-      clearTimeout(timer);
-    }
-  } catch {
-    // Daemon unreachable, timed out, or network failure -> fallback to deterministic matching
+  const byName = new Map(availableSkills.map((s) => [s.name, s]));
+  const seen = new Set<string>();
+  const kept: string[] = [];
+  const dropped: string[] = [];
+  for (const name of outcome.answer.skills) {
+    if (seen.has(name)) continue;
+    seen.add(name);
+    (byName.has(name) ? kept : dropped).push(name);
+  }
+  if (kept.length === 0 && dropped.length > 0) {
+    return fallback("System One named only skills outside this room; answer ignored", dropped);
   }
 
-  return matchSkillsDeterministically(turnPrompt, room, availableSkills);
+  const limit = outcome.answer.crossDomain ? limits.escalated : limits.base;
+  const selectedSkills = kept.slice(0, limit);
+  const chosen = selectedSkills.map((n) => byName.get(n) as SkillRecord);
+
+  const known = new Set(toolsOf(availableSkills));
+  const selectedTools = new Set(toolsOf(chosen));
+  for (const t of outcome.answer.tools) if (known.has(t)) selectedTools.add(t);
+
+  return {
+    selectedSkills,
+    selectedTools: [...selectedTools],
+    promptTokenSavingsPct: calculateSavingsPct(availableSkills.length, selectedSkills.length),
+    source: "system-one",
+    crossDomain: outcome.answer.crossDomain,
+    dropped,
+  };
 }
-

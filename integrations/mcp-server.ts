@@ -11,6 +11,8 @@
  *
  * Tools (room-gating + budget enforcement happen INSIDE the server, via Phase 3's
  * `gate()` / `checkBudget()` / `spendBudget()` — not in the agent):
+ *   - route_skills(prompt)     Turn-Sieve: the 1-3 skills (5 if cross-domain) that
+ *                              fit a task, from the session's room only
  *   - read_skill(skill_name)   load a skill's SKILL.md, gated + budgeted
  *   - list_skills(room?)       list pool skills for the session's room
  *   - list_rooms()             every configured room's name + description, no
@@ -58,6 +60,7 @@ import {
   normalizeRoomEnv,
   AgentSession,
   RoomJailViolation,
+  routeTurn,
 } from "harbor-tugboat";
 import pkg from "../package.json" with { type: "json" };
 
@@ -133,6 +136,23 @@ export const TOOL_DEFINITIONS = [
         limit: { type: "number", description: "Max results to return (default 5, max 50)." },
       },
       required: ["query"],
+    },
+  },
+  {
+    name: "route_skills",
+    description:
+      "Pick the 1-3 skills (up to 5 when the task spans domains) from THIS room that best fit " +
+      "the task you are about to do. Call it at the start of a task and whenever the topic " +
+      "changes, then activate_skill what it names. Uses the System One router when reachable, " +
+      "otherwise keyword matching; the answer says which. Returns names and one-line " +
+      "descriptions only, so it costs a few dozen tokens instead of listing the whole room.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        prompt: { type: "string", description: "The task or user request you are about to work on." },
+        room: { type: "string", description: "Optional room override (defaults to the session room)." },
+      },
+      required: ["prompt"],
     },
   },
   {
@@ -246,6 +266,8 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
   const readSkillGated = gate("read_skill", readSkillImpl);
   const listSkillsGated = gate("list_skills", listSkillsImpl);
   const searchSkillsGated = gate("search_skills", searchSkillsImpl);
+  // Routing is a room-scoped search variant, so it rides the same capability.
+  const routeSkillsGated = gate("search_skills", routeSkillsImpl);
   const activateSkillGated = gate("activate_skill", activateSkillImpl);
   const deactivateSkillGated = gate("deactivate_skill", deactivateSkillImpl);
 
@@ -257,6 +279,12 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
         const room = typeof args.room === "string" && args.room ? args.room : undefined;
         const limit = typeof args.limit === "number" ? args.limit : 5;
         return searchSkillsGated(query, room, limit);
+      }
+      case "route_skills": {
+        const prompt = typeof args.prompt === "string" ? args.prompt.trim() : "";
+        if (!prompt) return errorResult("route_skills: prompt is required.");
+        const room = typeof args.room === "string" && args.room ? args.room : undefined;
+        return routeSkillsGated(prompt, room);
       }
       case "activate_skill": {
         const skill = typeof args.skill_name === "string" ? args.skill_name.trim() : "";
@@ -325,7 +353,8 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
               serverInfo: SERVER_INFO,
               instructions:
                 "This channel has curated skills for the work done here. BEFORE you start " +
-                "a task, call list_skills to see what's available, and read_skill to load any " +
+                "a task, call route_skills with the task to get the few skills that fit " +
+                "(or list_skills to see everything), and read_skill to load any " +
                 "whose description fits — a matching skill's instructions are authoritative, so " +
                 "prefer following one over improvising. Skills are gated by room and token " +
                 "budget; denials and budget limits are enforced server-side and surfaced as " +
@@ -420,6 +449,12 @@ async function searchSkillsImpl(
   }
   lines.push("", "To load a skill sequentially, call: activate_skill({ skill_name: '<name>' })");
   return text(lines.join("\n"));
+}
+
+/** Route a turn to the room's 1-3 most relevant skills (Turn-Sieve; see turn-sieve.ts). */
+async function routeSkillsImpl(prompt: string, roomOverride?: string): Promise<ToolResult> {
+  const r = await routeTurn(currentGateContext(), prompt, roomOverride);
+  return r.ok ? text(r.text) : errorResult(r.text);
 }
 
 /** Activate a skill for sequential execution, debiting the budget and setting session activeSkill. */
