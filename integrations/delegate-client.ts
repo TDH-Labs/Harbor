@@ -189,8 +189,13 @@ export class PersonSession {
     // retrying once cannot repeat an effect.
     if (res.status === 404 && !retried) {
       void res.body?.cancel();
-      this.sessionId = null;
-      this.opening = null;
+      // Forget the session only if it is still the one that just failed. Concurrent
+      // calls all hit the same 404; the first resets and re-opens, and the rest must
+      // join that one new session instead of each opening (and orphaning) their own.
+      if (this.sessionId === sid) {
+        this.sessionId = null;
+        this.opening = null;
+      }
       return this.rpc(method, params, true);
     }
     await DelegateClient.expectOk(res);

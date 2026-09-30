@@ -657,22 +657,29 @@ function budgetStatusImpl(): ToolResult {
 }
 
 /**
- * Recent audit entries scoped to the session's room.
+ * Recent audit entries for the session's room.
  *
- * A session that has an identity (every Harbor Server session: the person, or the
- * token) is shown only ITS OWN rows. The room-wide log names other people, the skills
- * they loaded, and — since sensitivity labels — which names sit above a ceiling; a
- * bring-your-own agent must not be able to read that back. A session with no identity
- * (Harbor Core, one operator) keeps the room-wide view. Sensitivity denials are shown
- * in the words the agent was given at the time, and `limit` is bounded.
+ * A session that has an identity (every Harbor Server session) is shown only the rows
+ * of THIS SESSION — not its person's, because one person can hold several credentials
+ * at once (a capped bring-your-own token and a house agent acting for them), and what
+ * the uncapped one loaded must not be readable by the capped one. It also needs the
+ * `audit_read` capability, which no room holds by default, so the operator can leave
+ * it off entirely. A session with no identity (Harbor Core, one operator) keeps the
+ * room-wide view. Sensitivity denials are shown in the words the agent was given at
+ * the time, and `limit` is bounded.
  */
 function auditRecentImpl(limit: number): ToolResult {
   const { env, session } = currentGateContext();
+  if (session.strictRoom && !session.has(Capability.AUDIT_READ)) {
+    const reason = `session lacks capability '${Capability.AUDIT_READ}'`;
+    audit.deny(session.sessionId, "audit_recent", "", reason, { room: session.room, agentId: session.agentId, env });
+    return errorResult(`access denied: ${reason}.`);
+  }
   const n = Math.min(100, Math.max(1, Math.trunc(Number.isFinite(limit) ? limit : 10)));
   const entries = audit.recent({
     env,
     room: session.room,
-    ...(session.agentId ? { agentId: session.agentId } : {}),
+    ...(session.agentId ? { sessionId: session.sessionId } : {}),
     limit: n,
   });
   if (entries.length === 0) return text(`No audit entries for room '${session.room}'.`);

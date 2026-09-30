@@ -2,7 +2,9 @@
 #
 #   docker compose up -d
 #   docker compose exec harbor bun src/cli.ts tenant create acme
-#   docker compose exec harbor bun src/cli.ts token create --tenant acme --room general
+#   docker compose exec harbor bun src/cli.ts tenant add-room acme --room legal
+#   (install a skill into it, see docs/CLOUD.md, then:)
+#   docker compose exec harbor bun src/cli.ts token create --tenant acme --room legal
 #
 # With TLS (a Caddy reverse proxy that gets certificates automatically):
 #   HARBOR_DOMAIN=harbor.example.com docker compose --profile tls up -d

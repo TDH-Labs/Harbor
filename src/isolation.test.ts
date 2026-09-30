@@ -270,10 +270,17 @@ describe("strictRoom — a configured room with no skills grants nothing", () =>
     expect(legal.roomSkillAllowed(env, "payroll")).toBe(false);
   });
 
-  test("strict: the UNCONFIGURED default room stays unrestricted (a fresh install still works); other unknown rooms stay denied", () => {
+  test("strict: the UNCONFIGURED default room grants NOTHING on a server (it would read every room's skills); other unknown rooms too", () => {
     const env = envWithRooms(rooms);
-    expect(new AgentSession({ room: env.config.skillDefaultRoom, strictRoom: true }).roomSkillAllowed(env, "x")).toBe(true);
+    expect(new AgentSession({ room: env.config.skillDefaultRoom, strictRoom: true }).roomSkillAllowed(env, "x")).toBe(false);
+    expect(new AgentSession({ room: env.config.skillDefaultRoom, strictRoom: true }).roomSkillAllowed(env, "nda-review")).toBe(false);
     expect(new AgentSession({ room: "typo", strictRoom: true }).roomSkillAllowed(env, "x")).toBe(false);
+  });
+
+  test("non-strict (Core): the unconfigured default room is still unrestricted — a fresh single-operator install works", () => {
+    const env = envWithRooms(rooms);
+    expect(new AgentSession({ room: env.config.skillDefaultRoom }).roomSkillAllowed(env, "x")).toBe(true);
+    expect(new AgentSession({ room: "typo" }).roomSkillAllowed(env, "x")).toBe(false);
   });
 
   test("createSession threads the flag through", () => {

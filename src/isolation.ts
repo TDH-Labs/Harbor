@@ -184,11 +184,13 @@ export class AgentSession {
    * room read a legal-room skill's full content while the correctly-scoped
    * `productivity` room was properly denied the same skill.
    *
-   * The configured default room is exempt: a fresh install legitimately runs
-   * in a default room (e.g. "general") that has no `[skills.rooms.*]` section
-   * yet, and that has always meant "unrestricted" — see skill-install.ts's
-   * isDefaultRoom branch, which likewise declines to write a config entry for
-   * it. Every OTHER unconfigured room is an error state, not a wildcard.
+   * The configured default room is exempt on a NON-strict (Core) session: a fresh
+   * install legitimately runs in a default room (e.g. "general") that has no
+   * `[skills.rooms.*]` section yet, and that has always meant "unrestricted" — see
+   * skill-install.ts's isDefaultRoom branch, which likewise declines to write a
+   * config entry for it. On a STRICT (server) session it grants nothing until it is
+   * configured with a skill list. Every OTHER unconfigured room is an error state,
+   * not a wildcard.
    */
   roomSkillAllowed(env: Environment, skillName: string): boolean {
     const configured = env.config.hasRoom(this.room);
@@ -197,8 +199,10 @@ export class AgentSession {
     }
     const allowed = this.roomSkills(env);
     // Empty list ⇒ "no restriction configured" — except on a strict (server)
-    // session, where a configured-but-empty room grants nothing.
-    if (allowed.size === 0) return !(this.strictRoom && configured);
+    // session, where an empty room grants nothing. That includes the UNCONFIGURED
+    // default room: "unrestricted" is a single-operator convenience (Core), but on a
+    // server it would let a token for `general` read every room's skills.
+    if (allowed.size === 0) return !this.strictRoom;
     return allowed.has(skillName);
   }
 
@@ -470,7 +474,7 @@ export function auditLog(env: Environment, session: AgentSession, input: AuditLo
 /** Read recent audit entries, optionally filtered by room. */
 export function auditRead(
   env: Environment,
-  options: { room?: string; agentId?: string; limit?: number } = {},
+  options: { room?: string; agentId?: string; sessionId?: string; limit?: number } = {},
 ): AuditEntry[] {
   // Non-negative: SQLite treats a negative LIMIT as "no limit".
   const limit = Math.max(0, Math.trunc(options.limit ?? 50));
@@ -484,6 +488,10 @@ export function auditRead(
   if (options.agentId !== undefined) {
     where.push("agent_id = ?");
     params.push(options.agentId);
+  }
+  if (options.sessionId !== undefined) {
+    where.push("session_id = ?");
+    params.push(options.sessionId);
   }
   const rows = db
     .query(`SELECT * FROM audit_log${where.length ? ` WHERE ${where.join(" AND ")}` : ""} ORDER BY timestamp DESC LIMIT ?`)

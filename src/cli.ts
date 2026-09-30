@@ -2226,6 +2226,25 @@ function intOption(cmd: string, name: string, raw: string, min: number, max: num
 }
 
 /** Run `fn`, turning a TenantError into a one-line message and a non-zero exit. */
+/**
+ * A server session in a room with no configured skill list can read nothing (only
+ * Core treats that as "unrestricted"), so a token or grant for such a room is
+ * useless until skills are assigned. Say so rather than let it look broken.
+ */
+function warnIfRoomEmpty(cp: ControlPlane, tenantId: string, room: string): void {
+  if (!room) return;
+  try {
+    const r = cp.tenantEnvironment(tenantId).config.roomSkills[room];
+    if (r && (r.skills ?? []).length > 0) return;
+    console.error(
+      `note: room '${room}' has no skills configured for tenant '${tenantId}', so this can read nothing yet. ` +
+        `Install one with: harbor skill-install <dir> --room ${room} --config ${cp.tenantConfigPath(tenantId)}`,
+    );
+  } catch {
+    // the tenant environment is reported by the command itself
+  }
+}
+
 function tenantAction<T>(cmd: string, fn: () => T): T | undefined {
   try {
     return fn();
@@ -2460,6 +2479,7 @@ const tokenCmd = defineCommand({
           }),
         );
         if (!made) return;
+        warnIfRoomEmpty(cp, made.record.tenantId, made.record.room);
         if (args.json) return printJson({ token: made.token, ...made.record });
         console.log(made.token);
         console.error(
@@ -2602,6 +2622,7 @@ const principalCmd = defineCommand({
           }),
         );
         if (g) {
+          warnIfRoomEmpty(new ControlPlane(serverDataDir(args)), g.tenantId, g.room);
           console.log(`✓ a delegate token may act for '${g.principal}' in tenant '${g.tenantId}': room '${g.room}', up to ${g.clearance}`);
           console.log("  Takes effect on the person's next request. A session open under a different room or clearance is ended and must re-initialize.");
         }

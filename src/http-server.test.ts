@@ -844,12 +844,31 @@ describe("daily delivery quotas", () => {
     expect((await call(token, s2, "read_skill", { skill_name: "big-b" })).isError).toBe(false);
   });
 
-  test("a token with no quota is unmetered (and creates no usage rows)", async () => {
+  test("a token with no quota is never refused, but what it delivers is RECORDED against the person", async () => {
     seed();
     const { token } = cp.createToken({ tenantId: "acme", room: "legal", principal: "kim" });
     const sid = await init(token);
     for (const n of ["big-a", "big-b", "big-c"]) expect((await call(token, sid, "read_skill", { skill_name: n })).isError).toBe(false);
-    expect(cp.listPrincipals("acme", clock).find((p) => p.id === "kim")).toMatchObject({ usedTokensToday: 0 });
+    const kim = cp.listPrincipals("acme", clock).find((p) => p.id === "kim");
+    expect(kim?.usedReadsToday).toBe(3);
+    expect(kim?.usedTokensToday).toBeGreaterThan(0);
+  });
+
+  test("a limit on one credential counts what the person received through their OTHER credentials", async () => {
+    seed();
+    const free = cp.createToken({ tenantId: "acme", room: "legal", principal: "kim" }).token; // no limit of its own
+    const capped = cp.createToken({ tenantId: "acme", room: "legal", principal: "kim", dailyReadQuota: 3 }).token;
+    const f = await init(free);
+    const c = await init(capped);
+    expect((await call(free, f, "read_skill", { skill_name: "big-a" })).isError).toBe(false);
+    expect((await call(free, f, "read_skill", { skill_name: "big-b" })).isError).toBe(false);
+    expect((await call(capped, c, "read_skill", { skill_name: "big-a" })).isError).toBe(false); // the 3rd load today
+    const refused = await call(capped, c, "read_skill", { skill_name: "big-b" });
+    expect(refused.isError).toBe(true);
+    expect(refused.text).toMatch(/load quota/);
+    // ...but the free credential has no limit of its own, so a limit is only ever as strong as the credential that carries it
+    expect((await call(free, f, "read_skill", { skill_name: "big-c" })).isError).toBe(false);
+    expect(cp.listPrincipals("acme", clock).find((p) => p.id === "kim")?.usedReadsToday).toBe(4); // 4 deliveries, all recorded
   });
 
   test("the Core (stdio) server has no quota — nothing changes for a single-user install", async () => {

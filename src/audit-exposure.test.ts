@@ -21,6 +21,8 @@ import { agentFacingReason, denialReason } from "./sensitivity.ts";
 import { ControlPlane } from "./tenants.ts";
 
 const READ_CAPS = ["read_skill", "list_skills", "search_skills", "activate_skill", "deactivate_skill"];
+/** The capability a Server session needs for audit_recent; no room holds it by default. */
+const AUDIT_CAPS = [...READ_CAPS, "audit_read"];
 const BASE = "http://harbor.test";
 
 let dir: string;
@@ -39,7 +41,7 @@ beforeEach(() => {
     join(root, ".agent-env", "config.toml"),
     `[paths]\nhome = ${JSON.stringify(root)}\n\n` +
       Object.entries(rooms)
-        .map(([r, s]) => `[skills.rooms.${r}]\ndescription = "the ${r} room"\nskills = ${JSON.stringify(s)}\ncapabilities = ${JSON.stringify(READ_CAPS)}\n`)
+        .map(([r, s]) => `[skills.rooms.${r}]\ndescription = "the ${r} room"\nskills = ${JSON.stringify(s)}\ncapabilities = ${JSON.stringify(AUDIT_CAPS)}\n`)
         .join("\n") +
       `\n[skills.skill_sensitivity]\npub-guide = "public"\nsecret-plan = "restricted"\npayroll-run = "restricted"\nplan-b = "restricted"\n`,
   );
@@ -119,6 +121,34 @@ describe("what a session can read back about others", () => {
     expect(seenByLee).toContain("principal=lee@example.com"); // lee's own session_open is lee's to see
     const seenByKim = await kim.call("audit_recent", { limit: 100 });
     expect(seenByKim).toContain("payroll-run"); // your own history is yours
+  });
+
+  test("one PERSON with two credentials: the capped session cannot read what the uncapped one loaded", async () => {
+    // The configuration CLOUD.md recommends: a person's own agent (capped) and the house agent for them.
+    const delegate = cp.createToken({ tenantId: "acme", delegate: true }).token;
+    cp.setGrant("acme", "kim@example.com", { room: "team", clearance: "restricted" });
+    const byo = await new Client(cp.createToken({ tenantId: "acme", room: "team", principal: "kim@example.com", maxSensitivity: "public" }).token).open();
+    const house = await new Client(delegate, "kim@example.com").open();
+    await house.call("read_skill", { skill_name: "payroll-run" });
+    expect(await byo.call("read_skill", { skill_name: "payroll-run" })).toContain("not in room");
+
+    const seen = await byo.call("audit_recent", { limit: 100 });
+    expect(seen).not.toMatch(/loaded \d+ tokens/); // the house agent's successful read of a restricted skill
+    expect(seen).not.toContain("via=delegate");
+    expect(seen).not.toMatch(/ceiling=restricted/);
+    const denied = seen.split("\n").filter((l) => l.startsWith("denied"));
+    expect(denied).toEqual(["denied  read_skill payroll-run — skill 'payroll-run' not in room 'team'"]); // own refusal, as it saw it
+    // and the reverse: what the house agent sees is its own
+    expect(await house.call("audit_recent", { limit: 100 })).not.toContain("not in room");
+  });
+
+  test("a Server session needs the audit_read capability; without it audit_recent is refused and the refusal is audited", async () => {
+    const plain = await new Client(cp.createToken({ tenantId: "acme", room: "team", principal: "p@example.com", capabilities: ["read_skill", "list_skills"] }).token).open();
+    const out = await plain.call("audit_recent", { limit: 10 });
+    expect(out).toContain("lacks capability 'audit_read'");
+    expect(out).not.toMatch(/session_open|allowed/);
+    const env = cp.tenantEnvironment("acme");
+    expect(auditRead(env, { sessionId: plain.sid }).some((r) => r.decision === "denied" && r.capability === "audit_recent")).toBe(true);
   });
 
   test("limit is bounded: negative and enormous values cannot dump the log", async () => {

@@ -90,6 +90,8 @@ interface HttpSession {
   room: string;
   /** The sensitivity ceiling the session was opened with. */
   ceiling: Sensitivity | null;
+  /** The capabilities it was opened with, as a stable key: a config edit that changes them ends the session. */
+  capsKey: string;
   agent: AgentSession;
   lastSeen: number;
 }
@@ -142,6 +144,8 @@ export function sessionCapabilities(
   if (auth.adminAllowed && auth.capabilities?.includes("admin")) caps = [...caps, "admin"];
   return caps;
 }
+
+const capsKey = (caps: readonly string[]): string => [...caps].sort().join(",");
 
 // ── handler ──────────────────────────────────────────────────────────────────
 
@@ -363,6 +367,7 @@ export function createServerHandler(options: ServerOptions): ServerHandler {
         principal: auth.principal,
         room: auth.room,
         ceiling: auth.maxSensitivity,
+        capsKey: capsKey(caps),
         agent,
         lastSeen: now(),
       };
@@ -374,6 +379,15 @@ export function createServerHandler(options: ServerOptions): ServerHandler {
       if (sid === null) return json(400, { error: "missing_mcp_session_id" });
       session = liveSession(sid, auth);
       if (!session) return json(404, { error: "unknown_session" }); // client must re-initialize
+      // A session carries the capabilities it was opened with. If the operator has
+      // since edited the room's capabilities (or the token's ceiling was re-read
+      // differently), end the session so nothing outlives the entitlements it was
+      // opened under — the client re-initializes and gets the current ones.
+      if (session.capsKey !== capsKey(sessionCapabilities(env.config.roomCapabilities(auth.room), auth))) {
+        sessions.delete(session.id);
+        note("deny", "capabilities_changed");
+        return json(404, { error: "unknown_session" });
+      }
       note("session", session.id.slice(0, 8));
     }
 
@@ -382,22 +396,22 @@ export function createServerHandler(options: ServerOptions): ServerHandler {
     // Delivery is capped per PERSON (per token when there is none), across every
     // session and token they hold — so opening more sessions buys no more content.
     const subject = usageSubject(auth.principal, auth.tokenId);
-    const quota: DeliveryQuota | undefined =
-      auth.dailyTokenQuota === null && auth.dailyReadQuota === null
-        ? undefined
-        : {
-            charge: (tokens) => {
-              const r = cp.chargeUsage(
-                auth.tenantId,
-                subject,
-                { tokens, reads: 1 },
-                { tokens: auth.dailyTokenQuota, reads: auth.dailyReadQuota },
-                now(),
-              );
-              return r.ok ? { ok: true } : { ok: false, reason: r.reason };
-            },
-          };
-    const ctx: GateContext = { env, session: session.agent, ...(quota ? { quota } : {}) };
+    // ALWAYS built, even when this credential has no limit: delivery is recorded
+    // against the person either way, so what `principal list` reports (and what a
+    // limit on another of their credentials counts) is what was actually delivered.
+    const quota: DeliveryQuota = {
+      charge: (tokens) => {
+        const r = cp.chargeUsage(
+          auth.tenantId,
+          subject,
+          { tokens, reads: 1 },
+          { tokens: auth.dailyTokenQuota, reads: auth.dailyReadQuota },
+          now(),
+        );
+        return r.ok ? { ok: true } : { ok: false, reason: r.reason };
+      },
+    };
+    const ctx: GateContext = { env, session: session.agent, quota };
     // trustConfigSystemOneUrl:false — a tenant's config must not be able to aim
     // the server's outbound requests at an arbitrary host (SSRF).
     const server = createMcpServer({ env, resolveContext: () => ctx, trustConfigSystemOneUrl: false });

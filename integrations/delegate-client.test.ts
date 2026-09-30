@@ -186,6 +186,39 @@ describe("acting for people", () => {
     expect(inits()).toBe(3);
   });
 
+  test("calls in flight when a grant changes share ONE new session, not one each", async () => {
+    const c = newClient();
+    const k = c.forIdentity(kim());
+    await k.callTool("list_skills");
+    expect(handler.sessionCount()).toBe(1);
+    cp.setGrant("acme", "kim@example.com", { room: "legal", clearance: "restricted" }); // ends the open session
+    const out = await Promise.all(Array.from({ length: 6 }, () => k.callTool("list_skills")));
+    for (const o of out) expect(names(o.text).sort()).toEqual(["nda-review", "payroll-run"]);
+    expect(handler.sessionCount()).toBe(1); // six sessions here meant five orphans counting against the per-person cap
+    expect(inits()).toBe(2);
+  });
+
+  test("a server that keeps answering 404 is retried once, not forever", async () => {
+    let calls = 0;
+    const c = new DelegateClient({
+      endpoint: ENDPOINT,
+      token,
+      identities: ids,
+      fetch: async (input, init) => {
+        const body = typeof init.body === "string" ? (JSON.parse(init.body) as { method?: string }) : null;
+        if (body?.method === "tools/call") {
+          calls++;
+          return new Response(JSON.stringify({ error: "unknown_session" }), { status: 404 });
+        }
+        return handler.fetch(new Request(input, init)); // initialize / initialized / delete are real
+      },
+    });
+    const err = await c.forIdentity(kim()).callTool("list_skills").catch((e) => e);
+    expect(err).toBeInstanceOf(DelegateError);
+    expect((err as DelegateError).status).toBe(404);
+    expect(calls).toBe(2); // the call, and exactly one retry
+  });
+
   test("close() ends the session at Harbor; the next call opens a new one", async () => {
     const c = newClient();
     const k = c.forIdentity(kim());
