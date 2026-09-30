@@ -69,9 +69,16 @@ TOKEN=$(harbor token create --tenant acme --room legal --label "acme legal agent
 ```
 
 The same sequence without Docker runs as an automated test
-(`src/cli-server.test.ts`, "the documented quickstart works end to end"). The
-Docker wrapper around it (the bind mount, `exec -T`) has **not** been run — no
-Docker daemon was available when this was written.
+(`src/cli-server.test.ts`, "the documented quickstart works end to end"), and
+`scripts/smoke.sh local` runs it against a real `harbor serve` process: liveness,
+provisioning, authentication, an ordinary token, a sensitivity ceiling, a delegate
+token, and SIGTERM draining. The Docker wrapper around it (the bind mount,
+`exec -T`, the image itself) has **not** been run — no Docker daemon was available
+when this was written. **`scripts/smoke.sh docker` does that**, additionally
+checking the non-root user, the read-only root filesystem and skills mount, the
+loopback-only port and shutdown inside the grace period; run it once on a Docker
+host before you rely on the image. It uses its own compose project name
+(`harbor-smoke`) and removes only what it created.
 
 Check it end to end (this is the request every MCP client makes first):
 
@@ -487,6 +494,15 @@ notes, an inbox and proposals. Skills and room rules do **not** go in it — peo
 get skills through Harbor (their own agent over a token, or by asking the house
 agent), which is gated, quota'd and audited. A synced folder is none of those.
 
+- **Verify Drive's download restriction yourself before relying on it.** Google's
+  option to disable download, print and copy for viewers and commenters is real,
+  but how it behaves with the Drive desktop client's offline copies was **not**
+  verified here. Test it with a canary: put a file containing a unique string in
+  a test folder, share it with a test account as a Viewer with that option on,
+  make the folder available offline on that account's machine, then search that
+  machine's filesystem for the string (and try `files.get?alt=media` with that
+  account's token). If the string is on disk, a local agent can read it: treat
+  *view access* as *ingest access* and keep sensitive material out of the folder.
 - Skills that land in the folder are only **candidates**: see "Skills that arrive
   through a shared folder" for the review-and-approve step.
 - **Everything in a folder syncs to every member's machine**, so assume every

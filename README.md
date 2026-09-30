@@ -171,6 +171,9 @@ bunx tsc --noEmit      # typecheck
 bun test               # full suite
 ```
 
+`scripts/smoke.sh local` starts a real `harbor serve` and checks it end to end
+(`scripts/smoke.sh docker` does the same against the container image).
+
 CI also runs a de-personalization scan that fails the build if a user-home path
 appears in shipped source or docs.
 

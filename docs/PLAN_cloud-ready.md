@@ -376,6 +376,11 @@ privilege-escalation path).
   shown the true reason; label editing skipping its pool/tier checks) were each
   caught by the tests. A migration test builds a control.db from before the column
   existed. I did not exercise this against a real Drive-synced setup.
+- Deployment: `scripts/smoke.sh local` drives a real `harbor serve` process through
+  provisioning, authentication, a ceiling and a delegate token (25 checks pass) and
+  fails when the gate is broken on purpose. `scripts/smoke.sh docker` exists but has
+  **not been run**; I tried to start a Docker daemon in the session sandbox and the
+  environment refused, so the image remains unbuilt.
 - Drive: `copyRequiresWriterPermission` / the download restriction applies to
   readers and commenters, not editors, and is enforced on API download too. How
   it interacts with the desktop client's offline sync was **not** verified.
