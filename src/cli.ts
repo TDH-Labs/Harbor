@@ -2602,7 +2602,7 @@ const principalCmd = defineCommand({
         );
         if (g) {
           console.log(`✓ a delegate token may act for '${g.principal}' in tenant '${g.tenantId}': room '${g.room}', up to ${g.clearance}`);
-          console.log("  Takes effect on the person's next request, in sessions already open too.");
+          console.log("  Takes effect on the person's next request. A session open under a different room or clearance is ended and must re-initialize.");
         }
       },
     }),
