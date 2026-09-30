@@ -1,6 +1,8 @@
 # PLAN — Making Harbor cloud-ready (and self-hostable)
 
-Status: **finalized, implementation in progress on branch `claude/harbor-cloud-ready-udpgrk`.**
+Status: **finalized and implemented (Phases 1a–2c) on branch `claude/harbor-cloud-ready-udpgrk`.**
+Section 9 records what shipped, where it deviated from this plan, and how each
+claim was verified.
 This is the finalized form of the handoff dossier that proposed Room Path
 Sandboxing, System One routing on a dedicated port, and the Dynamic Turn-Sieve.
 The dossier itself is not in this repository; its decisions are restated here
@@ -39,6 +41,7 @@ Every row was verified against the code, not the README.
 | G10 | Session identity comes only from `AGENT_ENV_ROOM` / `AGENT_ENV_SESSION`. Fine for a local child process, unusable for a network service (the caller controls it). | `gate.ts`, `mcp-server.ts` `defaultContext` | Blocker for cloud | Phase 2a/2b |
 | G11 | `Environment.load(null)` silently falls back to the *server operator's* `~/.agent-env/config.toml`, and `Environment.default()` is used by hypervisor primitives when no env is passed. In a multi-tenant process either would leak one tenant's (or the operator's) config into another's. | `env.ts`, `config.ts` `Config.load` | Blocker for cloud | Phase 2a (`lockDefault`, explicit per-tenant config) |
 | G12 | The hypervisor event bus (`emitHypervisorEvent`) is process-global. Any shared dashboard would show every tenant's events. | `src/audit.ts` | Blocker for a shared dashboard | Deferred (Section 8); server does not expose it |
+| G13 | In Core, a *configured* room with an empty `skills` list is **unrestricted** for `read_skill` (`roomSkillAllowed`: "empty ⇒ no restriction"). Removing a room's last skill lets that room read the whole pool — a cross-room read. Found while running the quickstart end to end, not by inspection. | `src/isolation.ts` `roomSkillAllowed` | High on a server | Phase 2b (`strictRoom` on server sessions; Core default unchanged, documented) |
 
 Also noted, not changed (owner's call): `README.md` says "All rights reserved"
 while `LICENSE` is MIT.
@@ -195,3 +198,68 @@ Budgets in Server mode are cooperative cost control, not a hard tenant quota.
   started; design after the server is proven.
 - **Analysis of hqforwork.com from the source** — blocked by network policy.
 - **`README.md` "All rights reserved" vs MIT `LICENSE`** — owner decision.
+
+## 9. What shipped
+
+| Phase | Commit theme | Verified by |
+|---|---|---|
+| 1a | `src/sandbox.ts`: `realpath` containment; `checkFileAccess`/`checkDataAccess` use it; `enforceFileAccess`/`enforceDataAccess` (throwing, audited); `spawn({ confineToRoom })` | 56 tests over a dirty fixture (symlinks, `link/../x`, `..` room names, loops, NUL). The lexical `isPathWithin` is asserted to accept the same string the sandbox denies. |
+| 1b | `src/system-one.ts`, Turn-Sieve hardening, `route_skills` (MCP + Pi), `[system_one]` config | A lying local daemon (foreign skills, junk tools, huge/redirecting/slow answers); reserved-port refusal proven by a server that must receive zero requests. |
+| 1c | Dashboard: escaping, nonce CSP, token auth, Host/Origin guards, bind policy | The page's real script run against hostile data; mutation check (neutering `esc()` fails the tests); **real Chromium** against the old and new code — the old code executed an injected `onerror`, the new code does not. |
+| 2a | `src/tenants.ts`: control plane, hashed tokens, per-tenant Environment, `Environment.lockDefault` | Secret never on disk (checked by scanning the DB and WAL bytes); config-escape by absolute path and by symlink; operator config never inherited (asserted on the mechanism, not by planting files in a real home). |
+| 2b | `src/http-server.ts`, `serve`/`tenant`/`token`/`service` CLI, `src/service.ts` | Two tenants with identical room names; room fixed by token; admin never granted from config; session bound to token; rate/session/body limits; graceful drain with an in-flight request; real-process `serve` + SIGTERM; systemd directive-injection refused. |
+| 2c | `Dockerfile`, `docker-compose.yml`, `deploy/Caddyfile.example`, README, `docs/CLOUD.md` | The Dockerfile's layers replicated by hand (production-only install, no tests, unprivileged run) and the real `HEALTHCHECK` command executed; the compiled single binary serves MCP; the documented quickstart runs as an automated test. |
+
+### Deviations from the plan above
+
+- **Found by running the quickstart, not by inspection (G13).** Core treats a
+  configured room with an empty skill list as unrestricted; on a server that is a
+  cross-room read. Server sessions are now `strictRoom`. Core's default is
+  unchanged and documented. Also from that run: `skill-install` needs the room to
+  exist first, so `harbor tenant add-room` was added and the docs corrected.
+- **Graceful shutdown.** The plan said "graceful shutdown". In Bun 1.3,
+  `server.stop(false)` followed by `server.stop(true)` does **not** close pooled
+  keep-alive connections (the second call is a no-op — verified directly), so the
+  drain keeps the listener open, answers new work with 503, fails `/readyz`,
+  waits for in-flight requests, and only then does one `stop(true)`.
+- **Tenant config is seeded** with `paths.home = <tenant root>` so the ordinary
+  CLI (`--config <tenant config>`) roots at the tenant instead of the operator's
+  home. The server ignores `paths.home` and roots every tenant explicitly.
+- **No `--token` flag on `harbor dashboard`.** An argv secret is visible to every
+  local user in the process table; the token comes from `HARBOR_DASHBOARD_TOKEN`.
+- Deterministic Turn-Sieve matching gained a **noise floor** (score ≥ 20) in
+  addition to the cap, so one stray description word does not select a skill.
+
+### Found by reviewing the diff adversarially (after the phases above)
+
+Each was reproduced or measured, fixed, and pinned by a test that fails without
+the fix (checked by removing the fix):
+
+- **Tenant-steerable outbound requests (SSRF).** The Turn-Sieve honored
+  `[system_one] url` from the session's own config. Harmless for a single-user
+  install, but on a server a tenant-editable URL points the server's requests at
+  any host. Server sessions now ignore it (`trustConfigSystemOneUrl: false`).
+- **Unbounded SQLite handles.** `db.ts` caches connections for the process
+  lifetime, so a server that has ever served N tenants holds descriptors for all
+  N. Idle tenants (10 min) are now evicted (`closeDbsUnder`, `evictTenant`).
+- **CPU stall from one request.** `matchSkillsDeterministically` is
+  O(skills × tokens). A 1 MiB prompt against 400 skills held the thread for
+  ~5.2 s (measured), 23 ms after bounding the prompt (8,000 chars), distinct
+  tokens (256) and `searchSkills` queries (512 chars / 32 terms).
+  *Correction:* my first measurement claimed the old code "did not finish in two
+  minutes"; that was my own benchmark script building its input quadratically.
+  The corrected figure is the ~5 s above.
+- `close()` did not unlock `Environment.default()`.
+
+### Not verified
+
+- **The container image was not built.** No Docker daemon was available. Its
+  layers and runtime were replicated and run by hand (see Phase 2c), and the
+  Dockerfile and compose file were reviewed, but `docker build` / `docker compose
+  up` has not been run. `read_only: true` and `cap_drop: [ALL]` in the compose
+  file are the likeliest things to need adjustment. A CI job that builds the
+  image is the right next step.
+- **Client connection snippets** in `docs/CLOUD.md` (Claude Code, Cursor) are
+  shapes, not tested against those clients.
+- **System One itself.** Only its client contract was built and tested, against
+  local fake daemons. Nothing was run against the real daemon.

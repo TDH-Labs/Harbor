@@ -1,0 +1,22 @@
+# Reverse proxy for Harbor Server. Caddy obtains and renews TLS certificates itself.
+#
+# Harbor authenticates every /mcp request with a bearer token, but it only counts
+# failed attempts per token, not per client address. Put the flood protection for
+# UNAUTHENTICATED traffic here (rate limiting per IP is a Caddy plugin or your
+# cloud load balancer's job).
+
+{$HARBOR_DOMAIN:localhost} {
+	encode zstd gzip
+
+	# Only the MCP endpoint and the health probes are meant to be reachable.
+	@harbor path /mcp /healthz /readyz
+	handle @harbor {
+		reverse_proxy harbor:8787 {
+			# Sessions are held in one process's memory; if you ever run more than one
+			# replica, route each client to a single replica (see docs/CLOUD.md).
+			health_uri /readyz
+			health_interval 10s
+		}
+	}
+	respond 404
+}
