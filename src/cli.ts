@@ -2407,11 +2407,16 @@ const tokenCmd = defineCommand({
           description:
             "Highest sensitivity a skill may carry to be delivered to this token (public | internal | restricted). Above it is hidden and refused; unlabeled skills are refused too. Omit for no ceiling.",
         },
+        delegate: {
+          type: "boolean",
+          description:
+            "A house-agent token: no room, person, quota or ceiling of its own; each request names the person it acts for (Harbor-On-Behalf-Of) and that person's grant decides the rest. See `principal grant`.",
+        },
         json: { type: "boolean", description: "Emit JSON" },
       },
       run({ args }) {
-        if (!args.tenant || !args.room) {
-          console.error("token create: --tenant and --room are required");
+        if (!args.tenant || (!args.room && !args.delegate)) {
+          console.error("token create: --tenant and --room are required (a --delegate token takes no --room)");
           process.exitCode = 1;
           return;
         }
@@ -2440,7 +2445,8 @@ const tokenCmd = defineCommand({
         const made = tenantAction("token create", () =>
           cp.createToken({
             tenantId: args.tenant as string,
-            room: args.room as string,
+            ...(args.room ? { room: args.room } : {}),
+            ...(args.delegate ? { delegate: true } : {}),
             ...(args.principal ? { principal: args.principal } : {}),
             ...(dailyTokenQuota !== undefined ? { dailyTokenQuota } : {}),
             ...(dailyReadQuota !== undefined ? { dailyReadQuota } : {}),
@@ -2456,9 +2462,12 @@ const tokenCmd = defineCommand({
         if (args.json) return printJson({ token: made.token, ...made.record });
         console.log(made.token);
         console.error(
-          `token ${made.record.id} for tenant '${made.record.tenantId}', room '${made.record.room}'` +
-            `${made.record.principal ? `, person '${made.record.principal}'` : ""}` +
-            `, ceiling ${made.record.maxSensitivity ?? "none (every skill its room grants)"}` +
+          `token ${made.record.id} for tenant '${made.record.tenantId}', ` +
+            (made.record.delegate
+              ? `DELEGATE (acts only for a person named in Harbor-On-Behalf-Of, with their grant)`
+              : `room '${made.record.room}'` +
+                `${made.record.principal ? `, person '${made.record.principal}'` : ""}` +
+                `, ceiling ${made.record.maxSensitivity ?? "none (every skill its room grants)"}`) +
             `${made.record.expiresAt ? `, expires ${new Date(made.record.expiresAt * 1000).toISOString()}` : ""}.`,
         );
         console.error("This is the only time the secret is shown. Store it now; revoke with `harbor token revoke " + made.record.id + "`.");
@@ -2478,9 +2487,9 @@ const tokenCmd = defineCommand({
             r.dailyTokenQuota !== null || r.dailyReadQuota !== null
               ? ` [quota/day: ${r.dailyTokenQuota ?? "∞"} tok, ${r.dailyReadQuota ?? "∞"} loads]`
               : "";
-          const ceiling = r.maxSensitivity ? ` [ceiling: ${r.maxSensitivity}]` : "";
+          const ceiling = r.delegate ? " [delegate]" : r.maxSensitivity ? ` [ceiling: ${r.maxSensitivity}]` : "";
           console.log(
-            `  ${tokenHandle(r.id).padEnd(20)} ${r.tenantId.padEnd(20)} ${r.room.padEnd(16)} ${state.padEnd(8)} ` +
+            `  ${tokenHandle(r.id).padEnd(20)} ${r.tenantId.padEnd(20)} ${(r.room || "-").padEnd(16)} ${state.padEnd(8)} ` +
               `${(r.principal || "-").padEnd(24)} ${r.label}${quota}${ceiling}`,
           );
         }
@@ -2552,10 +2561,90 @@ const principalCmd = defineCommand({
         if (p) console.log(`✓ '${p.id}' resumed in tenant '${p.tenantId}'`);
       },
     }),
+    grant: defineCommand({
+      meta: {
+        name: "grant",
+        description:
+          "Set what a delegate (house-agent) token may do FOR this person: their room, the highest sensitivity they may be handed, and daily quotas. Replaces any earlier grant.",
+      },
+      args: {
+        ...serverArgs,
+        id: { type: "positional", required: true, description: "Person" },
+        tenant: { type: "string", description: "Tenant id" },
+        room: { type: "string", description: "The room the house agent works in for them" },
+        clearance: { type: "string", description: "public | internal | restricted (required: there is no implicit 'everything')" },
+        "daily-token-quota": { type: "string", description: "Max skill-content tokens delivered per UTC day (shared with their own tokens)" },
+        "daily-read-quota": { type: "string", description: "Max skill loads per UTC day (shared with their own tokens)" },
+      },
+      run({ args }) {
+        if (!args.tenant || !args.room || !args.clearance) {
+          console.error("principal grant: --tenant, --room and --clearance are required");
+          process.exitCode = 1;
+          return;
+        }
+        let dailyTokenQuota: number | undefined;
+        let dailyReadQuota: number | undefined;
+        if (args["daily-token-quota"]) {
+          dailyTokenQuota = intOption("principal grant", "--daily-token-quota", args["daily-token-quota"], 1, Number.MAX_SAFE_INTEGER);
+          if (dailyTokenQuota === undefined) return;
+        }
+        if (args["daily-read-quota"]) {
+          dailyReadQuota = intOption("principal grant", "--daily-read-quota", args["daily-read-quota"], 1, Number.MAX_SAFE_INTEGER);
+          if (dailyReadQuota === undefined) return;
+        }
+        const g = tenantAction("principal grant", () =>
+          new ControlPlane(serverDataDir(args)).setGrant(args.tenant as string, args.id, {
+            room: args.room as string,
+            clearance: args.clearance as Sensitivity,
+            ...(dailyTokenQuota !== undefined ? { dailyTokenQuota } : {}),
+            ...(dailyReadQuota !== undefined ? { dailyReadQuota } : {}),
+          }),
+        );
+        if (g) {
+          console.log(`✓ a delegate token may act for '${g.principal}' in tenant '${g.tenantId}': room '${g.room}', up to ${g.clearance}`);
+          console.log("  Takes effect on the person's next request, in sessions already open too.");
+        }
+      },
+    }),
+    ungrant: defineCommand({
+      meta: { name: "ungrant", description: "Remove a person's grant: a delegate token can no longer act for them" },
+      args: {
+        ...serverArgs,
+        id: { type: "positional", required: true, description: "Person" },
+        tenant: { type: "string", description: "Tenant id" },
+      },
+      run({ args }) {
+        if (!args.tenant) return void (console.error("principal ungrant: --tenant is required"), (process.exitCode = 1));
+        const removed = tenantAction("principal ungrant", () =>
+          new ControlPlane(serverDataDir(args)).removeGrant(args.tenant as string, args.id),
+        );
+        if (removed !== undefined) console.log(removed ? `✓ grant for '${args.id}' removed` : `'${args.id}' had no grant`);
+      },
+    }),
+    grants: defineCommand({
+      meta: { name: "grants", description: "List what delegate tokens may do for whom" },
+      args: {
+        ...serverArgs,
+        tenant: { type: "string", description: "Only this tenant" },
+        json: { type: "boolean", description: "Emit JSON" },
+      },
+      run({ args }) {
+        const rows = new ControlPlane(serverDataDir(args)).listGrants(args.tenant || undefined);
+        if (args.json) return printJson(rows);
+        if (rows.length === 0) return console.log("(no grants — a delegate token can act for nobody)");
+        for (const g of rows) {
+          const quota =
+            g.dailyTokenQuota !== null || g.dailyReadQuota !== null
+              ? `  [quota/day: ${g.dailyTokenQuota ?? "∞"} tok, ${g.dailyReadQuota ?? "∞"} loads]`
+              : "";
+          console.log(`  ${g.tenantId.padEnd(20)} ${g.principal.padEnd(32)} ${g.room.padEnd(16)} up to ${g.clearance}${quota}`);
+        }
+      },
+    }),
     revoke: defineCommand({
       meta: {
         name: "revoke",
-        description: "Offboard: permanently revoke every token issued to a person (use suspend for a reversible stop)",
+        description: "Offboard: permanently revoke every token issued to a person and remove their grant (use suspend for a reversible stop)",
       },
       args: {
         ...serverArgs,

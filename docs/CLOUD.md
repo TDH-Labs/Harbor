@@ -184,6 +184,7 @@ harbor token create --tenant <id> --room <room> [--principal <person>] \
        [--daily-token-quota N] [--daily-read-quota N] \
        [--max-sensitivity public|internal|restricted] \
        [--label TEXT] [--ttl-days N] [--capabilities a,b] [--allow-admin]
+harbor token create --tenant <id> --delegate   # a house-agent token (see "Acting on behalf of a person")
 harbor token list [--tenant <id>]  # handles, person, state, quotas, ceiling — never secrets
 harbor token revoke <token-id>     # the 12 hex chars after hbr_
 
@@ -191,11 +192,15 @@ harbor principal list [--tenant <id>]           # people, live tokens, today's d
 harbor principal suspend <person> --tenant <id> # reversible: all their tokens refused
 harbor principal resume  <person> --tenant <id>
 harbor principal revoke  <person> --tenant <id> # offboarding: permanent
+harbor principal grant  <person> --tenant <id> --room <room> --clearance <tier> [quotas]
+harbor principal ungrant <person> --tenant <id>
+harbor principal grants  [--tenant <id>]
 ```
 
 - The secret is **256 random bits shown once**. Only its SHA-256 is stored, so a
   leaked `control.db` does not leak usable tokens.
-- The **room is fixed by the token.** A client cannot pick or change it.
+- The **room is fixed by the token.** A client cannot pick or change it. (A `--delegate`
+  token has none: the person it acts for has a grant that names theirs — see below.)
 - `--capabilities` is a **ceiling**: the session gets the room's configured
   capabilities intersected with it, never more.
 - `admin` bypasses room gating. It is never granted to a network caller by a
@@ -331,8 +336,8 @@ its name does not leak either):
   row carries the true reason (`skill 'x' is restricted; this token's ceiling is
   public`).
 - A refused read costs nothing against the daily quota.
-- The ceiling is fixed for the life of a session (it comes from the token, when the
-  session opens). Labels are read from the tenant's config on every request, so
+- The ceiling is fixed for the life of a session (it comes from the token, or for a
+  delegate token from the person's grant, when the session opens). Labels are read from the tenant's config on every request, so
   relabeling takes effect on the next request of a session already open.
 
 `harbor label list` marks every unlabeled skill: those are the ones a capped token
@@ -345,12 +350,75 @@ legitimately received via another token into their own agent. Give bring-your-ow
 agents a ceiling that fits what they may ingest, and keep everything above it out
 of that person's reach altogether (a room they hold no token for).
 
+### Acting on behalf of a person (the house agent)
+
+A house agent that serves several people has a problem a bring-your-own agent
+does not: it is *one* client with broad reach, asked by *many* people. Left
+alone it is a confused deputy — anyone can ask it to fetch what they could not
+fetch themselves. So it does not connect with a broad token. It connects with a
+**delegate token**, which can do nothing on its own; every request names the
+person it is for, and Harbor gives it that person's entitlements.
+
+```bash
+# once: the house agent's credential. No room, person, ceiling or quota of its own.
+harbor token create --tenant acme --delegate --label son-of-anton
+
+# per person: what the house agent may do for them (replaces any earlier grant)
+harbor principal grant kim@example.com --tenant acme --room legal --clearance internal \
+    --daily-read-quota 15
+harbor principal grants --tenant acme
+```
+
+The house agent then sends, on **every** request:
+
+```
+Authorization: Bearer <delegate token>
+Harbor-On-Behalf-Of: kim@example.com
+```
+
+What Harbor does with it, per request:
+
+- The person's **grant** supplies the room, the sensitivity ceiling and the daily
+  quotas. The delegate token supplies none of them, so it can never do more for a
+  person than their grant says — a person cleared for `internal` gets `internal`
+  through the house agent even if the house agent's other users are cleared for more.
+- The grant is **re-read on every request**. `principal suspend`, `principal
+  ungrant`, `principal revoke` (which also removes the grant) stop the house agent
+  acting for that person on their very next call. Raising or lowering a quota
+  applies to the open session; changing the **room or clearance** ends it (`404`,
+  the client re-initializes) so no session outlives the entitlements it was opened with.
+- A session belongs to the person it was opened for. Presenting it with a
+  different `Harbor-On-Behalf-Of` gets `404`, so a session cannot be borrowed.
+- Delivery is counted against **the person's** daily allowance, the same one their
+  own tokens draw from: asking the house agent is not a way around a quota.
+- The audit trail names the **person** on every row; the `session_open` row also
+  records `via=delegate:<token handle>`. Request and session limits are per person,
+  so one busy person does not spend everyone's allowance.
+- A missing or malformed header is `400`. A person Harbor has no grant for, a
+  suspended person and an unknown person all get the **same** `403`, so the caller
+  cannot probe who exists (the operator's log has the reason).
+- A token that is **not** a delegate may not send the header at all (`403`), even
+  naming itself.
+- A delegate token cannot carry `admin`, a room, a person, a ceiling or quotas —
+  those would be a second, competing source of entitlement. It may carry a
+  `--capabilities` ceiling, which caps everyone it serves.
+
+**What this does not do — read this.** Harbor enforces *what the named person may
+receive*. It cannot verify that the house agent named the right person. If the
+house agent is talked into acting as someone else (a prompt in a shared folder, a
+spoofed chat message), Harbor sees a legitimate request for that other person.
+The defence is in the house agent: it must take the requester's identity from the
+authenticated channel it is served over (a signed-in chat account, SSO), **never
+from the text of a message or a file**, and must not pass content from one
+person's request into another's. Harbor bounds the damage to that other person's
+grant; it does not remove the risk. Keep grants small, and keep what only some
+people may read out of rooms that others hold grants for.
+
+One grant per person: a person acts through the house agent in one room at a
+time. For someone who needs two, make a room that holds both skill sets.
+
 ### Not built yet
 
-- **Acting on behalf of a person.** A house agent that serves several people
-  should open its Harbor session with *the requester's* entitlements, not its
-  own broad ones (otherwise it can be asked to fetch what the asker could not).
-  Today, give it a separate token per person it serves; there is no delegation.
 - **Owner approval for skill installs** arriving through a shared folder.
 
 ## Sharing files (a synced folder, e.g. Google Drive)

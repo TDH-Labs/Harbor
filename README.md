@@ -38,6 +38,10 @@ Server operation — self-hosted or as a hosted offering — is documented in
 - **Token budgets.** Loading a skill debits the session's budget atomically
   (SQLite `BEGIN IMMEDIATE`); an overspend is refused, never silently absorbed.
   Token counts are estimated as characters ÷ 4.
+- **House agent acting per person.** A `--delegate` token can do nothing on its
+  own: each request names the person it acts for (`Harbor-On-Behalf-Of`) and that
+  person's grant decides the room, sensitivity and quotas — re-read every request.
+  It bounds what a house agent can hand someone; it cannot verify who is asking.
 - **Audit log.** Every denial (and privileged allowance) is recorded in SQLite:
   who, which room, which capability, which resource, why.
 - **Skill pool with progressive disclosure.** Skills live once in a pool and are
@@ -149,7 +153,7 @@ Harbor ships the client and the trust boundary around it.
 | Enforcement | `isolation` (`check`, `rooms`, `audit`, `denials`, `doctor`), `gate`, `budget`, `audit`, `approval`, `spawn` (`--confine` pins the child to its room) |
 | Runtime | `scheduler`, `compaction`, `session`, `bench` |
 | Secrets | `secrets` (`set`, `get`, `list`, `rm`, `export`, `doctor`) |
-| Server | `serve`, `tenant` (`create`, `add-room`, `list`, `suspend`, `resume`), `token` (`create`, `list`, `revoke`; `--principal`, daily quotas, `--max-sensitivity`), `principal` (`list`, `suspend`, `resume`, `revoke`), `service print` |
+| Server | `serve`, `tenant` (`create`, `add-room`, `list`, `suspend`, `resume`), `token` (`create`, `list`, `revoke`; `--principal`, daily quotas, `--max-sensitivity`, `--delegate`), `principal` (`list`, `suspend`, `resume`, `revoke`, `grant`, `ungrant`, `grants`), `service print` |
 | Labels | `label` (`set`, `clear`, `list`) — sensitivity tiers for rooms and skills; a token with `--max-sensitivity` is never handed a skill above it, or an unlabeled one |
 | Sharing | `guard <folder>` — scan for credentials and never-sync files before a folder is shared (never prints the secret) |
 

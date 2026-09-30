@@ -293,6 +293,7 @@ privilege-escalation path).
 | D12 | **Daily delivery quotas are per person, per UTC day, enforced at the tool, atomically.** | Per-session budgets are bypassed by opening sessions; the allowance has to be keyed by who, not by session. |
 | D13 | **`harbor guard`** is the pre-sync check for the shared folder. `export-shared` is **deferred**. | Skills are not synced (D10), so there is nothing to export; the folder still needs a secret scan. |
 | D14 | **Sensitivity labels** (`public < internal < restricted`): a room default plus a per-skill override, both in the operator's config; a token may carry a ceiling (`--max-sensitivity`). **A token with a ceiling is never handed an unlabeled skill**; a label that is present but not a tier counts as `restricted`. There is no label inside `SKILL.md`. | Decided with the operator: labeling is the price of keeping a bring-your-own agent from ingesting sensitive content, and "unlabeled ⇒ denied" is what makes forgetting to label safe. A label authored inside a skill would be chosen by the party a label must not trust. |
+| D15 | **The house agent runs on Harbor Server as a delegate**: a token with no room, person, ceiling or quota of its own, naming the person per request (`Harbor-On-Behalf-Of`); a per-person **grant** (room, clearance, quotas) supplies everything. One grant per person. | The house agent must never hold entitlements broader than the person it is serving (confused deputy). Grants make the person the single source of truth, re-read each request so suspend/offboard/changes apply immediately, and they share the person's quota with their own tokens. |
 
 ### Built
 
@@ -308,6 +309,12 @@ privilege-escalation path).
   flagged not followed, oversized/binary/unreadable reported as skipped,
   `--files-from` confined to the root, and output that never contains the secret.
 - `control.db` from the previous release is migrated in place.
+- **Delegation** (D15): `grants` table (migrated in place), `tokens.delegate`,
+  `ControlPlane.setGrant/removeGrant/listGrants/resolveDelegation`,
+  `principal grant|ungrant|grants`, `token create --delegate`, and the
+  `Harbor-On-Behalf-Of` handling in the server. Offboarding a person removes their
+  grant. Open sessions follow the grant: quota changes apply at once; a changed
+  room or clearance ends the session.
 - **Sensitivity labels and ceilings** (D14): `src/sensitivity.ts` (pure rules),
   `src/labels.ts` + `harbor label set|clear|list`, `tokens.max_sensitivity`
   (migrated in place) + `token create --max-sensitivity`. Enforced in the gate for
@@ -336,6 +343,19 @@ privilege-escalation path).
   identifiers) and both sides are pinned by tests. It now flags only the two
   files literally named `secrets.*`, which is the blunt filename rule working as
   designed.
+- Delegation: 22 deliberate breakages (delegation skipped; the header accepted
+  from a non-delegate; a session not bound to its person or surviving a grant
+  change; room, ceiling or either quota taken from the token instead of the grant;
+  rate limit, session cap or quota shared across people; a suspended or unknown
+  person served; offboarding leaving the grant; a delegate allowed its own
+  limits; grant validation, replacement or migration removed) each failed a
+  named test. **My first pass of this used "the suite failed" as the kill signal,
+  and one mutation was reported killed by an unrelated flaky test** (an ordering
+  assumption in a test of mine, found by repeating the unmutated suite six
+  times). The runner now prints which test failed; that surfaced one real gap (the
+  grant's token quota was untested over HTTP), and a second (the "strictest label"
+  rule was untested when the strictest room came first), both now covered. The
+  earlier label mutations were re-run the same way.
 - Labels: 17 deliberate breakages of the enforcement (gate check removed; each
   of list/search/route unfiltered in the server and in Pi; invalid label read as
   unlabeled or as public; unlabeled admitted; ceiling comparison off by one;
@@ -350,9 +370,11 @@ privilege-escalation path).
 
 ### Not built (needs a decision or is deliberately deferred)
 
-- **On-behalf-of** for the house agent: open its session with the requester's
-  entitlements (intersection, not the agent's own). Open: how does it learn who
-  is asking, and does it stay on Harbor Core or move to Harbor Server?
+- **Knowing who is asking.** Harbor bounds a delegate to the named person's grant
+  but cannot verify the house agent named the right person; that has to come from
+  the house agent's own authenticated channel. This is a residual risk, stated in
+  `CLOUD.md`, not a solved problem. **Not answered yet:** which channel the house
+  agent is served over, which decides how identity can be established.
 - **Owner approval for skill installs** that originate from a shared folder.
 - **Output-audience control** (a house agent posting restricted content where the
   audience is broader than the asker) — an application-layer policy Harbor

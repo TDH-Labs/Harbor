@@ -118,10 +118,13 @@ describe("label rules", () => {
         b: { skills: ["shared"], sensitivity: "restricted" },
         c: { skills: ["mixed"], sensitivity: "public" },
         d: { skills: ["mixed"] }, // unlabeled
+        x: { skills: ["reversed"], sensitivity: "restricted" }, // strictest listed FIRST
+        y: { skills: ["reversed"], sensitivity: "internal" },
       },
     });
     // as if reached through an approved cross-room grant: `me` does not list them
     expect(effectiveSensitivity(cfg, "me", "shared")).toBe("restricted"); // not me's "public"
+    expect(effectiveSensitivity(cfg, "me", "reversed")).toBe("restricted"); // whichever order the rooms come in
     expect(effectiveSensitivity(cfg, "me", "mixed")).toBeNull();
     expect(effectiveSensitivity(cfg, "me", "nobody-lists-this")).toBeNull();
     expect(effectiveSensitivity(cfg, "a", "shared")).toBe("internal"); // its own room: its own label
@@ -217,15 +220,20 @@ describe("token ceilings", () => {
   });
 
   test("a ceiling is stored, listed and returned by authenticate; none means none", () => {
+    const made = new Map<string, Sensitivity | null>();
     for (const tier of SENSITIVITIES) {
       const { token, record } = cp.createToken({ tenantId: "acme", room: "team", maxSensitivity: tier });
       expect(record.maxSensitivity).toBe(tier);
       expect(cp.authenticate(token)).toMatchObject({ ok: true, maxSensitivity: tier });
+      made.set(record.id, tier);
     }
     const open = cp.createToken({ tenantId: "acme", room: "team" });
     expect(open.record.maxSensitivity).toBeNull();
     expect(cp.authenticate(open.token)).toMatchObject({ ok: true, maxSensitivity: null });
-    expect(cp.listTokens("acme").map((t) => t.maxSensitivity)).toEqual([...SENSITIVITIES, null]);
+    made.set(open.record.id, null);
+    // (listed order is by creation second, which several tokens made in one test share)
+    const listed = new Map(cp.listTokens("acme").map((t) => [t.id, t.maxSensitivity]));
+    expect(listed).toEqual(made);
   });
 
   test("an unknown tier is refused at creation, not silently stored as 'no ceiling'", () => {

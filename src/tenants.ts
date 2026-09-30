@@ -77,7 +77,8 @@ export type TenantErrorCode =
   | "invalid_sensitivity"
   | "no_such_principal"
   | "principal_suspended"
-  | "invalid_quota";
+  | "invalid_quota"
+  | "invalid_delegate";
 
 export class TenantError extends Error {
   readonly code: TenantErrorCode;
@@ -109,6 +110,42 @@ export interface PrincipalRecord {
   usedReadsToday: number;
 }
 
+/**
+ * What a house agent may do FOR one person: the room it works in, how sensitive
+ * a thing it may hand them, and how much per day. One grant per person.
+ */
+export interface GrantRecord {
+  tenantId: string;
+  principal: string;
+  room: string;
+  /** The highest sensitivity the person may be handed through a delegate. Required: no implicit "everything". */
+  clearance: Sensitivity;
+  dailyTokenQuota: number | null;
+  dailyReadQuota: number | null;
+  updatedAt: number;
+}
+
+export interface SetGrantOptions {
+  room: string;
+  clearance: Sensitivity;
+  dailyTokenQuota?: number;
+  dailyReadQuota?: number;
+}
+
+/** Why a delegated request was refused — for the operator's log, never for the client. */
+export type DelegationFailure = "invalid_person" | "unknown_person" | "person_suspended" | "no_grant" | "room_unavailable";
+
+export type DelegationResult =
+  | {
+      ok: true;
+      principal: string;
+      room: string;
+      clearance: Sensitivity;
+      dailyTokenQuota: number | null;
+      dailyReadQuota: number | null;
+    }
+  | { ok: false; reason: DelegationFailure };
+
 export interface TokenRecord {
   id: string;
   tenantId: string;
@@ -122,6 +159,11 @@ export interface TokenRecord {
   dailyReadQuota: number | null;
   /** Highest sensitivity label this token may be handed (null = no ceiling). */
   maxSensitivity: Sensitivity | null;
+  /**
+   * A house-agent token: it has no room, person, quota or ceiling of its own and
+   * acts only FOR a named person, with that person's grant (see {@link GrantRecord}).
+   */
+  delegate: boolean;
   /** Capability ceiling; null = whatever the room's config grants. */
   capabilities: string[] | null;
   adminAllowed: boolean;
@@ -133,7 +175,8 @@ export interface TokenRecord {
 
 export interface CreateTokenOptions {
   tenantId: string;
-  room: string;
+  /** The room (required, except for a delegate token, which has none). */
+  room?: string;
   label?: string;
   /** Lifetime in seconds; omit for a non-expiring token. */
   ttlSeconds?: number;
@@ -158,6 +201,12 @@ export interface CreateTokenOptions {
    * no ceiling.
    */
   maxSensitivity?: Sensitivity;
+  /**
+   * Issue a delegate (house-agent) token. It must not name a room, person, quota
+   * or ceiling — each request carries the person it acts for, and that person's
+   * grant supplies all of them — and it can never carry `admin`.
+   */
+  delegate?: boolean;
 }
 
 /** Why authentication failed — for the operator's log, never for the client. */
@@ -186,6 +235,8 @@ export type AuthResult =
       dailyReadQuota: number | null;
       /** Highest sensitivity label the token may be handed, or null for none. */
       maxSensitivity: Sensitivity | null;
+      /** A house-agent token: the person, room, ceiling and quotas come from a grant, per request. */
+      delegate: boolean;
     }
   | { ok: false; reason: AuthFailure };
 
@@ -221,7 +272,8 @@ CREATE TABLE IF NOT EXISTS tokens (
   principal          TEXT NOT NULL DEFAULT '',
   daily_token_quota  INTEGER,
   daily_read_quota   INTEGER,
-  max_sensitivity    TEXT
+  max_sensitivity    TEXT,
+  delegate           INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_tokens_tenant ON tokens(tenant_id);
 CREATE TABLE IF NOT EXISTS principals (
@@ -230,6 +282,16 @@ CREATE TABLE IF NOT EXISTS principals (
   status     TEXT NOT NULL DEFAULT 'active',
   created_at REAL NOT NULL,
   PRIMARY KEY (tenant_id, id)
+);
+CREATE TABLE IF NOT EXISTS grants (
+  tenant_id         TEXT NOT NULL REFERENCES tenants(id),
+  principal         TEXT NOT NULL,
+  room              TEXT NOT NULL,
+  clearance         TEXT NOT NULL,
+  daily_token_quota INTEGER,
+  daily_read_quota  INTEGER,
+  updated_at        REAL NOT NULL,
+  PRIMARY KEY (tenant_id, principal)
 );
 CREATE TABLE IF NOT EXISTS usage (
   tenant_id TEXT NOT NULL,
@@ -279,6 +341,16 @@ interface TokenRow {
   daily_token_quota: number | null;
   daily_read_quota: number | null;
   max_sensitivity: string | null;
+  delegate: number;
+}
+interface GrantRow {
+  tenant_id: string;
+  principal: string;
+  room: string;
+  clearance: string;
+  daily_token_quota: number | null;
+  daily_read_quota: number | null;
+  updated_at: number;
 }
 interface PrincipalRow {
   tenant_id: string;
@@ -293,6 +365,17 @@ const toTenant = (r: TenantRow): TenantRecord => ({
   note: r.note,
   createdAt: r.created_at,
 });
+// A stored clearance that is not a tier (a hand-edited database) is the LOWEST one.
+const clearanceOf = (v: string): Sensitivity => (isSensitivity(v) ? v : "public");
+const toGrant = (r: GrantRow): GrantRecord => ({
+  tenantId: r.tenant_id,
+  principal: r.principal,
+  room: r.room,
+  clearance: clearanceOf(r.clearance),
+  dailyTokenQuota: r.daily_token_quota ?? null,
+  dailyReadQuota: r.daily_read_quota ?? null,
+  updatedAt: r.updated_at,
+});
 const toToken = (r: TokenRow): TokenRecord => ({
   id: r.id,
   tenantId: r.tenant_id,
@@ -304,6 +387,7 @@ const toToken = (r: TokenRow): TokenRecord => ({
   // A stored value that is not a tier (a hand-edited database) becomes the LOWEST
   // ceiling, never "no ceiling".
   maxSensitivity: r.max_sensitivity == null ? null : isSensitivity(r.max_sensitivity) ? r.max_sensitivity : "public",
+  delegate: r.delegate === 1,
   capabilities: r.capabilities === null ? null : (JSON.parse(r.capabilities) as string[]),
   adminAllowed: r.admin_allowed === 1,
   createdAt: r.created_at,
@@ -364,6 +448,7 @@ export class ControlPlane {
     add("daily_token_quota", "daily_token_quota INTEGER");
     add("daily_read_quota", "daily_read_quota INTEGER");
     add("max_sensitivity", "max_sensitivity TEXT");
+    add("delegate", "delegate INTEGER NOT NULL DEFAULT 0");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_tokens_principal ON tokens(tenant_id, principal)");
   }
 
@@ -500,17 +585,38 @@ export class ControlPlane {
    */
   createToken(options: CreateTokenOptions): { token: string; record: TokenRecord } {
     this.requireTenant(options.tenantId);
-    if (!isValidRoomName(options.room)) {
-      throw new TenantError("invalid_room", `invalid room name: ${JSON.stringify(options.room)}`);
-    }
-    if (!options.allowUnconfiguredRoom) {
-      const cfg = this.tenantEnvironment(options.tenantId).config;
-      if (!cfg.hasRoom(options.room) && options.room !== cfg.skillDefaultRoom) {
+    const delegate = options.delegate === true;
+    if (delegate) {
+      // A delegate acts FOR a person with THEIR grant. Anything it carried itself
+      // would be a second, competing source of entitlement — and `admin` would
+      // make a token that can act as anyone unbounded.
+      const own = [
+        options.room ? "a room" : "",
+        options.principal !== undefined ? "a person" : "",
+        options.maxSensitivity !== undefined ? "a sensitivity ceiling" : "",
+        options.dailyTokenQuota !== undefined || options.dailyReadQuota !== undefined ? "quotas" : "",
+        options.allowAdmin || options.capabilities?.includes(Capability.ADMIN) ? "admin" : "",
+      ].filter(Boolean);
+      if (own.length > 0) {
         throw new TenantError(
-          "unknown_room",
-          `room '${options.room}' is not configured for tenant '${options.tenantId}' ` +
-            `(configured: ${Object.keys(cfg.roomSkills).join(", ") || "none"}; default: ${cfg.skillDefaultRoom})`,
+          "invalid_delegate",
+          `a delegate token acts for a person with that person's grant; it cannot carry ${own.join(", ")}`,
         );
+      }
+    } else {
+      const room = options.room ?? "";
+      if (!isValidRoomName(room)) {
+        throw new TenantError("invalid_room", `invalid room name: ${JSON.stringify(options.room)}`);
+      }
+      if (!options.allowUnconfiguredRoom) {
+        const cfg = this.tenantEnvironment(options.tenantId).config;
+        if (!cfg.hasRoom(room) && room !== cfg.skillDefaultRoom) {
+          throw new TenantError(
+            "unknown_room",
+            `room '${room}' is not configured for tenant '${options.tenantId}' ` +
+              `(configured: ${Object.keys(cfg.roomSkills).join(", ") || "none"}; default: ${cfg.skillDefaultRoom})`,
+          );
+        }
       }
     }
     let capabilities: string[] | null = null;
@@ -566,13 +672,13 @@ export class ControlPlane {
     this.db
       .query(
         `INSERT INTO tokens (id, tenant_id, room, label, secret_hash, capabilities, admin_allowed, created_at, expires_at,
-                             principal, daily_token_quota, daily_read_quota, max_sensitivity)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                             principal, daily_token_quota, daily_read_quota, max_sensitivity, delegate)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
         options.tenantId,
-        options.room,
+        delegate ? "" : (options.room as string),
         options.label ?? "",
         sha256(secret).toString("hex"),
         capabilities === null ? null : JSON.stringify(capabilities),
@@ -583,6 +689,7 @@ export class ControlPlane {
         options.dailyTokenQuota ?? null,
         options.dailyReadQuota ?? null,
         options.maxSensitivity ?? null,
+        delegate ? 1 : 0,
       );
     const record = toToken(this.db.query("SELECT * FROM tokens WHERE id = ?").get(id) as TokenRow);
     return { token: `${TOKEN_PREFIX}${id}_${secret}`, record };
@@ -644,6 +751,7 @@ export class ControlPlane {
       dailyTokenQuota: rec.dailyTokenQuota,
       dailyReadQuota: rec.dailyReadQuota,
       maxSensitivity: rec.maxSensitivity,
+      delegate: rec.delegate,
     };
   }
 
@@ -706,9 +814,106 @@ export class ControlPlane {
    */
   revokePrincipalTokens(tenantId: string, id: string): number {
     this.requirePrincipal(tenantId, id);
+    // Offboarding also ends what a house agent may do for them.
+    this.db.query("DELETE FROM grants WHERE tenant_id = ? AND principal = ?").run(tenantId, id);
     return this.db
       .query("UPDATE tokens SET revoked_at = ? WHERE tenant_id = ? AND principal = ? AND revoked_at IS NULL")
       .run(nowSec(), tenantId, id).changes;
+  }
+
+  // ── Grants (what a house agent may do for a person) ────────────────────────
+
+  /**
+   * Set what a delegate token may do FOR `principal`: the room, the highest
+   * sensitivity, and daily quotas. Replaces any earlier grant. Creates the person
+   * on record if new, so suspend and offboarding find them.
+   */
+  setGrant(tenantId: string, principal: string, options: SetGrantOptions): GrantRecord {
+    this.requireTenant(tenantId);
+    if (!PRINCIPAL_RE.test(principal)) {
+      throw new TenantError("invalid_principal", `invalid principal: ${JSON.stringify(principal)}`);
+    }
+    if (!isSensitivity(options.clearance)) {
+      throw new TenantError(
+        "invalid_sensitivity",
+        `clearance must be one of ${SENSITIVITIES.join(", ")}; got ${JSON.stringify(options.clearance)}`,
+      );
+    }
+    if (!isValidRoomName(options.room)) {
+      throw new TenantError("invalid_room", `invalid room name: ${JSON.stringify(options.room)}`);
+    }
+    const cfg = this.tenantEnvironment(tenantId).config;
+    if (!cfg.hasRoom(options.room) && options.room !== cfg.skillDefaultRoom) {
+      throw new TenantError(
+        "unknown_room",
+        `room '${options.room}' is not configured for tenant '${tenantId}' ` +
+          `(configured: ${Object.keys(cfg.roomSkills).join(", ") || "none"}; default: ${cfg.skillDefaultRoom})`,
+      );
+    }
+    for (const [label, v] of [
+      ["dailyTokenQuota", options.dailyTokenQuota],
+      ["dailyReadQuota", options.dailyReadQuota],
+    ] as const) {
+      if (v !== undefined && !(Number.isInteger(v) && v >= 1)) {
+        throw new TenantError("invalid_quota", `${label} must be a whole number ≥ 1`);
+      }
+    }
+    const now = nowSec();
+    this.db.transaction(() => {
+      this.db
+        .query("INSERT OR IGNORE INTO principals (tenant_id, id, status, created_at) VALUES (?, ?, 'active', ?)")
+        .run(tenantId, principal, now);
+      this.db
+        .query(
+          `INSERT INTO grants (tenant_id, principal, room, clearance, daily_token_quota, daily_read_quota, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (tenant_id, principal) DO UPDATE SET
+             room = excluded.room, clearance = excluded.clearance,
+             daily_token_quota = excluded.daily_token_quota, daily_read_quota = excluded.daily_read_quota,
+             updated_at = excluded.updated_at`,
+        )
+        .run(tenantId, principal, options.room, options.clearance, options.dailyTokenQuota ?? null, options.dailyReadQuota ?? null, now);
+    })();
+    return toGrant(
+      this.db.query("SELECT * FROM grants WHERE tenant_id = ? AND principal = ?").get(tenantId, principal) as GrantRow,
+    );
+  }
+
+  /** Remove a person's grant (a delegate can no longer act for them). Returns whether one existed. */
+  removeGrant(tenantId: string, principal: string): boolean {
+    this.requireTenant(tenantId);
+    return this.db.query("DELETE FROM grants WHERE tenant_id = ? AND principal = ?").run(tenantId, principal).changes > 0;
+  }
+
+  listGrants(tenantId?: string): GrantRecord[] {
+    const rows = (
+      tenantId === undefined
+        ? this.db.query("SELECT * FROM grants ORDER BY tenant_id, principal").all()
+        : this.db.query("SELECT * FROM grants WHERE tenant_id = ? ORDER BY principal").all(tenantId)
+    ) as GrantRow[];
+    return rows.map(toGrant);
+  }
+
+  /**
+   * What a delegate token may do for the person it names, right now. Checked on
+   * EVERY request, so suspending or offboarding a person, or changing their
+   * grant, takes effect on the next call. Never throws.
+   */
+  resolveDelegation(tenantId: string, person: string): DelegationResult {
+    if (!PRINCIPAL_RE.test(person)) return { ok: false, reason: "invalid_person" };
+    const who = this.getPrincipalRow(tenantId, person);
+    if (!who) return { ok: false, reason: "unknown_person" };
+    if (who.status !== "active") return { ok: false, reason: "person_suspended" };
+    const g = this.db.query("SELECT * FROM grants WHERE tenant_id = ? AND principal = ?").get(tenantId, person) as GrantRow | null;
+    if (!g) return { ok: false, reason: "no_grant" };
+    return {
+      ok: true,
+      principal: g.principal,
+      room: g.room,
+      clearance: clearanceOf(g.clearance),
+      dailyTokenQuota: g.daily_token_quota ?? null,
+      dailyReadQuota: g.daily_read_quota ?? null,
+    };
   }
 
   // ── Delivery quotas ────────────────────────────────────────────────────────

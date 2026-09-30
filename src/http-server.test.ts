@@ -879,6 +879,7 @@ describe("sessionCapabilities", () => {
     dailyTokenQuota: null,
     dailyReadQuota: null,
     maxSensitivity: null,
+    delegate: false,
     ...over,
   });
   test("no ceiling: the room's capabilities, minus admin", () => {

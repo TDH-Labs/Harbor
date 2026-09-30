@@ -37,11 +37,18 @@ import type { DeliveryQuota, GateContext } from "./gate.ts";
 import { TokenBucketLimiter, declaredLength, readBodyCapped } from "./http-util.ts";
 import { AgentSession, createSession } from "./isolation.ts";
 import { audit } from "./audit.ts";
-import { ControlPlane, TenantError, tokenHandle, usageSubject, type AuthResult } from "./tenants.ts";
+import { ControlPlane, PRINCIPAL_RE, TenantError, tokenHandle, usageSubject, type AuthResult } from "./tenants.ts";
+import type { Sensitivity } from "./sensitivity.ts";
 
 export const DEFAULT_SERVER_PORT = 8787;
 export const DEFAULT_SERVER_HOST = "127.0.0.1";
 const SESSION_HEADER = "mcp-session-id";
+/**
+ * Sent with a delegate (house-agent) token on EVERY request: the person the
+ * request is made for. The server, not the client, decides what that person may
+ * receive (their grant); the header only names them.
+ */
+export const ON_BEHALF_OF_HEADER = "harbor-on-behalf-of";
 /** Revisions accepted in `MCP-Protocol-Version` (absent ⇒ the spec's back-compat default). */
 const ACCEPTED_PROTOCOL_VERSIONS = new Set([MCP_PROTOCOL_VERSION, "2025-03-26"]);
 
@@ -78,9 +85,11 @@ interface HttpSession {
   id: string;
   tenantId: string;
   tokenId: string;
-  /** The person the token was issued to ("" if none). */
+  /** The person the token was issued to, or (for a delegate token) the person it acts for ("" if none). */
   principal: string;
   room: string;
+  /** The sensitivity ceiling the session was opened with. */
+  ceiling: Sensitivity | null;
   agent: AgentSession;
   lastSeen: number;
 }
@@ -177,7 +186,9 @@ export function createServerHandler(options: ServerOptions): ServerHandler {
   const sweeper = setInterval(sweepSessions, 60_000);
   sweeper.unref?.();
 
-  function liveSession(id: string | null, auth: Extract<AuthResult, { ok: true }>): HttpSession | null {
+  type Auth = Extract<AuthResult, { ok: true }>;
+
+  function liveSession(id: string | null, auth: Auth): HttpSession | null {
     if (!id) return null;
     const s = sessions.get(id);
     if (!s) return null;
@@ -188,6 +199,14 @@ export function createServerHandler(options: ServerOptions): ServerHandler {
     // A session belongs to the token that opened it. Anyone else gets the same
     // answer as for an unknown id, so ids cannot be probed.
     if (s.tokenId !== auth.tokenId || s.tenantId !== auth.tenantId) return null;
+    // A delegate token serves many people: a session belongs to the person it was
+    // opened for, and is dropped if their grant has since changed what it may see
+    // (the client re-initializes and gets the new one).
+    if (s.principal !== auth.principal) return null;
+    if (s.room !== auth.room || s.ceiling !== auth.maxSensitivity) {
+      sessions.delete(id);
+      return null;
+    }
     s.lastSeen = now();
     return s;
   }
@@ -206,18 +225,54 @@ export function createServerHandler(options: ServerOptions): ServerHandler {
       note("deny", "no_bearer");
       return UNAUTHORIZED();
     }
-    const auth = cp.authenticate(bearer, now() / 1000);
-    if (!auth.ok) {
-      note("deny", auth.reason); // the operator learns why; the client only learns "no"
+    const presented = cp.authenticate(bearer, now() / 1000);
+    if (!presented.ok) {
+      note("deny", presented.reason); // the operator learns why; the client only learns "no"
       return UNAUTHORIZED();
     }
-    note("tenant", auth.tenantId);
-    note("token", tokenHandle(auth.tokenId));
-    if (auth.principal) note("principal", auth.principal);
-    tenantLastActive.set(auth.tenantId, now());
+    note("tenant", presented.tenantId);
+    note("token", tokenHandle(presented.tokenId));
+    tenantLastActive.set(presented.tenantId, now());
 
-    // 3. Rate limit, per token.
-    const taken = limiter.take(auth.tokenId);
+    // 2b. Acting on behalf of a person. A delegate token has no room, person,
+    // quota or ceiling of its own: each request names the person, and that
+    // person's GRANT supplies all of them — re-read every time, so suspending or
+    // offboarding them, or changing their grant, applies to the next call. A
+    // token that is not a delegate may not claim to act for anyone.
+    let auth: Auth = presented;
+    const onBehalf = req.headers.get(ON_BEHALF_OF_HEADER);
+    if (presented.delegate) {
+      if (onBehalf === null) {
+        note("deny", "missing_on_behalf_of");
+        return json(400, { error: "missing_on_behalf_of" });
+      }
+      if (!PRINCIPAL_RE.test(onBehalf)) {
+        note("deny", "invalid_on_behalf_of");
+        return json(400, { error: "invalid_on_behalf_of" });
+      }
+      const d = cp.resolveDelegation(presented.tenantId, onBehalf);
+      if (!d.ok) {
+        note("deny", `delegation:${d.reason}`); // the operator learns why; the client only learns "no"
+        return json(403, { error: "forbidden" });
+      }
+      auth = {
+        ...presented,
+        room: d.room,
+        principal: d.principal,
+        maxSensitivity: d.clearance,
+        dailyTokenQuota: d.dailyTokenQuota,
+        dailyReadQuota: d.dailyReadQuota,
+      };
+      note("on_behalf_of", d.principal);
+    } else if (onBehalf !== null) {
+      note("deny", "on_behalf_of_without_delegate");
+      return json(403, { error: "forbidden" });
+    }
+    if (auth.principal) note("principal", auth.principal);
+
+    // 3. Rate limit, per token — and, for a delegate, per person, so one busy
+    // person does not spend the allowance of everyone the house agent serves.
+    const taken = limiter.take(presented.delegate ? `${presented.tokenId}:${auth.principal}` : auth.tokenId);
     if (!taken.ok) {
       note("deny", "rate_limited");
       return json(429, { error: "rate_limited" }, { "retry-after": String(taken.retryAfterSec) });
@@ -273,7 +328,7 @@ export function createServerHandler(options: ServerOptions): ServerHandler {
     const headers: Record<string, string> = {};
     let session: HttpSession | null;
     if (request.method === "initialize") {
-      const open = [...sessions.values()].filter((s) => s.tokenId === auth.tokenId).length;
+      const open = [...sessions.values()].filter((s) => s.tokenId === auth.tokenId && s.principal === auth.principal).length;
       if (open >= maxSessionsPerToken) {
         note("deny", "too_many_sessions");
         return json(429, { error: "too_many_sessions" }, { "retry-after": "30" });
@@ -285,6 +340,7 @@ export function createServerHandler(options: ServerOptions): ServerHandler {
       // Every audit row for this session names the PERSON (or, with none, the
       // token), so a read can be traced to who received it.
       const agentId = auth.principal || `token:${auth.tokenId}`;
+      const via = presented.delegate ? ` via=delegate:${tokenHandle(auth.tokenId)}` : "";
       const agent = createSession({
         room: auth.room,
         agentId,
@@ -295,7 +351,7 @@ export function createServerHandler(options: ServerOptions): ServerHandler {
         // The token's sensitivity ceiling, fixed for the life of the session.
         maxSensitivity: auth.maxSensitivity,
       });
-      audit.allow(id, "session_open", tokenHandle(auth.tokenId), `principal=${auth.principal || "-"} ceiling=${auth.maxSensitivity ?? "none"}`, {
+      audit.allow(id, "session_open", tokenHandle(auth.tokenId), `principal=${auth.principal || "-"} ceiling=${auth.maxSensitivity ?? "none"}${via}`, {
         room: auth.room,
         agentId,
         env,
@@ -306,6 +362,7 @@ export function createServerHandler(options: ServerOptions): ServerHandler {
         tokenId: auth.tokenId,
         principal: auth.principal,
         room: auth.room,
+        ceiling: auth.maxSensitivity,
         agent,
         lastSeen: now(),
       };

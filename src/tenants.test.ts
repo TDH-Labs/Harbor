@@ -148,6 +148,7 @@ describe("tokens", () => {
       dailyTokenQuota: null,
       dailyReadQuota: null,
       maxSensitivity: null,
+      delegate: false,
     });
   });
 
