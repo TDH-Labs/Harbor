@@ -161,7 +161,8 @@ describe("what a session can read back about others", () => {
     expect(lines(await c.call("audit_recent", { limit: 0 }))).toBe(1);
     expect(lines(await c.call("audit_recent", { limit: 1e9 }))).toBe(100);
     expect(lines(await c.call("audit_recent", { limit: 3 }))).toBe(3);
-    expect(lines(await c.call("audit_recent", { limit: Number.NaN as unknown as number }))).toBeGreaterThan(0);
+    expect(lines(await c.call("audit_recent", { limit: Number.NaN as unknown as number }))).toBe(10); // the default, not "all"
+    expect(lines(await c.call("audit_recent", { limit: "50" as unknown as number }))).toBe(10); // a non-number is ignored
   });
 
   test("a server session lists only its own room; the tenant's other rooms are not disclosed", async () => {
