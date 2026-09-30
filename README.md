@@ -155,7 +155,7 @@ Harbor ships the client and the trust boundary around it.
 | Secrets | `secrets` (`set`, `get`, `list`, `rm`, `export`, `doctor`) |
 | Server | `serve`, `tenant` (`create`, `add-room`, `list`, `suspend`, `resume`), `token` (`create`, `list`, `revoke`; `--principal`, daily quotas, `--max-sensitivity`, `--delegate`), `principal` (`list`, `suspend`, `resume`, `revoke`, `grant`, `ungrant`, `grants`), `service print` |
 | Labels | `label` (`set`, `clear`, `list`) — sensitivity tiers for rooms and skills; a token with `--max-sensitivity` is never handed a skill above it, or an unlabeled one |
-| Sharing | `guard <folder>` — scan for credentials and never-sync files before a folder is shared (never prints the secret) |
+| Sharing | `proposal` (`list`, `show`, `approve`) — install a skill from a shared folder only if it is exactly what you reviewed; `guard <folder>` — scan for credentials and never-sync files before a folder is shared (never prints the secret) |
 
 `harbor dashboard` serves on loopback by default. Binding it elsewhere requires
 `HARBOR_DASHBOARD_TOKEN` (at least 16 characters); the token is read from the

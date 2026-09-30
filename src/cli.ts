@@ -38,6 +38,7 @@ import { closeAllDbs } from "./db.ts";
 import { DEFAULT_EXCLUDE, DEFAULT_MAX_BYTES, guardPassed, scanTree } from "./guard.ts";
 import { ConfigEditError } from "./config-edit.ts";
 import { labelReport, setRoomLabel, setSkillLabel } from "./labels.ts";
+import { ProposalError, approveProposal, listProposals, showProposal } from "./proposals.ts";
 import type { Sensitivity } from "./sensitivity.ts";
 import { ControlPlane, TenantError, tokenHandle } from "./tenants.ts";
 import { SERVICE_TARGETS, SERVICE_UNITS, ServiceError, renderService, splitCommand, type ServiceTarget, type ServiceUnit } from "./service.ts";
@@ -58,7 +59,7 @@ import {
   validateRoom,
 } from "./mcp.ts";
 import { scaffold } from "./skill-create.ts";
-import { install } from "./skill-install.ts";
+import { SkillInstallError, install } from "./skill-install.ts";
 import { assignOrphans, assignOrphansAndReload, getOrphanSkills } from "./skill-assign.ts";
 import { addSkillToAnotherRoom, listConfiguredRooms, roomsForSkill } from "./skill-room-add.ts";
 import { update as updateSkill, removeSkill } from "./skill-update.ts";
@@ -2740,6 +2741,89 @@ function applyLabel(cmd: string, args: CommonArgs & { room?: string; skill?: str
   }
 }
 
+const proposalCmd = defineCommand({
+  meta: {
+    name: "proposal",
+    description:
+      "Owner approval for skills that arrive through a shared folder: review a candidate, then install it only if it is exactly what you reviewed. Nothing installs by itself.",
+  },
+  subCommands: {
+    list: defineCommand({
+      meta: { name: "list", description: "List candidate skills in a folder, their digests, and what would stop each being approved" },
+      args: { inbox: { type: "string", required: true, description: "The folder holding candidate skill directories" }, json: { type: "boolean", description: "Emit JSON" } },
+      run({ args }) {
+        try {
+          const rows = listProposals(args.inbox);
+          if (args.json) return printJson(rows.map(({ dir: _dir, ...p }) => p));
+          if (rows.length === 0) return console.log("(no candidate skills)");
+          for (const p of rows) {
+            console.log(`  ${p.name.padEnd(32)} ${p.problems.length === 0 ? "reviewable" : "NOT APPROVABLE"}  ${p.files.length} file(s), ${p.totalBytes} bytes`);
+            console.log(`    digest ${p.digest}`);
+            for (const why of p.problems) console.log(`    ! ${why}`);
+          }
+          console.log("\nRead a candidate with `harbor proposal show <name> --inbox <dir>` before approving it.");
+        } catch (err) {
+          proposalFailure("proposal list", err);
+        }
+      },
+    }),
+    show: defineCommand({
+      meta: { name: "show", description: "Print a candidate in full — every file — with its digest, for review" },
+      args: {
+        name: { type: "positional", required: true, description: "Candidate directory name" },
+        inbox: { type: "string", required: true, description: "The folder holding candidate skill directories" },
+      },
+      run({ args }) {
+        try {
+          const { proposal, contents } = showProposal(args.inbox, args.name);
+          console.log(`# ${proposal.name}  —  ${proposal.files.length} file(s), ${proposal.totalBytes} bytes`);
+          console.log(`# digest ${proposal.digest}`);
+          for (const why of proposal.problems) console.log(`# NOT APPROVABLE: ${why}`);
+          for (const [path, text] of contents) console.log(`\n===== ${path} =====\n${text}`);
+          console.log(`\n# To install exactly this:\n#   harbor proposal approve ${proposal.name} --inbox ${args.inbox} --room <room> --digest ${proposal.digest}`);
+        } catch (err) {
+          proposalFailure("proposal show", err);
+        }
+      },
+    }),
+    approve: defineCommand({
+      meta: {
+        name: "approve",
+        description: "Install one candidate into a room, only if its content matches --digest (what you reviewed). Refuses symlinks, binaries, credentials.",
+      },
+      args: {
+        ...commonArgs,
+        name: { type: "positional", required: true, description: "Candidate directory name" },
+        inbox: { type: "string", required: true, description: "The folder holding candidate skill directories" },
+        room: { type: "string", required: true, description: "Room to install it into" },
+        digest: { type: "string", required: true, description: "The digest printed by `proposal show`" },
+        "approved-by": { type: "string", description: "Recorded in the audit trail (default: operator)" },
+      },
+      run({ args }) {
+        try {
+          const r = approveProposal(envFromArgs(args), args.inbox, args.name, {
+            room: args.room,
+            digest: args.digest,
+            ...(args["approved-by"] ? { approvedBy: args["approved-by"] } : {}),
+          });
+          console.log(`✓ '${r.name}' installed into room '${r.room}' (${r.installedPath})`);
+        } catch (err) {
+          proposalFailure("proposal approve", err);
+        }
+      },
+    }),
+  },
+});
+
+function proposalFailure(cmd: string, err: unknown): void {
+  if (err instanceof ProposalError || err instanceof SkillInstallError || err instanceof ConfigEditError) {
+    console.error(`${cmd}: ${err.message}`);
+    process.exitCode = 1;
+    return;
+  }
+  throw err;
+}
+
 const guardCmd = defineCommand({
   meta: {
     name: "guard",
@@ -2951,6 +3035,7 @@ export const main: CommandDef = defineCommand({
     principal: principalCmd,
     guard: guardCmd,
     label: labelCmd,
+    proposal: proposalCmd,
     service: serviceCmd,
   },
 });

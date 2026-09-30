@@ -294,6 +294,7 @@ privilege-escalation path).
 | D13 | **`harbor guard`** is the pre-sync check for the shared folder. `export-shared` is **deferred**. | Skills are not synced (D10), so there is nothing to export; the folder still needs a secret scan. |
 | D14 | **Sensitivity labels** (`public < internal < restricted`): a room default plus a per-skill override, both in the operator's config; a token may carry a ceiling (`--max-sensitivity`). **A token with a ceiling is never handed an unlabeled skill**; a label that is present but not a tier counts as `restricted`. There is no label inside `SKILL.md`. | Decided with the operator: labeling is the price of keeping a bring-your-own agent from ingesting sensitive content, and "unlabeled ⇒ denied" is what makes forgetting to label safe. A label authored inside a skill would be chosen by the party a label must not trust. |
 | D15 | **The house agent runs on Harbor Server as a delegate**: a token with no room, person, ceiling or quota of its own, naming the person per request (`Harbor-On-Behalf-Of`); a per-person **grant** (room, clearance, quotas) supplies everything. One grant per person. | The house agent must never hold entitlements broader than the person it is serving (confused deputy). Grants make the person the single source of truth, re-read each request so suspend/offboard/changes apply immediately, and they share the person's quota with their own tokens. |
+| D16 | **Skills from a shared folder are approved by the owner, by digest.** `harbor proposal list|show|approve`; nothing installs on its own and no MCP tool can install. | An installed skill reaches everyone holding a token for the room. Binding approval to a digest, installing from the bytes hashed, and refusing links/binaries/credentials means "the owner reviewed it" is true of what is installed. |
 
 ### Built
 
@@ -309,6 +310,10 @@ privilege-escalation path).
   flagged not followed, oversized/binary/unreadable reported as skipped,
   `--files-from` confined to the root, and output that never contains the secret.
 - `control.db` from the previous release is migrated in place.
+- **Proposal approval** (D16): `src/proposals.ts`, `harbor proposal`. `skill-install`
+  also stopped copying symlinks from a source directory into the pool (found while
+  building this: a link in a source skill was copied as a link and would have been
+  served as skill text).
 - **Delegation** (D15): `grants` table (migrated in place), `tokens.delegate`,
   `ControlPlane.setGrant/removeGrant/listGrants/resolveDelegation`,
   `principal grant|ungrant|grants`, `token create --delegate`, and the
@@ -375,7 +380,6 @@ privilege-escalation path).
   the house agent's own authenticated channel. This is a residual risk, stated in
   `CLOUD.md`, not a solved problem. **Not answered yet:** which channel the house
   agent is served over, which decides how identity can be established.
-- **Owner approval for skill installs** that originate from a shared folder.
 - **Output-audience control** (a house agent posting restricted content where the
   audience is broader than the asker) — an application-layer policy Harbor
   cannot enforce.

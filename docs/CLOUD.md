@@ -417,9 +417,40 @@ people may read out of rooms that others hold grants for.
 One grant per person: a person acts through the house agent in one room at a
 time. For someone who needs two, make a room that holds both skill sets.
 
-### Not built yet
+### Skills that arrive through a shared folder
 
-- **Owner approval for skill installs** arriving through a shared folder.
+Nothing in Harbor installs a skill from a shared folder by itself, and no MCP tool
+can: installing is an operator command, so the house agent cannot install what a
+low-privilege person drops in a `proposals/` folder. That matters because a skill
+installed into a room is delivered to everyone who holds a token for it — a skill
+written by one person is text put in front of the others.
+
+When you do want to install one, review it and approve it by digest:
+
+```bash
+harbor proposal list --inbox <folder>            # candidates, digests, what blocks each
+harbor proposal show nda-review --inbox <folder> # every file, in full, plus its digest
+harbor proposal approve nda-review --inbox <folder> --room legal \
+    --digest <digest from show> --config <tenant config>
+```
+
+- Approval names the **digest** of the content (every path and every byte). If the
+  folder changed after you read it, the digest no longer matches and nothing is
+  installed.
+- What is installed is the bytes that were hashed: they are read once, staged in a
+  private directory and installed from there, never from the shared folder, so a
+  collaborator cannot swap a file between your review and the install.
+- A candidate containing a **symlink** or other non-regular file, a **binary**, an
+  oversized file, too many files, no `SKILL.md`, or anything `harbor guard` flags
+  (a credential, a secret-shaped filename) **cannot be approved**. Unreviewable
+  content cannot be approved by review.
+- Each approval is written to the audit log (`skill_approve`, digest, room, who).
+  `harbor skill-install` now also refuses a source directory containing a symlink
+  (it used to copy the link into the pool, to be served later as skill text).
+
+The digest proves you read what was installed. It does not judge whether a skill's
+*instructions* are wise or hostile — that is your read. Give particular attention to
+anything that tells the agent to fetch, run or send something.
 
 ## Sharing files (a synced folder, e.g. Google Drive)
 
@@ -428,6 +459,8 @@ notes, an inbox and proposals. Skills and room rules do **not** go in it — peo
 get skills through Harbor (their own agent over a token, or by asking the house
 agent), which is gated, quota'd and audited. A synced folder is none of those.
 
+- Skills that land in the folder are only **candidates**: see "Skills that arrive
+  through a shared folder" for the review-and-approve step.
 - **Everything in a folder syncs to every member's machine**, so assume every
   member's agent can read all of it.
 - Run **`harbor guard <folder>`** before each sync and block on a non-zero exit.
