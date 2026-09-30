@@ -623,6 +623,248 @@ describe("resource hygiene", () => {
   });
 });
 
+// ── people: attribution, suspension, quotas ──────────────────────────────────
+
+/** A skill whose body is ~`chars` characters (≈ chars/4 tokens once delivered). */
+function bigSkill(tenantId: string, name: string, chars: number): void {
+  writeFileSync(
+    join(cp.tenantRoot(tenantId), ".agents", "skills", name, "SKILL.md"),
+    `---\nname: ${name}\ndescription: ${name}\n---\n\n${"x".repeat(chars)}\n`,
+  );
+}
+
+describe("people: every action is attributed to a person", () => {
+  function setup() {
+    seedTenant("acme", {
+      rooms: {
+        legal: { skills: ["nda-review"], capabilities: READ_CAPS },
+        finance: { skills: ["payroll-secrets"], capabilities: READ_CAPS },
+      },
+      skills: { "nda-review": "Review NDAs", "payroll-secrets": "Run payroll" },
+    });
+    serve();
+  }
+
+  test("session open, allowed reads, gate denials and routing all carry the person", async () => {
+    setup();
+    const { token } = cp.createToken({ tenantId: "acme", room: "legal", principal: "kim@example.com" });
+    const sid = await init(token);
+    await call(token, sid, "read_skill", { skill_name: "nda-review" }); // allowed
+    await call(token, sid, "read_skill", { skill_name: "payroll-secrets" }); // denied: another room
+    await call(token, sid, "list_skills", { room: "finance" }); // denied: cross-room override
+    await call(token, sid, "route_skills", { prompt: "please run nda-review" });
+    await call(token, sid, "search_skills", { query: "nda", room: "finance" }); // denied
+    await call(token, sid, "activate_skill", { skill_name: "nda-review" });
+    await call(token, sid, "deactivate_skill", {});
+
+    const rows = auditRead(cp.tenantEnvironment("acme"), { limit: 500 }).filter((r) => r.sessionId === sid);
+    expect(rows.length).toBeGreaterThanOrEqual(8);
+    for (const r of rows) expect(r.agentId, `${r.capability || r.event} (${r.decision}) has no person`).toBe("kim@example.com");
+    // …and the rows we care most about are actually among them
+    expect(rows.some((r) => r.capability === "read_skill" && r.decision === "allowed" && r.resource === "nda-review")).toBe(true);
+    expect(rows.some((r) => r.decision === "denied" && r.resource === "payroll-secrets")).toBe(true);
+    expect(rows.some((r) => r.capability === "session_open")).toBe(true);
+    expect(rows.some((r) => r.capability === "route_skills")).toBe(true);
+  });
+
+  test("a token with no person is still attributable — to the token", async () => {
+    setup();
+    const { token, record } = cp.createToken({ tenantId: "acme", room: "legal" });
+    const sid = await init(token);
+    await call(token, sid, "read_skill", { skill_name: "nda-review" });
+    const rows = auditRead(cp.tenantEnvironment("acme"), { limit: 200 }).filter((r) => r.sessionId === sid);
+    expect(rows.length).toBeGreaterThan(2);
+    for (const r of rows) expect(r.agentId).toBe(`token:${record.id}`);
+  });
+
+  test("two people in the same room are told apart in the audit log", async () => {
+    setup();
+    const kim = cp.createToken({ tenantId: "acme", room: "legal", principal: "kim" }).token;
+    const lee = cp.createToken({ tenantId: "acme", room: "legal", principal: "lee" }).token;
+    const sk = await init(kim);
+    const sl = await init(lee);
+    await call(kim, sk, "read_skill", { skill_name: "payroll-secrets" }); // kim is denied
+    await call(lee, sl, "read_skill", { skill_name: "nda-review" }); // lee reads
+    const rows = auditRead(cp.tenantEnvironment("acme"), { limit: 500 });
+    expect(rows.filter((r) => r.decision === "denied" && r.resource === "payroll-secrets").map((r) => r.agentId)).toEqual(["kim"]);
+    expect(rows.filter((r) => r.capability === "read_skill" && r.decision === "allowed").map((r) => r.agentId)).toEqual(["lee"]);
+  });
+
+  test("the access log names the person (operator's view) but never the token", async () => {
+    setup();
+    const { token } = cp.createToken({ tenantId: "acme", room: "legal", principal: "kim" });
+    const sid = await init(token);
+    await call(token, sid, "list_skills");
+    expect(logs.some((l) => l.principal === "kim" && l.tenant === "acme")).toBe(true);
+    expect(JSON.stringify(logs)).not.toContain(token);
+  });
+
+  test("suspending a person cuts off their OPEN session on its next request; resuming restores it", async () => {
+    setup();
+    const { token } = cp.createToken({ tenantId: "acme", room: "legal", principal: "kim" });
+    const other = cp.createToken({ tenantId: "acme", room: "legal", principal: "lee" }).token;
+    const sid = await init(token);
+    const so = await init(other);
+    expect((await call(token, sid, "list_skills")).status).toBe(200);
+
+    cp.setPrincipalStatus("acme", "kim", "suspended");
+    expect((await call(token, sid, "list_skills")).status).toBe(401);
+    expect((await call(other, so, "list_skills")).status).toBe(200); // someone else is unaffected
+    expect(logs.at(-2)?.deny).toBe("principal_suspended");
+
+    cp.setPrincipalStatus("acme", "kim", "active");
+    expect((await call(token, sid, "list_skills")).status).toBe(200);
+  });
+
+  test("offboarding is permanent: every token the person held is dead", async () => {
+    setup();
+    const t1 = cp.createToken({ tenantId: "acme", room: "legal", principal: "kim" }).token;
+    const t2 = cp.createToken({ tenantId: "acme", room: "legal", principal: "kim" }).token;
+    const s1 = await init(t1);
+    cp.revokePrincipalTokens("acme", "kim");
+    expect((await call(t1, s1, "list_skills")).status).toBe(401);
+    expect((await post(t2, { jsonrpc: "2.0", id: 1, method: "initialize" })).status).toBe(401);
+    cp.setPrincipalStatus("acme", "kim", "active");
+    expect((await post(t2, { jsonrpc: "2.0", id: 1, method: "initialize" })).status).toBe(401); // not resurrected
+  });
+});
+
+describe("daily delivery quotas", () => {
+  const seed = () => {
+    seedTenant("acme", {
+      rooms: {
+        legal: { skills: ["big-a", "big-b", "big-c"], capabilities: READ_CAPS },
+        finance: { skills: ["payroll-secrets"], capabilities: READ_CAPS },
+      },
+      skills: { "big-a": "A", "big-b": "B", "big-c": "C", "payroll-secrets": "Run payroll" },
+    });
+    for (const n of ["big-a", "big-b", "big-c"]) bigSkill("acme", n, 4000); // ≈ 1,000 tokens each
+    serve({ rateLimitPerMinute: 10_000, sessionIdleSeconds: 200_000 });
+  };
+
+  test("content is delivered until the allowance is spent, then REFUSED — and the refusal carries none of it", async () => {
+    seed();
+    const { token } = cp.createToken({ tenantId: "acme", room: "legal", principal: "kim", dailyTokenQuota: 1500 });
+    const sid = await init(token);
+    const first = await call(token, sid, "read_skill", { skill_name: "big-a" });
+    expect(first.isError).toBe(false);
+    expect(first.text).toContain("xxxxxxxx");
+
+    const second = await call(token, sid, "read_skill", { skill_name: "big-b" });
+    expect(second.isError).toBe(true);
+    expect(second.text).toContain("quota exceeded");
+    expect(second.text).toContain("daily token quota");
+    expect(second.text).not.toContain("xxxxxxxx"); // no content leaked in the error
+
+    const denied = auditRead(cp.tenantEnvironment("acme"), { limit: 200 }).find(
+      (r) => r.decision === "denied" && r.resource === "big-b" && r.reason.includes("daily token quota"),
+    );
+    expect(denied?.agentId).toBe("kim");
+  });
+
+  test("opening a NEW SESSION buys no more content — the allowance is per person, not per session", async () => {
+    seed();
+    const { token } = cp.createToken({ tenantId: "acme", room: "legal", principal: "kim", dailyTokenQuota: 1500 });
+    const s1 = await init(token);
+    expect((await call(token, s1, "read_skill", { skill_name: "big-a" })).isError).toBe(false);
+    for (let i = 0; i < 5; i++) {
+      const fresh = await init(token); // a fresh session has a fresh per-session budget…
+      const r = await call(token, fresh, "read_skill", { skill_name: "big-b" });
+      expect(r.isError, `session ${i}`).toBe(true); // …but the person's daily allowance is already spent
+      expect(r.text).toContain("quota exceeded");
+    }
+  });
+
+  test("holding a SECOND TOKEN buys no more content — it shares the person's allowance", async () => {
+    seed();
+    const a = cp.createToken({ tenantId: "acme", room: "legal", principal: "kim", dailyTokenQuota: 1500 }).token;
+    const b = cp.createToken({ tenantId: "acme", room: "legal", principal: "kim", dailyTokenQuota: 1500 }).token;
+    const sa = await init(a);
+    const sb = await init(b);
+    expect((await call(a, sa, "read_skill", { skill_name: "big-a" })).isError).toBe(false);
+    expect((await call(b, sb, "read_skill", { skill_name: "big-b" })).isError).toBe(true); // 1000 used + 1000 > 1500
+  });
+
+  test("but a different person has their own allowance", async () => {
+    seed();
+    const kim = cp.createToken({ tenantId: "acme", room: "legal", principal: "kim", dailyTokenQuota: 1500 }).token;
+    const lee = cp.createToken({ tenantId: "acme", room: "legal", principal: "lee", dailyTokenQuota: 1500 }).token;
+    const sk = await init(kim);
+    const sl = await init(lee);
+    expect((await call(kim, sk, "read_skill", { skill_name: "big-a" })).isError).toBe(false);
+    expect((await call(kim, sk, "read_skill", { skill_name: "big-b" })).isError).toBe(true);
+    expect((await call(lee, sl, "read_skill", { skill_name: "big-a" })).isError).toBe(false);
+  });
+
+  test("a load-count quota caps how many skills are pulled, whatever their size", async () => {
+    seed();
+    const { token } = cp.createToken({ tenantId: "acme", room: "legal", principal: "kim", dailyReadQuota: 2 });
+    const sid = await init(token);
+    expect((await call(token, sid, "read_skill", { skill_name: "big-a" })).isError).toBe(false);
+    expect((await call(token, sid, "read_skill", { skill_name: "big-b" })).isError).toBe(false);
+    const third = await call(token, sid, "read_skill", { skill_name: "big-c" });
+    expect(third.isError).toBe(true);
+    expect(third.text).toContain("daily load quota");
+  });
+
+  test("activate_skill is metered the same way as read_skill", async () => {
+    seed();
+    const { token } = cp.createToken({ tenantId: "acme", room: "legal", principal: "kim", dailyTokenQuota: 1500 });
+    const sid = await init(token);
+    expect((await call(token, sid, "activate_skill", { skill_name: "big-a" })).isError).toBe(false);
+    const r = await call(token, sid, "activate_skill", { skill_name: "big-b" });
+    expect(r.isError).toBe(true);
+    expect(r.text).toContain("quota exceeded");
+    // …and read_skill shares the same pot as activate_skill
+    expect((await call(token, sid, "read_skill", { skill_name: "big-c" })).isError).toBe(true);
+  });
+
+  test("only DELIVERED content is charged: refused, unknown and cross-room reads cost nothing", async () => {
+    seed();
+    const { token } = cp.createToken({ tenantId: "acme", room: "legal", principal: "kim", dailyTokenQuota: 1500, dailyReadQuota: 5 });
+    const sid = await init(token);
+    await call(token, sid, "read_skill", { skill_name: "payroll-secrets" }); // gate: another room
+    await call(token, sid, "read_skill", { skill_name: "does-not-exist" }); // not found
+    await call(token, sid, "list_skills");
+    await call(token, sid, "search_skills", { query: "big" });
+    const kim = cp.listPrincipals("acme", clock).find((p) => p.id === "kim")!;
+    expect(kim).toMatchObject({ usedTokensToday: 0, usedReadsToday: 0 });
+    await call(token, sid, "read_skill", { skill_name: "big-a" });
+    expect(cp.listPrincipals("acme", clock).find((p) => p.id === "kim")).toMatchObject({ usedReadsToday: 1 });
+  });
+
+  test("the allowance resets at the UTC day boundary", async () => {
+    seed();
+    const { token } = cp.createToken({ tenantId: "acme", room: "legal", principal: "kim", dailyTokenQuota: 1500 });
+    const s1 = await init(token);
+    expect((await call(token, s1, "read_skill", { skill_name: "big-a" })).isError).toBe(false);
+    expect((await call(token, s1, "read_skill", { skill_name: "big-b" })).isError).toBe(true);
+    clock += 25 * 3_600_000; // tomorrow, whatever time it is now
+    const s2 = await init(token);
+    expect((await call(token, s2, "read_skill", { skill_name: "big-b" })).isError).toBe(false);
+  });
+
+  test("a token with no quota is unmetered (and creates no usage rows)", async () => {
+    seed();
+    const { token } = cp.createToken({ tenantId: "acme", room: "legal", principal: "kim" });
+    const sid = await init(token);
+    for (const n of ["big-a", "big-b", "big-c"]) expect((await call(token, sid, "read_skill", { skill_name: n })).isError).toBe(false);
+    expect(cp.listPrincipals("acme", clock).find((p) => p.id === "kim")).toMatchObject({ usedTokensToday: 0 });
+  });
+
+  test("the Core (stdio) server has no quota — nothing changes for a single-user install", async () => {
+    seed();
+    const core = createMcpServer({
+      env: cp.tenantEnvironment("acme"),
+      procEnv: { AGENT_ENV_ROOM: "legal", AGENT_ENV_SESSION: "core-q" },
+    });
+    for (const n of ["big-a", "big-b", "big-c"]) {
+      const res = await core.handle({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "read_skill", arguments: { skill_name: n } } });
+      expect((res!.result as { isError?: boolean }).isError ?? false).toBe(false);
+    }
+  });
+});
+
 // ── capability derivation (unit) ─────────────────────────────────────────────
 
 describe("sessionCapabilities", () => {
@@ -633,6 +875,9 @@ describe("sessionCapabilities", () => {
     tokenId: "id",
     capabilities: null,
     adminAllowed: false,
+    principal: "",
+    dailyTokenQuota: null,
+    dailyReadQuota: null,
     ...over,
   });
   test("no ceiling: the room's capabilities, minus admin", () => {

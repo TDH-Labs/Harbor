@@ -443,7 +443,7 @@ async function searchSkillsImpl(
   const { env, session } = currentGateContext();
   if (roomOverride && roomOverride !== session.room && !session.has(Capability.ADMIN)) {
     const reason = `room '${session.room}' may not search skills for room '${roomOverride}'`;
-    audit.deny(session.sessionId, "search_skills", roomOverride, reason, { room: session.room, env });
+    audit.deny(session.sessionId, "search_skills", roomOverride, reason, { room: session.room, agentId: session.agentId, env });
     return errorResult(`access denied: ${reason}.`);
   }
   const room = roomOverride ?? session.room;
@@ -469,6 +469,20 @@ async function routeSkillsImpl(
   return r.ok ? text(r.text) : errorResult(r.text);
 }
 
+/**
+ * Charge the caller's delivery quota for `tokens` of skill content. Returns the
+ * refusal to send back INSTEAD of the content (audited as a denial), or null to
+ * proceed. Harbor Core has no quota; Harbor Server sets one per person.
+ */
+function quotaRefusal(tool: string, skillName: string, tokens: number): ToolResult | null {
+  const { env, session, quota } = currentGateContext();
+  if (!quota) return null;
+  const q = quota.charge(tokens);
+  if (q.ok) return null;
+  audit.deny(session.sessionId, tool, skillName, q.reason, { room: session.room, agentId: session.agentId, env });
+  return errorResult(`quota exceeded: ${q.reason}`);
+}
+
 /** Activate a skill for sequential execution, debiting the budget and setting session activeSkill. */
 async function activateSkillImpl(skillName: string): Promise<ToolResult> {
   const { env, session } = currentGateContext();
@@ -483,6 +497,7 @@ async function activateSkillImpl(skillName: string): Promise<ToolResult> {
   if (!check.ok) {
     audit.deny(session.sessionId, "activate_skill", skillName, check.reason ?? "budget exceeded", {
       room: session.room,
+      agentId: session.agentId,
       env,
     });
     return errorResult(
@@ -491,11 +506,15 @@ async function activateSkillImpl(skillName: string): Promise<ToolResult> {
     );
   }
 
+  const refused = quotaRefusal("activate_skill", skillName, tokens);
+  if (refused) return refused;
+
   spendBudget(session.sessionId, `skill:${skillName}`, tokens, budgetOpts);
   session.activeSkill = skillName;
   session.activeSkillStartedAt = Date.now() / 1000;
   audit.allow(session.sessionId, "activate_skill", skillName, `activated ${tokens} tokens`, {
     room: session.room,
+    agentId: session.agentId,
     env,
   });
 
@@ -537,6 +556,7 @@ async function deactivateSkillImpl(): Promise<ToolResult> {
   session.activeSkillStartedAt = null;
   audit.allow(session.sessionId, "deactivate_skill", previous ?? "none", "deactivated skill", {
     room: session.room,
+    agentId: session.agentId,
     env,
   });
   return text(
@@ -560,6 +580,7 @@ async function readSkillImpl(skillName: string): Promise<ToolResult> {
   if (!check.ok) {
     audit.deny(session.sessionId, "read_skill", skillName, check.reason ?? "budget exceeded", {
       room: session.room,
+      agentId: session.agentId,
       env,
     });
     return errorResult(
@@ -568,10 +589,14 @@ async function readSkillImpl(skillName: string): Promise<ToolResult> {
     );
   }
 
+  const refused = quotaRefusal("read_skill", skillName, tokens);
+  if (refused) return refused;
+
   // Pre-check passed; debit. trySpend re-enforces the gate atomically.
   spendBudget(session.sessionId, `skill:${skillName}`, tokens, budgetOpts);
   audit.allow(session.sessionId, "read_skill", skillName, `loaded ${tokens} tokens`, {
     room: session.room,
+    agentId: session.agentId,
     env,
   });
   return text(detail.content);
@@ -587,7 +612,7 @@ async function listSkillsImpl(roomOverride?: string): Promise<ToolResult> {
   // guard `list_skills(room='legal')` from a marketing session leaks legal's pool.
   if (roomOverride && roomOverride !== session.room && !session.has(Capability.ADMIN)) {
     const reason = `room '${session.room}' may not list skills for room '${roomOverride}'`;
-    audit.deny(session.sessionId, "list_skills", roomOverride, reason, { room: session.room, env });
+    audit.deny(session.sessionId, "list_skills", roomOverride, reason, { room: session.room, agentId: session.agentId, env });
     return errorResult(`access denied: ${reason}.`);
   }
   const room = roomOverride ?? session.room;

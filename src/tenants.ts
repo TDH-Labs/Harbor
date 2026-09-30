@@ -30,6 +30,12 @@
  *  - `admin` (the room-gate bypass) cannot be put on a token unless the operator
  *    passes `allowAdmin`, and is stripped from a session otherwise even if a
  *    room's config lists it.
+ *
+ * People, not just tokens. A token may name a `principal` (the human it was
+ * issued to). Every audit row for that session then carries the person, the
+ * operator can suspend or revoke a person in one step (offboarding), and daily
+ * delivery quotas are counted per person — so a person cannot multiply their
+ * allowance by holding several tokens or opening several sessions.
  */
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
@@ -47,6 +53,8 @@ import { isRealPathWithin, isValidRoomName } from "./sandbox.ts";
 /** 3–40 chars, lowercase alphanumerics and hyphens, not starting/ending with a hyphen. */
 export const TENANT_ID_RE = /^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$/;
 export const TOKEN_PREFIX = "hbr_";
+/** A person: letters, digits and `._@+-` (so an email address works), 1–128 chars. */
+export const PRINCIPAL_RE = /^[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}$/;
 const TOKEN_RE = /^hbr_([0-9a-f]{12})_([A-Za-z0-9_-]{43})$/;
 /** `last_used_at` is written at most this often per token (no write per request). */
 const LAST_USED_GRANULARITY_S = 60;
@@ -63,7 +71,11 @@ export type TenantErrorCode =
   | "admin_not_allowed"
   | "no_such_token"
   | "config_escape"
-  | "invalid_ttl";
+  | "invalid_ttl"
+  | "invalid_principal"
+  | "no_such_principal"
+  | "principal_suspended"
+  | "invalid_quota";
 
 export class TenantError extends Error {
   readonly code: TenantErrorCode;
@@ -81,11 +93,31 @@ export interface TenantRecord {
   createdAt: number;
 }
 
+export type PrincipalStatus = "active" | "suspended";
+
+export interface PrincipalRecord {
+  tenantId: string;
+  id: string;
+  status: PrincipalStatus;
+  createdAt: number;
+  /** Tokens not revoked (expiry not considered). */
+  activeTokens: number;
+  /** Delivered today (UTC), summed over all this person's tokens and sessions. */
+  usedTokensToday: number;
+  usedReadsToday: number;
+}
+
 export interface TokenRecord {
   id: string;
   tenantId: string;
   room: string;
   label: string;
+  /** The person this token was issued to ("" if none). */
+  principal: string;
+  /** Skill-content tokens this token's holder may receive per UTC day (null = unlimited). */
+  dailyTokenQuota: number | null;
+  /** Skill loads per UTC day (null = unlimited). */
+  dailyReadQuota: number | null;
   /** Capability ceiling; null = whatever the room's config grants. */
   capabilities: string[] | null;
   adminAllowed: boolean;
@@ -107,6 +139,15 @@ export interface CreateTokenOptions {
   allowAdmin?: boolean;
   /** Skip the "room must be configured" check (a room configured later). */
   allowUnconfiguredRoom?: boolean;
+  /** The person this token is for. Enables per-person audit, suspend/revoke and shared quotas. */
+  principal?: string;
+  /**
+   * Cap on skill-content tokens delivered per UTC day, counted across ALL of the
+   * principal's tokens and sessions (per token when there is no principal).
+   */
+  dailyTokenQuota?: number;
+  /** Cap on skill loads (`read_skill` + `activate_skill`) per UTC day, same accounting. */
+  dailyReadQuota?: number;
 }
 
 /** Why authentication failed — for the operator's log, never for the client. */
@@ -117,7 +158,8 @@ export type AuthFailure =
   | "revoked"
   | "expired"
   | "unknown_tenant"
-  | "tenant_suspended";
+  | "tenant_suspended"
+  | "principal_suspended";
 
 export type AuthResult =
   | {
@@ -128,8 +170,22 @@ export type AuthResult =
       /** Capability ceiling from the token, or null. */
       capabilities: string[] | null;
       adminAllowed: boolean;
+      /** The person the token was issued to, or "". */
+      principal: string;
+      dailyTokenQuota: number | null;
+      dailyReadQuota: number | null;
     }
   | { ok: false; reason: AuthFailure };
+
+/** Limits for {@link ControlPlane.chargeUsage}; null = unlimited. */
+export interface UsageLimits {
+  tokens: number | null;
+  reads: number | null;
+}
+
+export type ChargeResult =
+  | { ok: true; usedTokens: number; usedReads: number }
+  | { ok: false; reason: string; usedTokens: number; usedReads: number };
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS tenants (
@@ -149,10 +205,41 @@ CREATE TABLE IF NOT EXISTS tokens (
   created_at    REAL NOT NULL,
   expires_at    REAL,
   revoked_at    REAL,
-  last_used_at  REAL
+  last_used_at  REAL,
+  principal          TEXT NOT NULL DEFAULT '',
+  daily_token_quota  INTEGER,
+  daily_read_quota   INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_tokens_tenant ON tokens(tenant_id);
+CREATE TABLE IF NOT EXISTS principals (
+  tenant_id  TEXT NOT NULL REFERENCES tenants(id),
+  id         TEXT NOT NULL,
+  status     TEXT NOT NULL DEFAULT 'active',
+  created_at REAL NOT NULL,
+  PRIMARY KEY (tenant_id, id)
+);
+CREATE TABLE IF NOT EXISTS usage (
+  tenant_id TEXT NOT NULL,
+  subject   TEXT NOT NULL,
+  day       TEXT NOT NULL,
+  tokens    INTEGER NOT NULL DEFAULT 0,
+  reads     INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (tenant_id, subject, day)
+);
 `;
+
+/** The UTC calendar day (YYYY-MM-DD) that quotas reset on. */
+export function utcDay(epochMs: number): string {
+  return new Date(epochMs).toISOString().slice(0, 10);
+}
+
+/**
+ * Who a delivery quota is counted against: the person when the token names one
+ * (so several tokens share one allowance), else the token itself.
+ */
+export function usageSubject(principal: string, tokenId: string): string {
+  return principal ? `p:${principal}` : `t:${tokenId}`;
+}
 
 const sha256 = (v: string): Buffer => createHash("sha256").update(v).digest();
 const nowSec = (): number => Date.now() / 1000;
@@ -175,6 +262,15 @@ interface TokenRow {
   expires_at: number | null;
   revoked_at: number | null;
   last_used_at: number | null;
+  principal: string;
+  daily_token_quota: number | null;
+  daily_read_quota: number | null;
+}
+interface PrincipalRow {
+  tenant_id: string;
+  id: string;
+  status: string;
+  created_at: number;
 }
 
 const toTenant = (r: TenantRow): TenantRecord => ({
@@ -188,6 +284,9 @@ const toToken = (r: TokenRow): TokenRecord => ({
   tenantId: r.tenant_id,
   room: r.room,
   label: r.label,
+  principal: r.principal ?? "",
+  dailyTokenQuota: r.daily_token_quota ?? null,
+  dailyReadQuota: r.daily_read_quota ?? null,
   capabilities: r.capabilities === null ? null : (JSON.parse(r.capabilities) as string[]),
   adminAllowed: r.admin_allowed === 1,
   createdAt: r.created_at,
@@ -224,6 +323,30 @@ export class ControlPlane {
       d.exec("PRAGMA foreign_keys = ON");
     }).db;
     this.db.exec(SCHEMA);
+    this.migrate();
+  }
+
+  /**
+   * Bring a control.db created by an earlier release up to date. `CREATE TABLE
+   * IF NOT EXISTS` never alters an existing table, so columns added later are
+   * added here, idempotently (and tolerant of two processes racing to do it).
+   */
+  private migrate(): void {
+    const have = new Set(
+      (this.db.query("PRAGMA table_info(tokens)").all() as Array<{ name: string }>).map((c) => c.name),
+    );
+    const add = (name: string, ddl: string): void => {
+      if (have.has(name)) return;
+      try {
+        this.db.exec(`ALTER TABLE tokens ADD COLUMN ${ddl}`);
+      } catch (err) {
+        if (!String((err as Error).message).includes("duplicate column")) throw err;
+      }
+    };
+    add("principal", "principal TEXT NOT NULL DEFAULT ''");
+    add("daily_token_quota", "daily_token_quota INTEGER");
+    add("daily_read_quota", "daily_read_quota INTEGER");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_tokens_principal ON tokens(tenant_id, principal)");
   }
 
   get tenantsDir(): string {
@@ -386,14 +509,41 @@ export class ControlPlane {
     if (options.ttlSeconds !== undefined && !(Number.isFinite(options.ttlSeconds) && options.ttlSeconds > 0)) {
       throw new TenantError("invalid_ttl", "ttlSeconds must be a positive number");
     }
+    for (const [label, v] of [
+      ["dailyTokenQuota", options.dailyTokenQuota],
+      ["dailyReadQuota", options.dailyReadQuota],
+    ] as const) {
+      if (v !== undefined && !(Number.isInteger(v) && v >= 1)) {
+        throw new TenantError("invalid_quota", `${label} must be a whole number ≥ 1`);
+      }
+    }
+    const principal = options.principal ?? "";
+    if (options.principal !== undefined) {
+      if (!PRINCIPAL_RE.test(principal)) {
+        throw new TenantError("invalid_principal", `invalid principal: ${JSON.stringify(principal)}`);
+      }
+      const existing = this.getPrincipalRow(options.tenantId, principal);
+      if (existing && existing.status !== "active") {
+        throw new TenantError(
+          "principal_suspended",
+          `principal '${principal}' is ${existing.status}; resume them before issuing a new token`,
+        );
+      }
+    }
 
     const id = randomBytes(6).toString("hex");
     const secret = randomBytes(32).toString("base64url");
     const now = nowSec();
+    if (principal) {
+      this.db
+        .query("INSERT OR IGNORE INTO principals (tenant_id, id, status, created_at) VALUES (?, ?, 'active', ?)")
+        .run(options.tenantId, principal, now);
+    }
     this.db
       .query(
-        `INSERT INTO tokens (id, tenant_id, room, label, secret_hash, capabilities, admin_allowed, created_at, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO tokens (id, tenant_id, room, label, secret_hash, capabilities, admin_allowed, created_at, expires_at,
+                             principal, daily_token_quota, daily_read_quota)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -405,6 +555,9 @@ export class ControlPlane {
         options.allowAdmin ? 1 : 0,
         now,
         options.ttlSeconds === undefined ? null : now + options.ttlSeconds,
+        principal,
+        options.dailyTokenQuota ?? null,
+        options.dailyReadQuota ?? null,
       );
     const record = toToken(this.db.query("SELECT * FROM tokens WHERE id = ?").get(id) as TokenRow);
     return { token: `${TOKEN_PREFIX}${id}_${secret}`, record };
@@ -446,6 +599,10 @@ export class ControlPlane {
     const tenant = this.getTenant(row.tenant_id);
     if (!tenant) return { ok: false, reason: "unknown_tenant" };
     if (tenant.status !== "active") return { ok: false, reason: "tenant_suspended" };
+    if (row.principal) {
+      const person = this.getPrincipalRow(row.tenant_id, row.principal);
+      if (!person || person.status !== "active") return { ok: false, reason: "principal_suspended" };
+    }
 
     if (row.last_used_at === null || now - row.last_used_at >= LAST_USED_GRANULARITY_S) {
       this.db.query("UPDATE tokens SET last_used_at = ? WHERE id = ?").run(now, id);
@@ -458,7 +615,127 @@ export class ControlPlane {
       tokenId: rec.id,
       capabilities: rec.capabilities,
       adminAllowed: rec.adminAllowed,
+      principal: rec.principal,
+      dailyTokenQuota: rec.dailyTokenQuota,
+      dailyReadQuota: rec.dailyReadQuota,
     };
+  }
+
+  // ── People ─────────────────────────────────────────────────────────────────
+
+  private getPrincipalRow(tenantId: string, id: string): PrincipalRow | null {
+    return this.db
+      .query("SELECT * FROM principals WHERE tenant_id = ? AND id = ?")
+      .get(tenantId, id) as PrincipalRow | null;
+  }
+
+  private requirePrincipal(tenantId: string, id: string): PrincipalRow {
+    this.requireTenant(tenantId);
+    const row = this.getPrincipalRow(tenantId, id);
+    if (!row) throw new TenantError("no_such_principal", `no such principal in tenant '${tenantId}': ${JSON.stringify(id)}`);
+    return row;
+  }
+
+  /** The people issued tokens in a tenant (all tenants if omitted), with today's delivery. */
+  listPrincipals(tenantId?: string, now: number = Date.now()): PrincipalRecord[] {
+    const rows = (
+      tenantId === undefined
+        ? this.db.query("SELECT * FROM principals ORDER BY tenant_id, id").all()
+        : this.db.query("SELECT * FROM principals WHERE tenant_id = ? ORDER BY id").all(tenantId)
+    ) as PrincipalRow[];
+    const day = utcDay(now);
+    return rows.map((r) => {
+      const active = this.db
+        .query("SELECT COUNT(*) AS n FROM tokens WHERE tenant_id = ? AND principal = ? AND revoked_at IS NULL")
+        .get(r.tenant_id, r.id) as { n: number };
+      const used = this.db
+        .query("SELECT tokens, reads FROM usage WHERE tenant_id = ? AND subject = ? AND day = ?")
+        .get(r.tenant_id, usageSubject(r.id, ""), day) as { tokens: number; reads: number } | null;
+      return {
+        tenantId: r.tenant_id,
+        id: r.id,
+        status: r.status === "suspended" ? "suspended" : "active",
+        createdAt: r.created_at,
+        activeTokens: active.n,
+        usedTokensToday: used?.tokens ?? 0,
+        usedReadsToday: used?.reads ?? 0,
+      };
+    });
+  }
+
+  /**
+   * Suspend or resume one person: all their tokens in the tenant stop
+   * authenticating (or resume) on their next request. Reversible.
+   */
+  setPrincipalStatus(tenantId: string, id: string, status: PrincipalStatus): PrincipalRecord {
+    this.requirePrincipal(tenantId, id);
+    this.db.query("UPDATE principals SET status = ? WHERE tenant_id = ? AND id = ?").run(status, tenantId, id);
+    return this.listPrincipals(tenantId).find((p) => p.id === id) as PrincipalRecord;
+  }
+
+  /**
+   * Offboarding: permanently revoke every token issued to this person. (The
+   * person stays on record so audit rows still resolve; suspend/resume is the
+   * reversible tool.) Returns how many tokens were newly revoked.
+   */
+  revokePrincipalTokens(tenantId: string, id: string): number {
+    this.requirePrincipal(tenantId, id);
+    return this.db
+      .query("UPDATE tokens SET revoked_at = ? WHERE tenant_id = ? AND principal = ? AND revoked_at IS NULL")
+      .run(nowSec(), tenantId, id).changes;
+  }
+
+  // ── Delivery quotas ────────────────────────────────────────────────────────
+
+  /**
+   * Atomically add `amount` to a subject's usage for the UTC day of `nowMs`, or
+   * refuse if it would exceed a limit (nothing is recorded on refusal).
+   *
+   * BEGIN IMMEDIATE, like the session budget: concurrent charges serialize, so
+   * two requests cannot both read "under the limit" and both pass. Because the
+   * subject is the PERSON, opening more sessions or holding more tokens does not
+   * buy a second allowance.
+   */
+  chargeUsage(
+    tenantId: string,
+    subject: string,
+    amount: { tokens: number; reads: number },
+    limits: UsageLimits,
+    nowMs: number = Date.now(),
+  ): ChargeResult {
+    const day = utcDay(nowMs);
+    const run = this.db.transaction((): ChargeResult => {
+      const row = this.db
+        .query("SELECT tokens, reads FROM usage WHERE tenant_id = ? AND subject = ? AND day = ?")
+        .get(tenantId, subject, day) as { tokens: number; reads: number } | null;
+      const usedTokens = row?.tokens ?? 0;
+      const usedReads = row?.reads ?? 0;
+      if (limits.tokens !== null && usedTokens + amount.tokens > limits.tokens) {
+        return {
+          ok: false,
+          usedTokens,
+          usedReads,
+          reason: `daily token quota exceeded (${usedTokens}/${limits.tokens} delivered today; resets 00:00 UTC)`,
+        };
+      }
+      if (limits.reads !== null && usedReads + amount.reads > limits.reads) {
+        return {
+          ok: false,
+          usedTokens,
+          usedReads,
+          reason: `daily load quota exceeded (${usedReads}/${limits.reads} loads today; resets 00:00 UTC)`,
+        };
+      }
+      this.db
+        .query(
+          `INSERT INTO usage (tenant_id, subject, day, tokens, reads) VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT (tenant_id, subject, day)
+           DO UPDATE SET tokens = tokens + excluded.tokens, reads = reads + excluded.reads`,
+        )
+        .run(tenantId, subject, day, amount.tokens, amount.reads);
+      return { ok: true, usedTokens: usedTokens + amount.tokens, usedReads: usedReads + amount.reads };
+    });
+    return run.immediate();
   }
 
   // ── Per-tenant Environment ─────────────────────────────────────────────────

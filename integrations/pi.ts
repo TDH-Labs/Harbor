@@ -130,7 +130,7 @@ async function searchSkillsImpl(
   const { env, session } = currentGateContext();
   if (roomOverride && roomOverride !== session.room && !session.has(Capability.ADMIN)) {
     const reason = `room '${session.room}' may not search skills for room '${roomOverride}'`;
-    audit.deny(session.sessionId, "search_skills", roomOverride, reason, { room: session.room, env });
+    audit.deny(session.sessionId, "search_skills", roomOverride, reason, { room: session.room, agentId: session.agentId, env });
     return {
       content: [{ type: "text", text: `Access denied: ${reason}.` }],
       details: { error: "access_denied", room: roomOverride },
@@ -170,6 +170,7 @@ async function activateSkillImpl(skillName: string): Promise<PiToolResult> {
   if (!check.ok) {
     audit.deny(session.sessionId, "activate_skill", skillName, check.reason ?? "budget exceeded", {
       room: session.room,
+      agentId: session.agentId,
       env,
     });
     return {
@@ -183,6 +184,7 @@ async function activateSkillImpl(skillName: string): Promise<PiToolResult> {
   session.activeSkillStartedAt = Date.now() / 1000;
   audit.allow(session.sessionId, "activate_skill", skillName, `activated ${tokens} tokens`, {
     room: session.room,
+    agentId: session.agentId,
     env,
   });
   const banner = `[HARBOR: SKILL '${skillName}' IS NOW ACTIVE]\nSequential policy: Focus exclusively on '${skillName}' until complete. Call deactivate_skill when finished.\n---\n\n`;
@@ -200,6 +202,7 @@ async function deactivateSkillImpl(): Promise<PiToolResult> {
   session.activeSkillStartedAt = null;
   audit.allow(session.sessionId, "deactivate_skill", previous ?? "none", "deactivated skill", {
     room: session.room,
+    agentId: session.agentId,
     env,
   });
   return {
@@ -232,6 +235,7 @@ async function readSkillImpl(skillName: string): Promise<PiToolResult> {
   if (!check.ok) {
     audit.deny(session.sessionId, "read_skill", skillName, check.reason ?? "budget exceeded", {
       room: session.room,
+      agentId: session.agentId,
       env,
     });
     return {
@@ -243,6 +247,7 @@ async function readSkillImpl(skillName: string): Promise<PiToolResult> {
   spendBudget(session.sessionId, `skill:${skillName}`, tokens, budgetOpts);
   audit.allow(session.sessionId, "read_skill", skillName, `loaded ${tokens} tokens`, {
     room: session.room,
+    agentId: session.agentId,
     env,
   });
   return {
@@ -256,7 +261,7 @@ async function listSkillsImpl(roomOverride?: string): Promise<PiToolResult> {
   const { env, session } = currentGateContext();
   if (roomOverride && roomOverride !== session.room && !session.has(Capability.ADMIN)) {
     const reason = `room '${session.room}' may not list skills for room '${roomOverride}'`;
-    audit.deny(session.sessionId, "list_skills", roomOverride, reason, { room: session.room, env });
+    audit.deny(session.sessionId, "list_skills", roomOverride, reason, { room: session.room, agentId: session.agentId, env });
     return {
       content: [{ type: "text", text: `Access denied: ${reason}.` }],
       details: { error: "access_denied", room: roomOverride },

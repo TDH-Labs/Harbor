@@ -81,10 +81,22 @@ const SKILL_GATED_TOOLS = new Set<string>(["read_skill", "read_skill_digest", "a
  */
 const ROOM_OVERRIDE_GATED_TOOLS = new Set<string>(["list_skills"]);
 
+/**
+ * A cap on how much skill content one caller may be DELIVERED per day, enforced
+ * by whoever owns the caller's identity (Harbor Server counts per person). A
+ * tool that hands skill text to an agent calls {@link DeliveryQuota.charge} with
+ * the size first and returns the refusal instead of the content.
+ */
+export interface DeliveryQuota {
+  charge(tokens: number): { ok: true } | { ok: false; reason: string };
+}
+
 /** Ambient gate context: which session/environment wrapped calls run under. */
 export interface GateContext {
   env: Environment;
   session: AgentSession;
+  /** Optional delivery quota (Harbor Server sets it; Harbor Core has none). */
+  quota?: DeliveryQuota;
 }
 
 /**

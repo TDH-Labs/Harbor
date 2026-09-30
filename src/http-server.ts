@@ -33,10 +33,11 @@ import { randomBytes } from "node:crypto";
 
 import { createMcpServer, MCP_PROTOCOL_VERSION, type JsonRpcRequest } from "../integrations/mcp-server.ts";
 import { Environment } from "./env.ts";
-import type { GateContext } from "./gate.ts";
+import type { DeliveryQuota, GateContext } from "./gate.ts";
 import { TokenBucketLimiter, declaredLength, readBodyCapped } from "./http-util.ts";
 import { AgentSession, createSession } from "./isolation.ts";
-import { ControlPlane, TenantError, tokenHandle, type AuthResult } from "./tenants.ts";
+import { audit } from "./audit.ts";
+import { ControlPlane, TenantError, tokenHandle, usageSubject, type AuthResult } from "./tenants.ts";
 
 export const DEFAULT_SERVER_PORT = 8787;
 export const DEFAULT_SERVER_HOST = "127.0.0.1";
@@ -77,6 +78,8 @@ interface HttpSession {
   id: string;
   tenantId: string;
   tokenId: string;
+  /** The person the token was issued to ("" if none). */
+  principal: string;
   room: string;
   agent: AgentSession;
   lastSeen: number;
@@ -210,6 +213,7 @@ export function createServerHandler(options: ServerOptions): ServerHandler {
     }
     note("tenant", auth.tenantId);
     note("token", tokenHandle(auth.tokenId));
+    if (auth.principal) note("principal", auth.principal);
     tenantLastActive.set(auth.tenantId, now());
 
     // 3. Rate limit, per token.
@@ -278,8 +282,24 @@ export function createServerHandler(options: ServerOptions): ServerHandler {
       const caps = sessionCapabilities(env.config.roomCapabilities(auth.room), auth);
       // strictRoom: on a network server a configured room with no skills grants
       // nothing (Core would read that as "unrestricted" — a cross-room leak here).
-      const agent = createSession({ room: auth.room, capabilities: caps, env, sessionId: id, strictRoom: true });
-      session = { id, tenantId: auth.tenantId, tokenId: auth.tokenId, room: auth.room, agent, lastSeen: now() };
+      // Every audit row for this session names the PERSON (or, with none, the
+      // token), so a read can be traced to who received it.
+      const agentId = auth.principal || `token:${auth.tokenId}`;
+      const agent = createSession({ room: auth.room, agentId, capabilities: caps, env, sessionId: id, strictRoom: true });
+      audit.allow(id, "session_open", tokenHandle(auth.tokenId), `principal=${auth.principal || "-"}`, {
+        room: auth.room,
+        agentId,
+        env,
+      });
+      session = {
+        id,
+        tenantId: auth.tenantId,
+        tokenId: auth.tokenId,
+        principal: auth.principal,
+        room: auth.room,
+        agent,
+        lastSeen: now(),
+      };
       sessions.set(id, session);
       headers["mcp-session-id"] = id;
       note("session", id.slice(0, 8));
@@ -293,7 +313,25 @@ export function createServerHandler(options: ServerOptions): ServerHandler {
 
     // 7. Dispatch through the SAME server the stdio transport uses, with the
     // context fixed by the token — never resolved from anything the client sent.
-    const ctx: GateContext = { env, session: session.agent };
+    // Delivery is capped per PERSON (per token when there is none), across every
+    // session and token they hold — so opening more sessions buys no more content.
+    const subject = usageSubject(auth.principal, auth.tokenId);
+    const quota: DeliveryQuota | undefined =
+      auth.dailyTokenQuota === null && auth.dailyReadQuota === null
+        ? undefined
+        : {
+            charge: (tokens) => {
+              const r = cp.chargeUsage(
+                auth.tenantId,
+                subject,
+                { tokens, reads: 1 },
+                { tokens: auth.dailyTokenQuota, reads: auth.dailyReadQuota },
+                now(),
+              );
+              return r.ok ? { ok: true } : { ok: false, reason: r.reason };
+            },
+          };
+    const ctx: GateContext = { env, session: session.agent, ...(quota ? { quota } : {}) };
     // trustConfigSystemOneUrl:false — a tenant's config must not be able to aim
     // the server's outbound requests at an arbitrary host (SSRF).
     const server = createMcpServer({ env, resolveContext: () => ctx, trustConfigSystemOneUrl: false });

@@ -2389,6 +2389,15 @@ const tokenCmd = defineCommand({
         capabilities: { type: "string", description: "Comma-separated capability ceiling (default: the room's own)" },
         "allow-admin": { type: "boolean", description: "Permit the 'admin' capability (bypasses room gating!)" },
         "allow-unconfigured-room": { type: "boolean", description: "Allow a room the tenant has not configured yet" },
+        principal: {
+          type: "string",
+          description: "The person this token is for (audit names them; suspend/revoke and quotas apply per person)",
+        },
+        "daily-token-quota": {
+          type: "string",
+          description: "Max skill-content tokens delivered per UTC day, counted per person across all their tokens and sessions",
+        },
+        "daily-read-quota": { type: "string", description: "Max skill loads (read_skill + activate_skill) per UTC day, same accounting" },
         json: { type: "boolean", description: "Emit JSON" },
       },
       run({ args }) {
@@ -2408,11 +2417,24 @@ const tokenCmd = defineCommand({
           ttlSeconds = Math.round(days * 86400);
         }
         const caps = parseCommaList(args.capabilities);
+        let dailyTokenQuota: number | undefined;
+        let dailyReadQuota: number | undefined;
+        if (args["daily-token-quota"]) {
+          dailyTokenQuota = intOption("token create", "--daily-token-quota", args["daily-token-quota"], 1, Number.MAX_SAFE_INTEGER);
+          if (dailyTokenQuota === undefined) return;
+        }
+        if (args["daily-read-quota"]) {
+          dailyReadQuota = intOption("token create", "--daily-read-quota", args["daily-read-quota"], 1, Number.MAX_SAFE_INTEGER);
+          if (dailyReadQuota === undefined) return;
+        }
         const cp = new ControlPlane(serverDataDir(args));
         const made = tenantAction("token create", () =>
           cp.createToken({
             tenantId: args.tenant as string,
             room: args.room as string,
+            ...(args.principal ? { principal: args.principal } : {}),
+            ...(dailyTokenQuota !== undefined ? { dailyTokenQuota } : {}),
+            ...(dailyReadQuota !== undefined ? { dailyReadQuota } : {}),
             ...(args.label ? { label: args.label } : {}),
             ...(ttlSeconds !== undefined ? { ttlSeconds } : {}),
             ...(caps.length > 0 ? { capabilities: caps } : {}),
@@ -2425,6 +2447,7 @@ const tokenCmd = defineCommand({
         console.log(made.token);
         console.error(
           `token ${made.record.id} for tenant '${made.record.tenantId}', room '${made.record.room}'` +
+            `${made.record.principal ? `, person '${made.record.principal}'` : ""}` +
             `${made.record.expiresAt ? `, expires ${new Date(made.record.expiresAt * 1000).toISOString()}` : ""}.`,
         );
         console.error("This is the only time the secret is shown. Store it now; revoke with `harbor token revoke " + made.record.id + "`.");
@@ -2440,8 +2463,13 @@ const tokenCmd = defineCommand({
         const now = Date.now() / 1000;
         for (const r of rows) {
           const state = r.revokedAt !== null ? "revoked" : r.expiresAt !== null && r.expiresAt <= now ? "expired" : "active";
+          const quota =
+            r.dailyTokenQuota !== null || r.dailyReadQuota !== null
+              ? ` [quota/day: ${r.dailyTokenQuota ?? "∞"} tok, ${r.dailyReadQuota ?? "∞"} loads]`
+              : "";
           console.log(
-            `  ${tokenHandle(r.id).padEnd(20)} ${r.tenantId.padEnd(20)} ${r.room.padEnd(16)} ${state.padEnd(8)} ${r.label}`,
+            `  ${tokenHandle(r.id).padEnd(20)} ${r.tenantId.padEnd(20)} ${r.room.padEnd(16)} ${state.padEnd(8)} ` +
+              `${(r.principal || "-").padEnd(24)} ${r.label}${quota}`,
           );
         }
       },
@@ -2452,6 +2480,82 @@ const tokenCmd = defineCommand({
       run({ args }) {
         const t = tenantAction("token revoke", () => new ControlPlane(serverDataDir(args)).revokeToken(args.id));
         if (t) console.log(`✓ token ${t.id} revoked`);
+      },
+    }),
+  },
+});
+
+const principalCmd = defineCommand({
+  meta: {
+    name: "principal",
+    description: "Manage the people tokens are issued to (suspend, resume, offboard, see today's usage)",
+  },
+  subCommands: {
+    list: defineCommand({
+      meta: { name: "list", description: "List people, their status, live tokens and today's delivery" },
+      args: {
+        ...serverArgs,
+        tenant: { type: "string", description: "Only this tenant" },
+        json: { type: "boolean", description: "Emit JSON" },
+      },
+      run({ args }) {
+        const rows = new ControlPlane(serverDataDir(args)).listPrincipals(args.tenant || undefined);
+        if (args.json) return printJson(rows);
+        if (rows.length === 0) return console.log("(no people yet — issue a token with --principal)");
+        for (const r of rows) {
+          console.log(
+            `  ${r.tenantId.padEnd(20)} ${r.id.padEnd(32)} ${r.status.padEnd(10)} ${String(r.activeTokens).padStart(2)} token(s)  ` +
+              `today: ${r.usedTokensToday} tok, ${r.usedReadsToday} loads`,
+          );
+        }
+      },
+    }),
+    suspend: defineCommand({
+      meta: { name: "suspend", description: "Suspend a person: every token issued to them stops working on its next request" },
+      args: {
+        ...serverArgs,
+        id: { type: "positional", required: true, description: "Person (the --principal used at token creation)" },
+        tenant: { type: "string", description: "Tenant id" },
+      },
+      run({ args }) {
+        if (!args.tenant) return void (console.error("principal suspend: --tenant is required"), (process.exitCode = 1));
+        const p = tenantAction("principal suspend", () =>
+          new ControlPlane(serverDataDir(args)).setPrincipalStatus(args.tenant as string, args.id, "suspended"),
+        );
+        if (p) console.log(`✓ '${p.id}' suspended in tenant '${p.tenantId}' (${p.activeTokens} token(s) now refused)`);
+      },
+    }),
+    resume: defineCommand({
+      meta: { name: "resume", description: "Resume a suspended person" },
+      args: {
+        ...serverArgs,
+        id: { type: "positional", required: true, description: "Person" },
+        tenant: { type: "string", description: "Tenant id" },
+      },
+      run({ args }) {
+        if (!args.tenant) return void (console.error("principal resume: --tenant is required"), (process.exitCode = 1));
+        const p = tenantAction("principal resume", () =>
+          new ControlPlane(serverDataDir(args)).setPrincipalStatus(args.tenant as string, args.id, "active"),
+        );
+        if (p) console.log(`✓ '${p.id}' resumed in tenant '${p.tenantId}'`);
+      },
+    }),
+    revoke: defineCommand({
+      meta: {
+        name: "revoke",
+        description: "Offboard: permanently revoke every token issued to a person (use suspend for a reversible stop)",
+      },
+      args: {
+        ...serverArgs,
+        id: { type: "positional", required: true, description: "Person" },
+        tenant: { type: "string", description: "Tenant id" },
+      },
+      run({ args }) {
+        if (!args.tenant) return void (console.error("principal revoke: --tenant is required"), (process.exitCode = 1));
+        const n = tenantAction("principal revoke", () =>
+          new ControlPlane(serverDataDir(args)).revokePrincipalTokens(args.tenant as string, args.id),
+        );
+        if (n !== undefined) console.log(`✓ revoked ${n} token(s) issued to '${args.id}' in tenant '${args.tenant}'`);
       },
     }),
   },
@@ -2591,6 +2695,7 @@ export const main: CommandDef = defineCommand({
     serve: serveCmd,
     tenant: tenantCmd,
     token: tokenCmd,
+    principal: principalCmd,
     service: serviceCmd,
   },
 });

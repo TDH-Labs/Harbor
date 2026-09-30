@@ -254,6 +254,75 @@ describe("the documented quickstart works end to end", () => {
   });
 });
 
+describe("harbor token --principal / quotas, and harbor principal", () => {
+  beforeEach(async () => {
+    await cli("tenant", "create", "acme", ...D());
+  });
+
+  test("a token can name its person and carry daily quotas; list shows both", async () => {
+    const made = harborJson<{ token: string; id: string; principal: string; dailyTokenQuota: number; dailyReadQuota: number }>(
+      "token", "create", "--tenant", "acme", "--room", "general", "--principal", "kim@example.com",
+      "--daily-token-quota", "20000", "--daily-read-quota", "15", "--json", ...D(),
+    );
+    expect(made).toMatchObject({ principal: "kim@example.com", dailyTokenQuota: 20000, dailyReadQuota: 15 });
+    const listed = (await cli("token", "list", ...D())).out;
+    expect(listed).toContain("kim@example.com");
+    expect(listed).toContain("quota/day: 20000 tok, 15 loads");
+    // a token with neither shows a dash and no quota note
+    await cli("token", "create", "--tenant", "acme", "--room", "general", ...D());
+    const both = (await cli("token", "list", ...D())).out.split("\n").filter((l) => l.includes("hbr_"));
+    expect(both.some((l) => !l.includes("quota/day") && l.includes(" - "))).toBe(true);
+  });
+
+  test("bad principals and quotas are refused before anything is created", async () => {
+    for (const bad of ["kim lee", "../x", "-kim"]) {
+      const r = await cli("token", "create", "--tenant", "acme", "--room", "general", "--principal", bad, ...D());
+      expect(r.code, bad).toBe(1);
+      expect(r.out, bad).toContain("invalid principal");
+    }
+    for (const q of ["0", "-5", "1.5", "abc"]) {
+      const r = await cli("token", "create", "--tenant", "acme", "--room", "general", "--daily-token-quota", q, ...D());
+      expect(r.code, q).toBe(1);
+      expect(r.out, q).toContain("--daily-token-quota must be an integer");
+    }
+    expect((await cli("token", "list", ...D())).out).toContain("(no tokens)");
+  });
+
+  test("principal list / suspend / resume / revoke", async () => {
+    await cli("token", "create", "--tenant", "acme", "--room", "general", "--principal", "kim", ...D());
+    await cli("token", "create", "--tenant", "acme", "--room", "general", "--principal", "kim", ...D());
+    await cli("token", "create", "--tenant", "acme", "--room", "general", "--principal", "lee", ...D());
+
+    const rows = harborJson<Array<{ id: string; status: string; activeTokens: number }>>("principal", "list", "--tenant", "acme", "--json", ...D());
+    expect(rows.map((r) => [r.id, r.status, r.activeTokens])).toEqual([["kim", "active", 2], ["lee", "active", 1]]);
+    expect((await cli("principal", "list", ...D())).out).toMatch(/kim\s+active\s+2 token\(s\)/);
+
+    expect((await cli("principal", "suspend", "kim", "--tenant", "acme", ...D())).out).toContain("suspended");
+    expect((await cli("principal", "list", "--tenant", "acme", ...D())).out).toMatch(/kim\s+suspended/);
+    expect((await cli("principal", "resume", "kim", "--tenant", "acme", ...D())).out).toContain("resumed");
+
+    const revoked = await cli("principal", "revoke", "kim", "--tenant", "acme", ...D());
+    expect(revoked.out).toContain("revoked 2 token(s)");
+    expect((await cli("principal", "revoke", "kim", "--tenant", "acme", ...D())).out).toContain("revoked 0 token(s)");
+    const active = harborJson<Array<{ id: string; activeTokens: number }>>("principal", "list", "--tenant", "acme", "--json", ...D());
+    expect(active.find((r) => r.id === "kim")?.activeTokens).toBe(0);
+    expect(active.find((r) => r.id === "lee")?.activeTokens).toBe(1); // untouched
+  });
+
+  test("--tenant is required, and unknown people/tenants are clean errors", async () => {
+    for (const sub of ["suspend", "resume", "revoke"]) {
+      const r = await cli("principal", sub, "kim", ...D());
+      expect(r.code, sub).toBe(1);
+      expect(r.out, sub).toContain("--tenant is required");
+    }
+    const ghost = await cli("principal", "suspend", "ghost", "--tenant", "acme", ...D());
+    expect(ghost.code).toBe(1);
+    expect(ghost.out).toContain("no such principal");
+    expect((await cli("principal", "suspend", "kim", "--tenant", "nobody", ...D())).out).toContain("no such tenant");
+    expect((await cli("principal", "list", ...D())).out).toContain("no people yet");
+  });
+});
+
 describe("harbor service print", () => {
   test("renders a systemd unit for the server", async () => {
     const r = await cli("service", "print", "--unit", "serve", "--target", "systemd", "--harbor-bin", "/usr/local/bin/harbor", "--port", "9000", "--data-dir", "/var/lib/harbor");

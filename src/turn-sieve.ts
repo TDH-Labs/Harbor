@@ -52,7 +52,7 @@ export async function routeTurn(
 
   if (roomOverride && roomOverride !== session.room && !session.has(Capability.ADMIN)) {
     const reason = `room '${session.room}' may not route skills for room '${roomOverride}'`;
-    audit.deny(session.sessionId, "route_skills", roomOverride, reason, { room: session.room, env });
+    audit.deny(session.sessionId, "route_skills", roomOverride, reason, { room: session.room, agentId: session.agentId, env });
     return { ok: false, text: `access denied: ${reason}.`, room: roomOverride };
   }
   const room = roomOverride ?? session.room;
@@ -74,7 +74,7 @@ export async function routeTurn(
       "route_skills",
       "system-one",
       `router named ${sieve.dropped.length} skill(s) outside room '${room}'; discarded`,
-      { room: session.room, env },
+      { room: session.room, agentId: session.agentId, env },
     );
   }
   audit.allow(
@@ -82,7 +82,7 @@ export async function routeTurn(
     "route_skills",
     room,
     `${sieve.selectedSkills.length}/${available.length} skill(s) via ${sieve.source}`,
-    { room: session.room, env },
+    { room: session.room, agentId: session.agentId, env },
   );
 
   return {
