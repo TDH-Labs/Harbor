@@ -69,8 +69,29 @@ export class Environment {
    * always pass an explicit env and never hit this path.
    */
   private static _default: Environment | null = null;
+  private static _defaultLockedReason: string | null = null;
   static default(): Environment {
+    if (Environment._defaultLockedReason !== null) {
+      throw new Error(`Environment.default() is disabled: ${Environment._defaultLockedReason}`);
+    }
     return (Environment._default ??= Environment.load());
+  }
+
+  /**
+   * Forbid {@link Environment.default} for the rest of the process. A
+   * multi-tenant server calls this at startup: the "default" environment is the
+   * OPERATOR's own home (`~/.agent-env`), and any primitive that fell back to it
+   * for lack of an explicit `env` would read or write the operator's state on a
+   * tenant's behalf. With the lock, that mistake is a loud error, not a leak.
+   */
+  static lockDefault(reason: string): void {
+    Environment._defaultLockedReason = reason;
+    Environment._default = null;
+  }
+
+  /** Undo {@link lockDefault} (test teardown). */
+  static unlockDefault(): void {
+    Environment._defaultLockedReason = null;
   }
 
   // ── Template resolution ──────────────────────────────────────────────────
