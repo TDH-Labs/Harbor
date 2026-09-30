@@ -8,11 +8,15 @@ import { closeAllDbs } from "./db.ts";
 import { Environment } from "./env.ts";
 import { AgentSession, auditRead } from "./isolation.ts";
 import {
+  MAX_MATCH_TOKENS,
+  MAX_SEARCH_QUERY_CHARS,
+  MAX_SEARCH_TERMS,
   MIN_DETERMINISTIC_SCORE,
   TURN_SIEVE_DEFAULT_MAX,
   TURN_SIEVE_ESCALATED_MAX,
   matchSkillsDeterministically,
   routeSkillsForTurn,
+  searchSkills,
   sieveLimits,
   type SkillRecord,
 } from "./skills.ts";
@@ -123,6 +127,69 @@ describe("deterministic matcher — cap and noise floor", () => {
     const res = matchSkillsDeterministically("nda-review", "legal", LEGAL);
     expect(res.selectedSkills).toEqual(["nda-review"]);
     expect(res.selectedTools).toEqual(["read_file"]);
+  });
+});
+
+describe("input bounds — one request must not stall a single-threaded server", () => {
+  /** ~1 MiB of DISTINCT words (nothing dedupes), built in linear time. */
+  function megabyteOfWords(): string {
+    const parts: string[] = [];
+    let len = 0;
+    for (let i = 0; len < 1024 * 1024; i++) {
+      const w = `w${i.toString(36)}x`;
+      parts.push(w);
+      len += w.length + 1;
+    }
+    return parts.join(" ");
+  }
+  const POOL: SkillRecord[] = Array.from({ length: 400 }, (_, i) =>
+    skill(`skill-number-${i}`, `Handles thing ${i} with alpha beta gamma delta epsilon zeta eta theta`, ["t1", "t2"]),
+  );
+
+  test("the keyword matcher finishes a 1 MiB prompt against 400 skills in well under a second (was ~5 s)", () => {
+    const big = megabyteOfWords();
+    expect(big.length).toBeGreaterThan(1_000_000);
+    const started = performance.now();
+    matchSkillsDeterministically(big, "legal", POOL);
+    expect(performance.now() - started).toBeLessThan(1000);
+  });
+
+  test("…and still finds a skill named at the START of an over-long prompt", () => {
+    const res = matchSkillsDeterministically(`please run skill-number-7 now ${megabyteOfWords()}`, "legal", POOL);
+    expect(res.selectedSkills).toContain("skill-number-7");
+  });
+
+  test("routeSkillsForTurn bounds it too, on the fallback path", async () => {
+    const started = performance.now();
+    const res = await routeSkillsForTurn(megabyteOfWords(), "legal", POOL, { endpoint: "http://127.0.0.1:59990/v1/route-skills", timeoutMs: 50 });
+    expect(res.source).toBe("deterministic");
+    expect(performance.now() - started).toBeLessThan(1500);
+  });
+
+  test("searchSkills bounds query length and term count", () => {
+    const dir = mkdtempSync(join(tmpdir(), "harbor-search-bound-"));
+    try {
+      const skillsDir = join(dir, ".agents", "skills");
+      for (let i = 0; i < 200; i++) {
+        mkdirSync(join(skillsDir, `skill-${i}`), { recursive: true });
+        writeFileSync(join(skillsDir, `skill-${i}`, "SKILL.md"), `---\nname: skill-${i}\ndescription: handles thing ${i} alpha beta\n---\nbody`);
+      }
+      const env = new Environment(
+        dir,
+        new Config(deepMerge(DEFAULTS, { paths: { state_dir: join(dir, ".agent-env"), skills_dir: skillsDir } })),
+      );
+      const started = performance.now();
+      searchSkills(env, megabyteOfWords());
+      expect(performance.now() - started).toBeLessThan(1000);
+      // a query longer than the cap is cut and still answered, not rejected
+      expect(searchSkills(env, `skill-3 ${"zz ".repeat(1000)}`, undefined, 50).length).toBeGreaterThan(0);
+      expect(MAX_SEARCH_QUERY_CHARS).toBeLessThanOrEqual(1024);
+      expect(MAX_SEARCH_TERMS).toBeLessThanOrEqual(64);
+      expect(MAX_MATCH_TOKENS).toBeLessThanOrEqual(512);
+    } finally {
+      closeAllDbs();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

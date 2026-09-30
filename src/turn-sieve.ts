@@ -37,6 +37,16 @@ export async function routeTurn(
   ctx: GateContext,
   prompt: string,
   roomOverride?: string,
+  options: {
+    /**
+     * Honor `[system_one] url` from the session's own config (default true).
+     * A multi-tenant server passes false: a URL a tenant can edit would make the
+     * server send requests to any host it names (SSRF, and a port-scan oracle
+     * through the reported failure reason). The operator-level
+     * `HARBOR_SYSTEM_ONE_URL` still applies.
+     */
+    trustConfigUrl?: boolean;
+  } = {},
 ): Promise<RouteTurnResult> {
   const { env, session } = ctx;
 
@@ -53,7 +63,7 @@ export async function routeTurn(
     timeoutMs: so.timeoutMs,
     maxSkills: so.maxSkills,
     escalatedMaxSkills: so.escalatedMaxSkills,
-    ...(so.url ? { configUrl: so.url } : {}),
+    ...(so.url && (options.trustConfigUrl ?? true) ? { configUrl: so.url } : {}),
   });
 
   // A router that names skills outside the room is anomalous: record it as a

@@ -38,7 +38,8 @@ import { join, resolve } from "node:path";
 import type { Database } from "bun:sqlite";
 
 import { Config } from "./config.ts";
-import { openDb } from "./db.ts";
+import { ConfigEditError, ensureRoomInConfig } from "./config-edit.ts";
+import { closeDbsUnder, openDb } from "./db.ts";
 import { Environment } from "./env.ts";
 import { Capability } from "./isolation.ts";
 import { isRealPathWithin, isValidRoomName } from "./sandbox.ts";
@@ -288,6 +289,46 @@ export class ControlPlane {
     return this.requireTenant(id);
   }
 
+  /**
+   * Create a room for a tenant: `rooms/<room>/room_rules.md` on disk and an
+   * empty `[skills.rooms.<room>]` in the tenant's config. This is what the
+   * existing `skill-install --room` requires to already exist, and what
+   * `createToken` requires to be configured. Idempotent; never overwrites an
+   * existing `room_rules.md`.
+   *
+   * The new room holds NO skills. On a server session that means "nothing is
+   * readable" (see `strictRoom` in isolation.ts) until skills are installed.
+   */
+  createRoom(tenantId: string, room: string, options: { description?: string } = {}): { created: boolean } {
+    this.requireTenant(tenantId);
+    if (!isValidRoomName(room)) {
+      throw new TenantError("invalid_room", `invalid room name: ${JSON.stringify(room)}`);
+    }
+    const root = this.tenantRoot(tenantId);
+    const roomDir = join(root, "rooms", room);
+    mkdirSync(roomDir, { recursive: true });
+    let created = false;
+    try {
+      writeFileSync(
+        join(roomDir, "room_rules.md"),
+        `# ${room}\n\n${options.description ? `${options.description}\n\n` : ""}Rules for the ${room} room.\n`,
+        { flag: "wx" },
+      );
+      created = true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    }
+    try {
+      const env = new Environment(root, Config.load(this.tenantConfigPath(tenantId)), this.tenantConfigPath(tenantId));
+      if (ensureRoomInConfig(env, room).changed) created = true;
+    } catch (err) {
+      if (err instanceof ConfigEditError) throw new TenantError("invalid_room", err.message);
+      throw err;
+    }
+    this.envCache.delete(tenantId);
+    return { created };
+  }
+
   getTenant(id: string): TenantRecord | null {
     const row = this.db.query("SELECT * FROM tenants WHERE id = ?").get(id) as TenantRow | null;
     return row ? toTenant(row) : null;
@@ -421,6 +462,16 @@ export class ControlPlane {
   }
 
   // ── Per-tenant Environment ─────────────────────────────────────────────────
+
+  /**
+   * Forget a tenant's cached Environment and close its open database handles.
+   * Called for idle tenants so a server with many tenants holds file
+   * descriptors only for the ones in use. The next request reopens lazily.
+   */
+  evictTenant(id: string): number {
+    this.envCache.delete(id);
+    return closeDbsUnder(this.tenantRoot(id));
+  }
 
   /**
    * The tenant's Environment, rooted at its own directory with its own

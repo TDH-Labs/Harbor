@@ -21,6 +21,8 @@
  * private store (a shared cache key would alias unrelated engines), so a caller
  * that passes ":memory:" always gets a fresh, owned connection that it must close.
  */
+import { sep } from "node:path";
+
 import type { Database } from "bun:sqlite";
 
 let DatabaseConstructor: any;
@@ -115,6 +117,29 @@ export function closeAllDbs(): void {
     }
   }
   cache.clear();
+}
+
+/**
+ * Close and forget every cached connection whose database file lives under
+ * `dir`. A long-running multi-tenant server calls this for an idle tenant so
+ * open handles track the ACTIVE set, not every tenant ever seen. Safe between
+ * requests: nothing holds a `Database` across an `await`, and the next use
+ * simply reopens (see {@link openDb}). Returns how many were closed.
+ */
+export function closeDbsUnder(dir: string): number {
+  const prefix = dir.endsWith(sep) ? dir : dir + sep;
+  let closed = 0;
+  for (const [path, db] of [...cache]) {
+    if (!path.startsWith(prefix)) continue;
+    try {
+      db.close();
+    } catch {
+      // already closed / file removed — nothing to do
+    }
+    cache.delete(path);
+    closed++;
+  }
+  return closed;
 }
 
 /** Number of cached connections (test/diagnostic helper). */

@@ -89,6 +89,15 @@ export interface AgentSessionInit {
   sessionId?: string;
   createdAt?: number;
   activeSkill?: string | null;
+  /**
+   * A CONFIGURED room whose skill list is empty grants nothing, instead of the
+   * Core default of "no restriction configured ⇒ every skill". Core keeps that
+   * default (a fresh single-user install relies on it); a network server sets
+   * this, because there the default is a cross-room read: removing the last
+   * skill from `finance` would let a `finance` token `read_skill` anything in the
+   * pool. The unconfigured default room stays unrestricted either way.
+   */
+  strictRoom?: boolean;
 }
 
 /** A session with an identity and a fixed capability set. */
@@ -98,6 +107,7 @@ export class AgentSession {
   readonly capabilities: Set<string>;
   readonly sessionId: string;
   readonly createdAt: number;
+  readonly strictRoom: boolean;
   activeSkill: string | null = null;
   activeSkillStartedAt: number | null = null;
 
@@ -106,6 +116,7 @@ export class AgentSession {
     this.agentId = init.agentId ?? "";
     this.capabilities = new Set(init.capabilities ?? DEFAULT_CAPABILITIES);
     this.createdAt = init.createdAt ?? Date.now() / 1000;
+    this.strictRoom = init.strictRoom ?? false;
     this.activeSkill = init.activeSkill ?? null;
     if (this.activeSkill) this.activeSkillStartedAt = this.createdAt;
     this.sessionId =
@@ -170,11 +181,14 @@ export class AgentSession {
    * it. Every OTHER unconfigured room is an error state, not a wildcard.
    */
   roomSkillAllowed(env: Environment, skillName: string): boolean {
-    if (!env.config.hasRoom(this.room) && this.room !== env.config.skillDefaultRoom) {
+    const configured = env.config.hasRoom(this.room);
+    if (!configured && this.room !== env.config.skillDefaultRoom) {
       return false;
     }
     const allowed = this.roomSkills(env);
-    if (allowed.size === 0) return true; // no restriction configured
+    // Empty list ⇒ "no restriction configured" — except on a strict (server)
+    // session, where a configured-but-empty room grants nothing.
+    if (allowed.size === 0) return !(this.strictRoom && configured);
     return allowed.has(skillName);
   }
 
@@ -497,6 +511,8 @@ export interface CreateSessionOptions {
   env?: Environment;
   sessionId?: string;
   createdAt?: number;
+  /** See {@link AgentSessionInit.strictRoom}. */
+  strictRoom?: boolean;
 }
 
 /**
@@ -514,6 +530,7 @@ export function createSession(options: CreateSessionOptions): AgentSession {
     capabilities,
     sessionId: options.sessionId,
     createdAt: options.createdAt,
+    ...(options.strictRoom ? { strictRoom: true } : {}),
   });
 
   if (options.env) {

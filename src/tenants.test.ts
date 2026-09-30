@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { Config } from "./config.ts";
-import { closeAllDbs } from "./db.ts";
+import { cachedDbCount, closeAllDbs, closeDbsUnder, openDb } from "./db.ts";
 import { Environment } from "./env.ts";
 import { Capability } from "./isolation.ts";
 import { ControlPlane, TENANT_ID_RE, TenantError, tokenHandle, type TenantErrorCode } from "./tenants.ts";
@@ -229,6 +229,56 @@ describe("tokens", () => {
   });
 });
 
+describe("createRoom", () => {
+  beforeEach(() => {
+    cp.createTenant("acme");
+  });
+
+  test("creates the room on disk and in config, so skill-install and token create both accept it", () => {
+    expect(cp.createRoom("acme", "legal", { description: "Contracts and NDAs" })).toEqual({ created: true });
+    const root = cp.tenantRoot("acme");
+    const rules = readFileSync(join(root, "rooms", "legal", "room_rules.md"), "utf8");
+    expect(rules).toContain("# legal");
+    expect(rules).toContain("Contracts and NDAs");
+    const env = cp.tenantEnvironment("acme");
+    expect(env.config.hasRoom("legal")).toBe(true);
+    expect(env.config.roomSkillSet("legal").size).toBe(0);
+    expect(cp.createToken({ tenantId: "acme", room: "legal" }).record.room).toBe("legal");
+  });
+
+  test("is idempotent and never overwrites a room_rules.md someone wrote", () => {
+    cp.createRoom("acme", "legal");
+    writeFileSync(join(cp.tenantRoot("acme"), "rooms", "legal", "room_rules.md"), "# my own rules\n");
+    expect(cp.createRoom("acme", "legal")).toEqual({ created: false });
+    expect(readFileSync(join(cp.tenantRoot("acme"), "rooms", "legal", "room_rules.md"), "utf8")).toBe("# my own rules\n");
+  });
+
+  test("preserves what is already in the tenant's config", () => {
+    cp.createRoom("acme", "legal");
+    cp.createRoom("acme", "finance");
+    const env = cp.tenantEnvironment("acme");
+    expect(Object.keys(env.config.roomSkills).sort()).toEqual(["finance", "legal"]);
+    expect(readFileSync(cp.tenantConfigPath("acme"), "utf8")).toContain("[paths]");
+  });
+
+  test("hostile names never reach the filesystem", () => {
+    for (const room of ["", "..", "../escape", "a/b", ".hidden", "a b"]) {
+      expectCode(() => cp.createRoom("acme", room), "invalid_room");
+    }
+    expect(existsSync(join(dir, "data", "tenants", "escape"))).toBe(false);
+    expect(existsSync(join(cp.tenantRoot("acme"), "rooms", ".hidden"))).toBe(false);
+  });
+
+  test("a room name the config editor rejects (dots) is a clean error, and leaves no half-made room in config", () => {
+    expectCode(() => cp.createRoom("acme", "a.b"), "invalid_room");
+    expect(cp.tenantEnvironment("acme").config.hasRoom("a.b")).toBe(false);
+  });
+
+  test("an unknown tenant", () => {
+    expectCode(() => cp.createRoom("nobody", "legal"), "no_such_tenant");
+  });
+});
+
 describe("tenantEnvironment — no bleed between tenants or from the operator", () => {
   test("each tenant gets its own root, state dir, and skill pool", () => {
     cp.createTenant("acme");
@@ -303,6 +353,38 @@ describe("tenantEnvironment — no bleed between tenants or from the operator", 
 
   test("an unknown tenant has no environment", () => {
     expectCode(() => cp.tenantEnvironment("nobody"), "no_such_tenant");
+  });
+});
+
+describe("evictTenant / closeDbsUnder", () => {
+  test("closes only the named tenant's handles, and a later open works", () => {
+    cp.createTenant("acme");
+    cp.createTenant("globex");
+    const init = (d: { exec(sql: string): void }) => d.exec("CREATE TABLE IF NOT EXISTS t (x)");
+    const acmeDb = join(cp.tenantRoot("acme"), ".agent-env", "one.db");
+    const globexDb = join(cp.tenantRoot("globex"), ".agent-env", "one.db");
+    openDb(acmeDb, init);
+    openDb(globexDb, init);
+    const before = cachedDbCount();
+
+    expect(cp.evictTenant("acme")).toBe(1);
+    expect(cachedDbCount()).toBe(before - 1);
+    expect(cp.evictTenant("acme")).toBe(0); // idempotent
+
+    // the other tenant's handle is untouched and still usable
+    openDb(globexDb, init).db.query("INSERT INTO t VALUES (1)").run();
+    // and the evicted one reopens from disk
+    openDb(acmeDb, init).db.query("INSERT INTO t VALUES (1)").run();
+    expect(cachedDbCount()).toBe(before);
+  });
+
+  test("a directory is matched as a path prefix, not a string prefix (acme vs acme-corp)", () => {
+    cp.createTenant("acme");
+    cp.createTenant("acme-corp");
+    const init = (d: { exec(sql: string): void }) => d.exec("CREATE TABLE IF NOT EXISTS t (x)");
+    openDb(join(cp.tenantRoot("acme-corp"), ".agent-env", "one.db"), init);
+    expect(closeDbsUnder(cp.tenantRoot("acme"))).toBe(0);
+    expect(cp.evictTenant("acme-corp")).toBe(1);
   });
 });
 

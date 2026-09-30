@@ -2305,7 +2305,8 @@ const tenantCmd = defineCommand({
         console.log(`  root:   ${cp.tenantRoot(t.id)}`);
         console.log(`  config: ${cfg}`);
         console.log("Next:");
-        console.log(`  harbor skill-install <skill-dir> --room <room> --config ${cfg}   # add a skill (creates the room)`);
+        console.log(`  harbor tenant add-room ${t.id} --room <room>                     # create a room`);
+        console.log(`  harbor skill-install <skill-dir> --room <room> --config ${cfg}   # add a skill to it`);
         console.log(`  harbor token create --tenant ${t.id} --room <room>              # mint an access token`);
       },
     }),
@@ -2324,6 +2325,32 @@ const tenantCmd = defineCommand({
         for (const r of rows) {
           console.log(`  ${r.id.padEnd(24)} ${r.status.padEnd(10)} ${String(r.tokens).padStart(3)} token(s)  ${r.root}`);
         }
+      },
+    }),
+    "add-room": defineCommand({
+      meta: {
+        name: "add-room",
+        description: "Create a room for a tenant (what skill-install --room and token create --room require)",
+      },
+      args: {
+        ...serverArgs,
+        id: { type: "positional", required: true, description: "Tenant id" },
+        room: { type: "string", description: "Room name (letters, digits, '-', '_')" },
+        description: { type: "string", description: "One-line description for the room's rules file" },
+      },
+      run({ args }) {
+        if (!args.room) {
+          console.error("tenant add-room: --room is required");
+          process.exitCode = 1;
+          return;
+        }
+        const cp = new ControlPlane(serverDataDir(args));
+        const r = tenantAction("tenant add-room", () =>
+          cp.createRoom(args.id, args.room as string, args.description ? { description: args.description } : {}),
+        );
+        if (!r) return;
+        console.log(r.created ? `✓ room '${args.room}' created for tenant '${args.id}'` : `room '${args.room}' already exists for tenant '${args.id}'`);
+        console.log(`  It holds no skills yet: harbor skill-install <skill-dir> --room ${args.room} --config ${cp.tenantConfigPath(args.id)}`);
       },
     }),
     suspend: defineCommand({

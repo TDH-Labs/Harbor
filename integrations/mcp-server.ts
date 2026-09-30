@@ -241,6 +241,12 @@ export interface McpServerOptions {
   resolveContext?: (request: JsonRpcRequest) => GateContext;
   /** Process env to read AGENT_ENV_ROOM / AGENT_ENV_SESSION from (default `process.env`). */
   procEnv?: Record<string, string | undefined>;
+  /**
+   * Honor `[system_one] url` from the session's config (default true). Harbor
+   * Server sets false: a tenant-editable URL would make the server issue
+   * requests to arbitrary hosts. See {@link routeTurn}.
+   */
+  trustConfigSystemOneUrl?: boolean;
 }
 
 export interface McpServer {
@@ -267,7 +273,9 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
   const listSkillsGated = gate("list_skills", listSkillsImpl);
   const searchSkillsGated = gate("search_skills", searchSkillsImpl);
   // Routing is a room-scoped search variant, so it rides the same capability.
-  const routeSkillsGated = gate("search_skills", routeSkillsImpl);
+  const routeSkillsGated = gate("search_skills", (prompt: string, room?: string) =>
+    routeSkillsImpl(prompt, room, options.trustConfigSystemOneUrl ?? true),
+  );
   const activateSkillGated = gate("activate_skill", activateSkillImpl);
   const deactivateSkillGated = gate("deactivate_skill", deactivateSkillImpl);
 
@@ -452,8 +460,12 @@ async function searchSkillsImpl(
 }
 
 /** Route a turn to the room's 1-3 most relevant skills (Turn-Sieve; see turn-sieve.ts). */
-async function routeSkillsImpl(prompt: string, roomOverride?: string): Promise<ToolResult> {
-  const r = await routeTurn(currentGateContext(), prompt, roomOverride);
+async function routeSkillsImpl(
+  prompt: string,
+  roomOverride: string | undefined,
+  trustConfigUrl: boolean,
+): Promise<ToolResult> {
+  const r = await routeTurn(currentGateContext(), prompt, roomOverride, { trustConfigUrl });
   return r.ok ? text(r.text) : errorResult(r.text);
 }
 

@@ -9,7 +9,7 @@
  * real user's home.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -17,6 +17,8 @@ import { runCommand } from "citty";
 
 import { main } from "./cli.ts";
 import { closeAllDbs } from "./db.ts";
+import { Environment } from "./env.ts";
+import { createServerHandler } from "./http-server.ts";
 
 const CLI = join(import.meta.dir, "cli.ts");
 
@@ -166,6 +168,89 @@ describe("harbor token", () => {
     const unknown = await cli("token", "revoke", "deadbeef0000", ...D());
     expect(unknown.code).toBe(1);
     expect(unknown.out).toContain("no such token");
+  });
+});
+
+describe("harbor tenant add-room", () => {
+  test("creates the room; is idempotent; refuses hostile names", async () => {
+    await cli("tenant", "create", "acme", ...D());
+    const first = await cli("tenant", "add-room", "acme", "--room", "legal", "--description", "Contracts", ...D());
+    expect(first.code).toBe(0);
+    expect(first.out).toContain("room 'legal' created");
+    expect(first.out).toContain("skill-install");
+    expect(existsSync(join(data, "tenants", "acme", "rooms", "legal", "room_rules.md"))).toBe(true);
+    expect((await cli("tenant", "add-room", "acme", "--room", "legal", ...D())).out).toContain("already exists");
+    expect((await cli("tenant", "add-room", "acme", ...D())).code).toBe(1);
+    for (const bad of ["../x", "a/b", ".h"]) {
+      const r = await cli("tenant", "add-room", "acme", "--room", bad, ...D());
+      expect(r.code, bad).toBe(1);
+      expect(r.out, bad).toContain("invalid room name");
+    }
+  });
+});
+
+// The sequence docs/CLOUD.md tells an operator to run. If this test breaks, the
+// quickstart is wrong — fix one or the other, never leave them disagreeing.
+describe("the documented quickstart works end to end", () => {
+  test("tenant → add-room → skill-install --config → token → MCP session over HTTP", async () => {
+    const savedRouter = process.env.HARBOR_SYSTEM_ONE_URL;
+    process.env.HARBOR_SYSTEM_ONE_URL = "http://127.0.0.1:59991"; // no router: keyword fallback
+    const skillDir = join(dir, "incoming", "nda-review");
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(join(skillDir, "SKILL.md"), "---\nname: nda-review\ndescription: Review NDA agreements and flag risky clauses\n---\n\n# NDA review\n\nStep 1. Read the agreement.\n");
+
+    expect((await cli("tenant", "create", "acme", ...D())).code).toBe(0);
+    expect((await cli("tenant", "add-room", "acme", "--room", "legal", ...D())).code).toBe(0);
+    const cfg = join(data, "tenants", "acme", ".agent-env", "config.toml");
+    const installed = await cli("skill-install", skillDir, "--room", "legal", "--config", cfg);
+    expect(installed.code, installed.out).toBe(0);
+
+    // The skill landed INSIDE the tenant, not in the operator's home…
+    const tenantRoot = join(data, "tenants", "acme");
+    expect(existsSync(join(tenantRoot, ".agents", "skills", "nda-review", "SKILL.md"))).toBe(true);
+    expect(Environment.load(cfg).skillsDir).toBe(join(tenantRoot, ".agents", "skills"));
+
+    const made = await cli("token", "create", "--tenant", "acme", "--room", "legal", "--label", "quickstart", ...D());
+    expect(made.code, made.out).toBe(0);
+    const token = /hbr_[0-9a-f]{12}_[A-Za-z0-9_-]{43}/.exec(made.out)![0];
+
+    const handler = createServerHandler({ dataDir: data, logger: () => {} });
+    try {
+      const rpc = async (body: unknown, session?: string) =>
+        handler.fetch(
+          new Request("http://harbor.test/mcp", {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              authorization: `Bearer ${token}`,
+              ...(session ? { "mcp-session-id": session } : {}),
+            },
+            body: JSON.stringify(body),
+          }),
+        );
+      const init = await rpc({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} });
+      expect(init.status).toBe(200);
+      const sid = init.headers.get("mcp-session-id")!;
+      const text = async (name: string, args: Record<string, unknown>) => {
+        const r = (await (await rpc({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name, arguments: args } }, sid)).json()) as {
+          result: { content: Array<{ text: string }>; isError?: boolean };
+        };
+        return { text: r.result.content[0]!.text, isError: Boolean(r.result.isError) };
+      };
+
+      const listed = await text("list_skills", {});
+      expect(listed.text).toContain("nda-review: Review NDA agreements");
+      const routed = await text("route_skills", { prompt: "please review this NDA agreement" });
+      expect(routed.text).toContain("nda-review");
+      const read = await text("read_skill", { skill_name: "nda-review" });
+      expect(read.isError).toBe(false);
+      expect(read.text).toContain("Step 1. Read the agreement.");
+    } finally {
+      handler.close();
+      Environment.unlockDefault();
+      if (savedRouter === undefined) delete process.env.HARBOR_SYSTEM_ONE_URL;
+      else process.env.HARBOR_SYSTEM_ONE_URL = savedRouter;
+    }
   });
 });
 

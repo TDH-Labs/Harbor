@@ -37,6 +37,7 @@ import { Environment } from "./env.ts";
 import { isPathWithin } from "./path-safety.ts";
 import {
   DEFAULT_TIMEOUT_MS,
+  MAX_PROMPT_CHARS,
   requestRouteSkills,
   resolveRouteSkillsEndpoint,
 } from "./system-one.ts";
@@ -490,6 +491,10 @@ export function getSkill(env: Environment, name: string): SkillDetail | null {
   };
 }
 
+/** Longest search query considered (characters) and most distinct terms scored. */
+export const MAX_SEARCH_QUERY_CHARS = 512;
+export const MAX_SEARCH_TERMS = 32;
+
 /**
  * Search skills in the pool by query string. Returns matching skills sorted by
  * relevance, capped at `limit` (default 5, max 50). With `room`, only skills
@@ -501,11 +506,14 @@ export function searchSkills(
   room?: string,
   limit: number = 5,
 ): SkillSearchResult[] {
-  const q = query.trim().toLowerCase();
+  // Bounded: matching is O(skills × terms) substring scans, and the query comes
+  // from an agent (or, on a server, a tenant). An unbounded one is a CPU-denial
+  // request against a single-threaded process.
+  const q = query.trim().toLowerCase().slice(0, MAX_SEARCH_QUERY_CHARS);
   if (!q) return [];
   const maxResults = Math.max(1, Math.min(50, limit));
   const skills = listSkills(env, room);
-  const terms = q.split(/[\s,._\-+/]+/).filter(Boolean);
+  const terms = [...new Set(q.split(/[\s,._\-+/]+/).filter(Boolean))].slice(0, MAX_SEARCH_TERMS);
 
   const scored: SkillSearchResult[] = [];
   for (const s of skills) {
@@ -755,6 +763,8 @@ export const TURN_SIEVE_DEFAULT_MAX = 3;
  * never escalates — a prompt cannot talk its way into a bigger context budget.
  */
 export const TURN_SIEVE_ESCALATED_MAX = 5;
+/** Most distinct prompt tokens the keyword matcher scores (see matchSkillsDeterministically). */
+export const MAX_MATCH_TOKENS = 256;
 /**
  * A deterministic match scoring under this is noise (a single stray description
  * word scores 10). Requiring 20 means two description hits or one name token.
@@ -849,13 +859,19 @@ export function matchSkillsDeterministically(
     return { selectedSkills: [], selectedTools: [], promptTokenSavingsPct: 0, ...base };
   }
 
-  const promptLower = turnPrompt.toLowerCase().trim();
+  // Bounded like searchSkills: this loop is O(skills × tokens) substring scans.
+  // Measured before the bound: a 1 MiB prompt of distinct words against 400
+  // skills held the thread for ~5 s (~23 ms after) — one request stalling every
+  // other tenant on a single-threaded server.
+  const promptLower = turnPrompt.slice(0, MAX_PROMPT_CHARS).toLowerCase().trim();
   if (!promptLower) {
     return { selectedSkills: [], selectedTools: [], promptTokenSavingsPct: 100, ...base };
   }
 
   const rawTokens = promptLower.split(/[^a-zA-Z0-9_\-]+/).filter(Boolean);
-  const meaningfulTokens = rawTokens.filter((t) => t.length >= 2 && !STOP_WORDS.has(t));
+  const meaningfulTokens = [
+    ...new Set(rawTokens.filter((t) => t.length >= 2 && !STOP_WORDS.has(t))),
+  ].slice(0, MAX_MATCH_TOKENS);
 
   const scored: Array<{ skill: SkillRecord; score: number }> = [];
 

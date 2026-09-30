@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { closeAllDbs } from "./db.ts";
+import { createMcpServer } from "../integrations/mcp-server.ts";
+import { cachedDbCount, closeAllDbs } from "./db.ts";
 import { Environment } from "./env.ts";
 import { createServerHandler, sessionCapabilities, startServer, type ServerHandler, type ServerOptions } from "./http-server.ts";
 import { auditRead } from "./isolation.ts";
@@ -466,6 +467,26 @@ describe("tenant and room isolation", () => {
     expect(other.text).toContain("s2");
   });
 
+  test("a room that has lost its last skill grants NOTHING — it does not become 'unrestricted' (strict rooms)", async () => {
+    seedTenant("acme", {
+      rooms: { legal: { skills: ["nda-review"], capabilities: READ_CAPS }, finance: { skills: [], capabilities: READ_CAPS } },
+      skills: { "nda-review": "Review NDAs" },
+    });
+    serve();
+    const fin = cp.createToken({ tenantId: "acme", room: "finance" }).token;
+    const legal = cp.createToken({ tenantId: "acme", room: "legal" }).token;
+    const sf = await init(fin);
+    const denied = await call(fin, sf, "read_skill", { skill_name: "nda-review" }); // legal's skill, from finance
+    expect(denied.isError).toBe(true);
+    expect(denied.text).toContain("access denied");
+    expect(denied.text).not.toContain("Body of nda-review");
+    const activate = await call(fin, sf, "activate_skill", { skill_name: "nda-review" });
+    expect(activate.isError).toBe(true);
+    // the populated room is unaffected
+    const sl = await init(legal);
+    expect((await call(legal, sl, "read_skill", { skill_name: "nda-review" })).isError).toBe(false);
+  });
+
   test("a session id is bound to its token: another token — even in the same tenant — cannot use it", async () => {
     seedTenant("acme", { rooms: { legal: { skills: ["s1"], capabilities: READ_CAPS } }, skills: { s1: "one" } });
     seedTenant("globex", { rooms: { legal: { skills: [], capabilities: READ_CAPS } }, skills: {} });
@@ -533,6 +554,72 @@ describe("limits", () => {
     clock += 101_000;
     expect((await call(a, sid, "list_skills")).status).toBe(404); // idle too long
     expect(handler.sessionCount()).toBe(0);
+  });
+});
+
+// ── outbound requests and resource hygiene ───────────────────────────────────
+
+describe("a tenant cannot steer the server's outbound requests (SSRF)", () => {
+  test("[system_one] url in a tenant's config is ignored by the server, but honored by a single-user stdio server", async () => {
+    let hits = 0;
+    const recorder = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch: () => {
+        hits++;
+        return Response.json({ selectedSkills: [] });
+      },
+    });
+    delete process.env.HARBOR_SYSTEM_ONE_URL; // env would otherwise outrank the config URL
+    try {
+      seedTenant("acme", { rooms: { legal: { skills: ["nda-review"], capabilities: READ_CAPS } }, skills: { "nda-review": "Review NDAs" } });
+      appendFileSync(cp.tenantConfigPath("acme"), `\n[system_one]\nurl = "http://127.0.0.1:${recorder.port}"\n`);
+      const { token } = cp.createToken({ tenantId: "acme", room: "legal" });
+      expect(cp.tenantEnvironment("acme").config.systemOne.url).toContain(String(recorder.port)); // it IS in the config
+
+      serve();
+      const sid = await init(token);
+      await call(token, sid, "route_skills", { prompt: "please run nda-review" });
+      expect(hits).toBe(0); // …and the server never contacted it
+
+      // Control: a single-user server (Harbor Core) DOES honor its own config.
+      const core = createMcpServer({
+        env: cp.tenantEnvironment("acme"),
+        procEnv: { AGENT_ENV_ROOM: "legal", AGENT_ENV_SESSION: "core-1" },
+      });
+      await core.handle({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "route_skills", arguments: { prompt: "please run nda-review" } } });
+      expect(hits).toBe(1);
+    } finally {
+      recorder.stop(true);
+    }
+  });
+});
+
+describe("resource hygiene", () => {
+  test("idle tenants release their database handles, and come back transparently", async () => {
+    const { a, b } = twoTenants();
+    serve({ tenantIdleSeconds: 60, rateLimitPerMinute: 10_000 });
+    const sa = await init(a);
+    await init(b);
+    const before = cachedDbCount();
+
+    clock += 30_000;
+    expect((await call(a, sa, "list_skills")).status).toBe(200); // acme is active again
+    clock += 45_000; // globex idle 75s (> 60), acme idle 45s (< 60)
+    handler.sweep();
+    expect(cachedDbCount()).toBeLessThan(before);
+
+    // globex reopens on demand; acme's open session was never disturbed
+    const sb2 = await init(b);
+    expect((await call(b, sb2, "list_skills")).status).toBe(200);
+    expect((await call(a, sa, "list_skills")).status).toBe(200);
+  });
+
+  test("close() gives the process its default Environment back", () => {
+    serve();
+    expect(() => Environment.default()).toThrow(/multi-tenant/);
+    handler.close();
+    expect(() => Environment.default()).not.toThrow();
   });
 });
 

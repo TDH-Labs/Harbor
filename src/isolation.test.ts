@@ -247,3 +247,38 @@ describe("audit log", () => {
     expect(entries.some((e) => e.event === "session_created" && e.decision === "allowed")).toBe(true);
   });
 });
+
+describe("strictRoom — a configured room with no skills grants nothing", () => {
+  const rooms = {
+    legal: { skills: ["nda-review"] },
+    finance: { skills: [] }, // e.g. its last skill was just removed
+  };
+
+  test("Core default (documented): a configured-but-empty room is unrestricted", () => {
+    const env = envWithRooms(rooms);
+    const s = new AgentSession({ room: "finance" });
+    expect(s.roomSkillAllowed(env, "nda-review")).toBe(true); // the legal skill, from finance
+  });
+
+  test("strict: the same room denies everything, and populated rooms are unaffected", () => {
+    const env = envWithRooms(rooms);
+    const finance = new AgentSession({ room: "finance", strictRoom: true });
+    expect(finance.roomSkillAllowed(env, "nda-review")).toBe(false);
+    expect(finance.roomSkillAllowed(env, "anything")).toBe(false);
+    const legal = new AgentSession({ room: "legal", strictRoom: true });
+    expect(legal.roomSkillAllowed(env, "nda-review")).toBe(true);
+    expect(legal.roomSkillAllowed(env, "payroll")).toBe(false);
+  });
+
+  test("strict: the UNCONFIGURED default room stays unrestricted (a fresh install still works); other unknown rooms stay denied", () => {
+    const env = envWithRooms(rooms);
+    expect(new AgentSession({ room: env.config.skillDefaultRoom, strictRoom: true }).roomSkillAllowed(env, "x")).toBe(true);
+    expect(new AgentSession({ room: "typo", strictRoom: true }).roomSkillAllowed(env, "x")).toBe(false);
+  });
+
+  test("createSession threads the flag through", () => {
+    const env = envWithRooms(rooms);
+    expect(createSession({ room: "finance", env, strictRoom: true }).strictRoom).toBe(true);
+    expect(createSession({ room: "finance", env }).strictRoom).toBe(false);
+  });
+});

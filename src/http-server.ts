@@ -67,6 +67,8 @@ export interface ServerOptions {
   maxSessionsPerToken?: number;
   /** Access-log sink (default: one JSON object per line on stdout). */
   logger?: (entry: Record<string, unknown>) => void;
+  /** A tenant with no request for this long has its cached environment and DB handles released (default 600s). */
+  tenantIdleSeconds?: number;
   /** Clock in ms (tests). */
   now?: () => number;
 }
@@ -85,6 +87,8 @@ export interface ServerHandler {
   fetch(req: Request): Promise<Response>;
   /** Number of live MCP sessions (diagnostics / tests). */
   sessionCount(): number;
+  /** Run the periodic maintenance now: expire idle sessions, prune rate buckets, evict idle tenants. */
+  sweep(): void;
   /** Stop timers. Does not close the control plane's database. */
   close(): void;
 }
@@ -147,11 +151,25 @@ export function createServerHandler(options: ServerOptions): ServerHandler {
   Environment.lockDefault("Harbor Server is multi-tenant: every call must use an explicit tenant Environment");
 
   const sessions = new Map<string, HttpSession>();
+  const tenantIdleMs = (options.tenantIdleSeconds ?? 600) * 1000;
+  /** Last request per tenant — drives release of idle tenants' database handles. */
+  const tenantLastActive = new Map<string, number>();
 
   function sweepSessions(): void {
     const t = now();
     for (const [id, s] of sessions) if (t - s.lastSeen > idleMs) sessions.delete(id);
     limiter.sweep();
+    // db.ts caches connections for the process lifetime; without this a server
+    // that has ever served N tenants holds descriptors for all N.
+    for (const [tenantId, last] of tenantLastActive) {
+      if (t - last <= tenantIdleMs) continue;
+      tenantLastActive.delete(tenantId);
+      try {
+        cp.evictTenant(tenantId);
+      } catch {
+        // tenant id no longer valid — nothing cached under it
+      }
+    }
   }
   const sweeper = setInterval(sweepSessions, 60_000);
   sweeper.unref?.();
@@ -192,6 +210,7 @@ export function createServerHandler(options: ServerOptions): ServerHandler {
     }
     note("tenant", auth.tenantId);
     note("token", tokenHandle(auth.tokenId));
+    tenantLastActive.set(auth.tenantId, now());
 
     // 3. Rate limit, per token.
     const taken = limiter.take(auth.tokenId);
@@ -257,7 +276,9 @@ export function createServerHandler(options: ServerOptions): ServerHandler {
       }
       const id = randomBytes(16).toString("hex");
       const caps = sessionCapabilities(env.config.roomCapabilities(auth.room), auth);
-      const agent = createSession({ room: auth.room, capabilities: caps, env, sessionId: id });
+      // strictRoom: on a network server a configured room with no skills grants
+      // nothing (Core would read that as "unrestricted" — a cross-room leak here).
+      const agent = createSession({ room: auth.room, capabilities: caps, env, sessionId: id, strictRoom: true });
       session = { id, tenantId: auth.tenantId, tokenId: auth.tokenId, room: auth.room, agent, lastSeen: now() };
       sessions.set(id, session);
       headers["mcp-session-id"] = id;
@@ -273,7 +294,9 @@ export function createServerHandler(options: ServerOptions): ServerHandler {
     // 7. Dispatch through the SAME server the stdio transport uses, with the
     // context fixed by the token — never resolved from anything the client sent.
     const ctx: GateContext = { env, session: session.agent };
-    const server = createMcpServer({ env, resolveContext: () => ctx });
+    // trustConfigSystemOneUrl:false — a tenant's config must not be able to aim
+    // the server's outbound requests at an arbitrary host (SSRF).
+    const server = createMcpServer({ env, resolveContext: () => ctx, trustConfigSystemOneUrl: false });
     const response = await server.handle(request);
     if (response === null) return new Response(null, { status: 202, headers });
     return json(200, response, headers);
@@ -331,9 +354,12 @@ export function createServerHandler(options: ServerOptions): ServerHandler {
     controlPlane: cp,
     fetch: fetchHandler,
     sessionCount: () => sessions.size,
+    sweep: sweepSessions,
     close() {
       clearInterval(sweeper);
       sessions.clear();
+      tenantLastActive.clear();
+      Environment.unlockDefault();
     },
   };
 }
