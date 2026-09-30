@@ -498,13 +498,16 @@ export const MAX_SEARCH_TERMS = 32;
 /**
  * Search skills in the pool by query string. Returns matching skills sorted by
  * relevance, capped at `limit` (default 5, max 50). With `room`, only skills
- * accessible to that room are searched.
+ * accessible to that room are searched. `visible`, when given, drops skills the
+ * caller may not see (a sensitivity ceiling) BEFORE matching, so they can neither
+ * appear in the results nor influence them.
  */
 export function searchSkills(
   env: Environment,
   query: string,
   room?: string,
   limit: number = 5,
+  visible?: (skill: SkillRecord) => boolean,
 ): SkillSearchResult[] {
   // Bounded: matching is O(skills × terms) substring scans, and the query comes
   // from an agent (or, on a server, a tenant). An unbounded one is a CPU-denial
@@ -512,7 +515,7 @@ export function searchSkills(
   const q = query.trim().toLowerCase().slice(0, MAX_SEARCH_QUERY_CHARS);
   if (!q) return [];
   const maxResults = Math.max(1, Math.min(50, limit));
-  const skills = listSkills(env, room);
+  const skills = visible ? listSkills(env, room).filter(visible) : listSkills(env, room);
   const terms = [...new Set(q.split(/[\s,._\-+/]+/).filter(Boolean))].slice(0, MAX_SEARCH_TERMS);
 
   const scored: SkillSearchResult[] = [];

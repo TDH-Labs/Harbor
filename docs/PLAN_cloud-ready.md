@@ -292,6 +292,7 @@ privilege-escalation path).
 | D11 | **Identity is a person, not just a token.** Tokens name a principal; audit rows carry it; suspend/revoke per person; quotas counted per person. | Attribution and offboarding must follow the human across tokens and sessions. |
 | D12 | **Daily delivery quotas are per person, per UTC day, enforced at the tool, atomically.** | Per-session budgets are bypassed by opening sessions; the allowance has to be keyed by who, not by session. |
 | D13 | **`harbor guard`** is the pre-sync check for the shared folder. `export-shared` is **deferred**. | Skills are not synced (D10), so there is nothing to export; the folder still needs a secret scan. |
+| D14 | **Sensitivity labels** (`public < internal < restricted`): a room default plus a per-skill override, both in the operator's config; a token may carry a ceiling (`--max-sensitivity`). **A token with a ceiling is never handed an unlabeled skill**; a label that is present but not a tier counts as `restricted`. There is no label inside `SKILL.md`. | Decided with the operator: labeling is the price of keeping a bring-your-own agent from ingesting sensitive content, and "unlabeled ⇒ denied" is what makes forgetting to label safe. A label authored inside a skill would be chosen by the party a label must not trust. |
 
 ### Built
 
@@ -307,6 +308,13 @@ privilege-escalation path).
   flagged not followed, oversized/binary/unreadable reported as skipped,
   `--files-from` confined to the root, and output that never contains the secret.
 - `control.db` from the previous release is migrated in place.
+- **Sensitivity labels and ceilings** (D14): `src/sensitivity.ts` (pure rules),
+  `src/labels.ts` + `harbor label set|clear|list`, `tokens.max_sensitivity`
+  (migrated in place) + `token create --max-sensitivity`. Enforced in the gate for
+  `read_skill`/`activate_skill` and applied to `list_skills`, `search_skills` and
+  `route_skills` (Core, Server and the Pi integration), so a hidden skill's name
+  is not shown either. The agent gets the same words as for an out-of-room skill;
+  the audit row has the real reason. A refused read is not charged to the quota.
 
 ### How it was verified
 
@@ -328,15 +336,20 @@ privilege-escalation path).
   identifiers) and both sides are pinned by tests. It now flags only the two
   files literally named `secrets.*`, which is the blunt filename rule working as
   designed.
+- Labels: 17 deliberate breakages of the enforcement (gate check removed; each
+  of list/search/route unfiltered in the server and in Pi; invalid label read as
+  unlabeled or as public; unlabeled admitted; ceiling comparison off by one;
+  override losing to the room; the cross-room rule; a tampered database value read
+  as "no ceiling"; ceiling not passed to the session or not validated; the agent
+  shown the true reason; label editing skipping its pool/tier checks) were each
+  caught by the tests. A migration test builds a control.db from before the column
+  existed. I did not exercise this against a real Drive-synced setup.
 - Drive: `copyRequiresWriterPermission` / the download restriction applies to
   readers and commenters, not editors, and is enforced on API download too. How
   it interacts with the desktop client's offline sync was **not** verified.
 
 ### Not built (needs a decision or is deliberately deferred)
 
-- **Sensitivity labels** — per-skill `public`/`internal`/`restricted` with a
-  ceiling per token. Open: should an unlabeled skill be denied to bring-your-own
-  tokens (safe, needs labeling) or allowed?
 - **On-behalf-of** for the house agent: open its session with the requester's
   entitlements (intersection, not the agent's own). Open: how does it learn who
   is asking, and does it stay on Harbor Core or move to Harbor Server?

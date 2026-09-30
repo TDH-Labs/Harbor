@@ -285,8 +285,17 @@ export function createServerHandler(options: ServerOptions): ServerHandler {
       // Every audit row for this session names the PERSON (or, with none, the
       // token), so a read can be traced to who received it.
       const agentId = auth.principal || `token:${auth.tokenId}`;
-      const agent = createSession({ room: auth.room, agentId, capabilities: caps, env, sessionId: id, strictRoom: true });
-      audit.allow(id, "session_open", tokenHandle(auth.tokenId), `principal=${auth.principal || "-"}`, {
+      const agent = createSession({
+        room: auth.room,
+        agentId,
+        capabilities: caps,
+        env,
+        sessionId: id,
+        strictRoom: true,
+        // The token's sensitivity ceiling, fixed for the life of the session.
+        maxSensitivity: auth.maxSensitivity,
+      });
+      audit.allow(id, "session_open", tokenHandle(auth.tokenId), `principal=${auth.principal || "-"} ceiling=${auth.maxSensitivity ?? "none"}`, {
         room: auth.room,
         agentId,
         env,

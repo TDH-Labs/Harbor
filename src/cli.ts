@@ -36,6 +36,9 @@ import { runBench, formatSummary, latestReport } from "./bench.ts";
 import { startDashboard, DEFAULT_PORT, isLoopbackHost } from "./dashboard.ts";
 import { closeAllDbs } from "./db.ts";
 import { DEFAULT_EXCLUDE, DEFAULT_MAX_BYTES, guardPassed, scanTree } from "./guard.ts";
+import { ConfigEditError } from "./config-edit.ts";
+import { labelReport, setRoomLabel, setSkillLabel } from "./labels.ts";
+import type { Sensitivity } from "./sensitivity.ts";
 import { ControlPlane, TenantError, tokenHandle } from "./tenants.ts";
 import { SERVICE_TARGETS, SERVICE_UNITS, ServiceError, renderService, splitCommand, type ServiceTarget, type ServiceUnit } from "./service.ts";
 import { runForeground, startDaemon, stopDaemon, watcherStatus, PidFile } from "./watch.ts";
@@ -2399,6 +2402,11 @@ const tokenCmd = defineCommand({
           description: "Max skill-content tokens delivered per UTC day, counted per person across all their tokens and sessions",
         },
         "daily-read-quota": { type: "string", description: "Max skill loads (read_skill + activate_skill) per UTC day, same accounting" },
+        "max-sensitivity": {
+          type: "string",
+          description:
+            "Highest sensitivity a skill may carry to be delivered to this token (public | internal | restricted). Above it is hidden and refused; unlabeled skills are refused too. Omit for no ceiling.",
+        },
         json: { type: "boolean", description: "Emit JSON" },
       },
       run({ args }) {
@@ -2436,6 +2444,7 @@ const tokenCmd = defineCommand({
             ...(args.principal ? { principal: args.principal } : {}),
             ...(dailyTokenQuota !== undefined ? { dailyTokenQuota } : {}),
             ...(dailyReadQuota !== undefined ? { dailyReadQuota } : {}),
+            ...(args["max-sensitivity"] ? { maxSensitivity: args["max-sensitivity"] as Sensitivity } : {}),
             ...(args.label ? { label: args.label } : {}),
             ...(ttlSeconds !== undefined ? { ttlSeconds } : {}),
             ...(caps.length > 0 ? { capabilities: caps } : {}),
@@ -2449,6 +2458,7 @@ const tokenCmd = defineCommand({
         console.error(
           `token ${made.record.id} for tenant '${made.record.tenantId}', room '${made.record.room}'` +
             `${made.record.principal ? `, person '${made.record.principal}'` : ""}` +
+            `, ceiling ${made.record.maxSensitivity ?? "none (every skill its room grants)"}` +
             `${made.record.expiresAt ? `, expires ${new Date(made.record.expiresAt * 1000).toISOString()}` : ""}.`,
         );
         console.error("This is the only time the secret is shown. Store it now; revoke with `harbor token revoke " + made.record.id + "`.");
@@ -2468,9 +2478,10 @@ const tokenCmd = defineCommand({
             r.dailyTokenQuota !== null || r.dailyReadQuota !== null
               ? ` [quota/day: ${r.dailyTokenQuota ?? "∞"} tok, ${r.dailyReadQuota ?? "∞"} loads]`
               : "";
+          const ceiling = r.maxSensitivity ? ` [ceiling: ${r.maxSensitivity}]` : "";
           console.log(
             `  ${tokenHandle(r.id).padEnd(20)} ${r.tenantId.padEnd(20)} ${r.room.padEnd(16)} ${state.padEnd(8)} ` +
-              `${(r.principal || "-").padEnd(24)} ${r.label}${quota}`,
+              `${(r.principal || "-").padEnd(24)} ${r.label}${quota}${ceiling}`,
           );
         }
       },
@@ -2561,6 +2572,84 @@ const principalCmd = defineCommand({
     }),
   },
 });
+
+const labelCmd = defineCommand({
+  meta: {
+    name: "label",
+    description:
+      "Sensitivity labels: what a token with --max-sensitivity may be handed. A room has a default; a skill can override it.",
+  },
+  subCommands: {
+    list: defineCommand({
+      meta: { name: "list", description: "Show every skill's label, where it comes from, and what would be refused to a capped token" },
+      args: { ...commonArgs, json: { type: "boolean", description: "Emit JSON" } },
+      run({ args }) {
+        const report = labelReport(envFromArgs(args));
+        if (args.json) return printJson(report);
+        if (report.rows.length === 0) return console.log("(no rooms with skills)");
+        for (const r of report.rows) {
+          const label = r.label ?? "UNLABELED";
+          const src = r.source === "none" ? "" : ` (${r.source}${r.invalid ? ", INVALID value — treated as restricted" : ""})`;
+          console.log(`  ${r.room.padEnd(20)} ${r.skill.padEnd(32)} ${label}${src}`);
+        }
+        if (report.unlabeled > 0) {
+          console.log(`\n${report.unlabeled} skill listing(s) are unlabeled: a token with a ceiling is refused them.`);
+          console.log("  Label a room:  harbor label set --room <room> --tier <public|internal|restricted>");
+          console.log("  Label a skill: harbor label set --skill <skill> --tier <public|internal|restricted>");
+        }
+        for (const s of report.strayOverrides) console.log(`note: override for '${s}' matches no skill in the pool (typo or removed).`);
+      },
+    }),
+    set: defineCommand({
+      meta: { name: "set", description: "Label a room (its default) or one skill (overrides the room)" },
+      args: {
+        ...commonArgs,
+        room: { type: "string", description: "Label this room's skills by default" },
+        skill: { type: "string", description: "Label this one skill (beats the room default)" },
+        tier: { type: "string", required: true, description: "public | internal | restricted" },
+      },
+      run({ args }) {
+        applyLabel("label set", args, args.tier);
+      },
+    }),
+    clear: defineCommand({
+      meta: { name: "clear", description: "Remove a room's default or a skill's override" },
+      args: {
+        ...commonArgs,
+        room: { type: "string", description: "Clear this room's default label" },
+        skill: { type: "string", description: "Clear this skill's override" },
+      },
+      run({ args }) {
+        applyLabel("label clear", args, null);
+      },
+    }),
+  },
+});
+
+function applyLabel(cmd: string, args: CommonArgs & { room?: string; skill?: string }, tier: string | null): void {
+  if (Boolean(args.room) === Boolean(args.skill)) {
+    console.error(`${cmd}: pass exactly one of --room or --skill`);
+    process.exitCode = 1;
+    return;
+  }
+  try {
+    const env = envFromArgs(args);
+    const r = args.room ? setRoomLabel(env, args.room, tier) : setSkillLabel(env, args.skill as string, tier);
+    const what = args.room ? `room '${args.room}'` : `skill '${args.skill}'`;
+    console.log(
+      r.changed
+        ? `✓ ${what}: ${tier === null ? "label cleared" : `labeled ${tier}`} (${r.path})`
+        : `${what}: already ${tier === null ? "unlabeled" : tier}`,
+    );
+  } catch (err) {
+    if (err instanceof ConfigEditError) {
+      console.error(`${cmd}: ${err.message}`);
+      process.exitCode = 1;
+      return;
+    }
+    throw err;
+  }
+}
 
 const guardCmd = defineCommand({
   meta: {
@@ -2772,6 +2861,7 @@ export const main: CommandDef = defineCommand({
     token: tokenCmd,
     principal: principalCmd,
     guard: guardCmd,
+    label: labelCmd,
     service: serviceCmd,
   },
 });

@@ -182,8 +182,9 @@ harbor tenant resume <id>
 
 harbor token create --tenant <id> --room <room> [--principal <person>] \
        [--daily-token-quota N] [--daily-read-quota N] \
+       [--max-sensitivity public|internal|restricted] \
        [--label TEXT] [--ttl-days N] [--capabilities a,b] [--allow-admin]
-harbor token list [--tenant <id>]  # handles, person, state, quotas — never secrets
+harbor token list [--tenant <id>]  # handles, person, state, quotas, ceiling — never secrets
 harbor token revoke <token-id>     # the 12 hex chars after hbr_
 
 harbor principal list [--tenant <id>]           # people, live tokens, today's delivery
@@ -216,6 +217,7 @@ own agent, control is exercised **at delivery, not at use**:
 | Layer | Enforceable? | How |
 |---|---|---|
 | **Who** receives a piece of content | **Yes** | A token is bound to one room; skills outside it are never delivered. Drive folder permissions decide who can open a synced folder. |
+| **Which content, for which caller** | **Yes** | A room decides who may reach a skill; a **sensitivity label** with a per-token ceiling decides whether *this* caller is handed it (see below). |
 | **How much and how fast** | **Yes** | Per-person daily quotas, per-token rate limit, session cap. |
 | **Who did what** | **Yes** | Every audit row names the person. |
 | **What their agent does with what it received** | **No** | It is their machine, their agent, their vendor. |
@@ -267,11 +269,84 @@ person's next request. Then, outside Harbor: remove them from any shared folders
 and **rotate anything they could read** — a revoked token stops future delivery;
 it cannot recall what their agent already received.
 
+### Sensitivity labels and token ceilings
+
+A room says who may reach a skill. A **label** says how sensitive it is, and a
+token's **ceiling** says how sensitive a thing that caller may be handed. This is
+how one person can hold two tokens for the same room — their own agent's, capped,
+and the house agent's, not — and receive different things from each.
+
+```
+public  <  internal  <  restricted
+```
+
+Label a room (its default) and override individual skills:
+
+```bash
+harbor label set --room legal --tier internal     --config <tenant config>
+harbor label set --skill payroll-run --tier restricted --config <tenant config>
+harbor label list  --config <tenant config>       # every skill, its label, its source
+harbor label clear --skill payroll-run --config <tenant config>
+```
+
+`<tenant config>` is the path `harbor tenant create` / `add-room` printed
+(`<data>/tenants/<id>/.agent-env/config.toml`). Labels live in that file as
+`[skills.skill_sensitivity]` (per skill) and `sensitivity = "..."` under a room:
+
+```toml
+[skills.rooms.legal]
+skills = ["nda-review", "payroll-run"]
+sensitivity = "internal"          # the room's default
+
+[skills.skill_sensitivity]
+payroll-run = "restricted"        # beats the room default
+```
+
+Then cap the token you give a person's own agent:
+
+```bash
+harbor token create --tenant acme --room legal --principal kim@example.com \
+    --max-sensitivity internal --daily-token-quota 20000
+```
+
+What a ceiling does, to `read_skill` and `activate_skill` (refused, audited) and
+to `list_skills`, `search_skills` and `route_skills` (the skill is not shown, so
+its name does not leak either):
+
+- A skill **above** the ceiling is refused and hidden.
+- An **unlabeled** skill is refused and hidden to any token that has a ceiling.
+  Unlabeled is not "public" — it is "nobody decided", and that must not be
+  readable. A token with **no** ceiling is unaffected, so nothing changes for
+  tokens issued before labels existed, or for the house agent.
+- A label that is present but not a tier (`"publik"`, `"Internal"`, a number) counts
+  as **`restricted`**. A typo can make a skill less available, never more. The same
+  for a database value that is not a tier: it becomes the *lowest* ceiling.
+- Where a label comes from: the per-skill override, else the room's default,
+  else none. There is deliberately **no label inside `SKILL.md`**: whoever wrote or
+  installed the skill (including through a proposal) would be choosing it.
+- A skill reachable only through an approved cross-room grant takes the strictest
+  label of the rooms that list it (and is unlabeled if any of them is).
+- The agent sees the **same message** for "above your ceiling" as for "not in your
+  room", so a capped token cannot probe which sensitive skill names exist. The audit
+  row carries the true reason (`skill 'x' is restricted; this token's ceiling is
+  public`).
+- A refused read costs nothing against the daily quota.
+- The ceiling is fixed for the life of a session (it comes from the token, when the
+  session opens). Labels are read from the tenant's config on every request, so
+  relabeling takes effect on the next request of a session already open.
+
+`harbor label list` marks every unlabeled skill: those are the ones a capped token
+will be refused, so run it before issuing capped tokens. It also flags an invalid
+value, and an override naming a skill that is not in the pool.
+
+**What a ceiling is not.** It stops Harbor *delivering* a restricted skill to a
+capped token. It does not stop a person from pasting a restricted skill they
+legitimately received via another token into their own agent. Give bring-your-own
+agents a ceiling that fits what they may ingest, and keep everything above it out
+of that person's reach altogether (a room they hold no token for).
+
 ### Not built yet
 
-- **Sensitivity labels** (`public`/`internal`/`restricted` per skill, with a
-  ceiling per token). Today the room is the only boundary: put restricted skills
-  in their own room and issue no bring-your-own token for it.
 - **Acting on behalf of a person.** A house agent that serves several people
   should open its Harbor session with *the requester's* entitlements, not its
   own broad ones (otherwise it can be asked to fetch what the asker could not).

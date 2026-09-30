@@ -49,6 +49,7 @@ import { closeDbsUnder, openDb } from "./db.ts";
 import { Environment } from "./env.ts";
 import { Capability } from "./isolation.ts";
 import { isRealPathWithin, isValidRoomName } from "./sandbox.ts";
+import { isSensitivity, SENSITIVITIES, type Sensitivity } from "./sensitivity.ts";
 
 /** 3–40 chars, lowercase alphanumerics and hyphens, not starting/ending with a hyphen. */
 export const TENANT_ID_RE = /^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$/;
@@ -73,6 +74,7 @@ export type TenantErrorCode =
   | "config_escape"
   | "invalid_ttl"
   | "invalid_principal"
+  | "invalid_sensitivity"
   | "no_such_principal"
   | "principal_suspended"
   | "invalid_quota";
@@ -118,6 +120,8 @@ export interface TokenRecord {
   dailyTokenQuota: number | null;
   /** Skill loads per UTC day (null = unlimited). */
   dailyReadQuota: number | null;
+  /** Highest sensitivity label this token may be handed (null = no ceiling). */
+  maxSensitivity: Sensitivity | null;
   /** Capability ceiling; null = whatever the room's config grants. */
   capabilities: string[] | null;
   adminAllowed: boolean;
@@ -148,6 +152,12 @@ export interface CreateTokenOptions {
   dailyTokenQuota?: number;
   /** Cap on skill loads (`read_skill` + `activate_skill`) per UTC day, same accounting. */
   dailyReadQuota?: number;
+  /**
+   * Highest sensitivity a skill may carry to be delivered to this token. Above it
+   * is hidden and refused; unlabeled is refused too (see sensitivity.ts). Omit for
+   * no ceiling.
+   */
+  maxSensitivity?: Sensitivity;
 }
 
 /** Why authentication failed — for the operator's log, never for the client. */
@@ -174,6 +184,8 @@ export type AuthResult =
       principal: string;
       dailyTokenQuota: number | null;
       dailyReadQuota: number | null;
+      /** Highest sensitivity label the token may be handed, or null for none. */
+      maxSensitivity: Sensitivity | null;
     }
   | { ok: false; reason: AuthFailure };
 
@@ -208,7 +220,8 @@ CREATE TABLE IF NOT EXISTS tokens (
   last_used_at  REAL,
   principal          TEXT NOT NULL DEFAULT '',
   daily_token_quota  INTEGER,
-  daily_read_quota   INTEGER
+  daily_read_quota   INTEGER,
+  max_sensitivity    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tokens_tenant ON tokens(tenant_id);
 CREATE TABLE IF NOT EXISTS principals (
@@ -265,6 +278,7 @@ interface TokenRow {
   principal: string;
   daily_token_quota: number | null;
   daily_read_quota: number | null;
+  max_sensitivity: string | null;
 }
 interface PrincipalRow {
   tenant_id: string;
@@ -287,6 +301,9 @@ const toToken = (r: TokenRow): TokenRecord => ({
   principal: r.principal ?? "",
   dailyTokenQuota: r.daily_token_quota ?? null,
   dailyReadQuota: r.daily_read_quota ?? null,
+  // A stored value that is not a tier (a hand-edited database) becomes the LOWEST
+  // ceiling, never "no ceiling".
+  maxSensitivity: r.max_sensitivity == null ? null : isSensitivity(r.max_sensitivity) ? r.max_sensitivity : "public",
   capabilities: r.capabilities === null ? null : (JSON.parse(r.capabilities) as string[]),
   adminAllowed: r.admin_allowed === 1,
   createdAt: r.created_at,
@@ -346,6 +363,7 @@ export class ControlPlane {
     add("principal", "principal TEXT NOT NULL DEFAULT ''");
     add("daily_token_quota", "daily_token_quota INTEGER");
     add("daily_read_quota", "daily_read_quota INTEGER");
+    add("max_sensitivity", "max_sensitivity TEXT");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_tokens_principal ON tokens(tenant_id, principal)");
   }
 
@@ -517,6 +535,12 @@ export class ControlPlane {
         throw new TenantError("invalid_quota", `${label} must be a whole number ≥ 1`);
       }
     }
+    if (options.maxSensitivity !== undefined && !isSensitivity(options.maxSensitivity)) {
+      throw new TenantError(
+        "invalid_sensitivity",
+        `maxSensitivity must be one of ${SENSITIVITIES.join(", ")}; got ${JSON.stringify(options.maxSensitivity)}`,
+      );
+    }
     const principal = options.principal ?? "";
     if (options.principal !== undefined) {
       if (!PRINCIPAL_RE.test(principal)) {
@@ -542,8 +566,8 @@ export class ControlPlane {
     this.db
       .query(
         `INSERT INTO tokens (id, tenant_id, room, label, secret_hash, capabilities, admin_allowed, created_at, expires_at,
-                             principal, daily_token_quota, daily_read_quota)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                             principal, daily_token_quota, daily_read_quota, max_sensitivity)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -558,6 +582,7 @@ export class ControlPlane {
         principal,
         options.dailyTokenQuota ?? null,
         options.dailyReadQuota ?? null,
+        options.maxSensitivity ?? null,
       );
     const record = toToken(this.db.query("SELECT * FROM tokens WHERE id = ?").get(id) as TokenRow);
     return { token: `${TOKEN_PREFIX}${id}_${secret}`, record };
@@ -618,6 +643,7 @@ export class ControlPlane {
       principal: rec.principal,
       dailyTokenQuota: rec.dailyTokenQuota,
       dailyReadQuota: rec.dailyReadQuota,
+      maxSensitivity: rec.maxSensitivity,
     };
   }
 

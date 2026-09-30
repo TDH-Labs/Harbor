@@ -147,6 +147,7 @@ describe("tokens", () => {
       principal: "",
       dailyTokenQuota: null,
       dailyReadQuota: null,
+      maxSensitivity: null,
     });
   });
 
@@ -633,7 +634,7 @@ describe("migrating a control.db created before principals and quotas", () => {
 
     const upgraded = new ControlPlane(oldDir);
     const auth = upgraded.authenticate(token);
-    expect(auth).toMatchObject({ ok: true, tenantId: "acme", principal: "", dailyTokenQuota: null, dailyReadQuota: null });
+    expect(auth).toMatchObject({ ok: true, tenantId: "acme", principal: "", dailyTokenQuota: null, dailyReadQuota: null, maxSensitivity: null });
     expect(upgraded.listTokens("acme")[0]).toMatchObject({ label: "legacy", principal: "" });
 
     // the new columns are real: a person-bound, quota'd token can be created alongside
@@ -643,8 +644,9 @@ describe("migrating a control.db created before principals and quotas", () => {
       room: "general",
       principal: "kim",
       dailyTokenQuota: 100,
+      maxSensitivity: "internal",
     });
-    expect(upgraded.authenticate(fresh.token)).toMatchObject({ ok: true, principal: "kim", dailyTokenQuota: 100 });
+    expect(upgraded.authenticate(fresh.token)).toMatchObject({ ok: true, principal: "kim", dailyTokenQuota: 100, maxSensitivity: "internal" });
     expect(upgraded.revokePrincipalTokens("acme", "kim")).toBe(1);
     expect(upgraded.authenticate(token).ok).toBe(true); // the legacy token is untouched
   });

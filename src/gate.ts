@@ -42,6 +42,7 @@ import { Environment } from "./env.ts";
 import { normalizeRoomEnv } from "./config.ts";
 import { deny, allow, emitHypervisorEvent } from "./audit.ts";
 import { hasLiveGrant } from "./approval.ts";
+import { effectiveSensitivity } from "./sensitivity.ts";
 
 /** Contract-named alias for the isolation error (BUILD_BRIEF / phase interface). */
 export { AccessDenied as AccessDeniedError } from "./isolation.ts";
@@ -241,6 +242,38 @@ export function gate<A extends unknown[], R>(
         });
         throw new AccessDenied(reason, { session, capability: tool, resource });
       }
+    }
+
+    // 2b. Sensitivity ceiling. Room membership decided the skill is reachable
+    // from this room; a token's ceiling decides whether THIS caller may be handed
+    // it. It applies to an approved cross-room grant too. Unlabeled skills are
+    // denied under a ceiling (see sensitivity.ts). The audit row carries the
+    // true reason; the AGENT is given the same words as an out-of-room skill, so
+    // a capped token cannot probe which skill names exist above its ceiling.
+    if (skillGated && resource && !session.sensitivityAllowed(env, resource)) {
+      const label = effectiveSensitivity(env.config, session.room, resource) ?? "unlabeled";
+      const reason = `skill '${resource}' is ${label}; this token's ceiling is ${session.maxSensitivity}`;
+      deny(session.sessionId, tool, resource, reason, {
+        room: session.room,
+        agentId: session.agentId,
+        env,
+      });
+      emitHypervisorEvent({
+        kind: "gate",
+        event: "sensitivity_denied",
+        decision: "denied",
+        sessionId: session.sessionId,
+        room: session.room,
+        capability: tool,
+        resource,
+        reason,
+        timestamp: nowSec(),
+      });
+      throw new AccessDenied(`skill '${resource}' not in room '${session.room}'`, {
+        session,
+        capability: tool,
+        resource,
+      });
     }
 
     // 3. Room-override check for tools whose first arg is an optional room

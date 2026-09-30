@@ -137,7 +137,7 @@ async function searchSkillsImpl(
     };
   }
   const room = roomOverride ?? session.room;
-  const results = searchSkills(env, query, room, limit);
+  const results = searchSkills(env, query, room, limit, (sk) => session.sensitivityAllowed(env, sk.name, room));
   if (results.length === 0) {
     return {
       content: [{ type: "text", text: `No skills matched query "${query}" in room "${room}".` }],
@@ -268,7 +268,7 @@ async function listSkillsImpl(roomOverride?: string): Promise<PiToolResult> {
     };
   }
   const room = roomOverride ?? session.room;
-  const skills = listSkills(env, room);
+  const skills = session.filterVisible(env, listSkills(env, room), room);
   if (skills.length === 0) {
     return {
       content: [{ type: "text", text: `No skills available in room "${room}".` }],

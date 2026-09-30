@@ -26,6 +26,7 @@ import {
   readSkill,
   registerHarborSkills,
   routeSkillsTool,
+  searchSkillsTool,
   type PiToolDefinition,
 } from "./pi.ts";
 
@@ -40,13 +41,17 @@ afterEach(() => {
 
 const READ_CAPS = ["read_skill", "list_skills", "search_skills", "activate_skill", "deactivate_skill"];
 
-function makeEnv(rooms: Record<string, unknown>, skills: Record<string, string>): Environment {
+function makeEnv(
+  rooms: Record<string, unknown>,
+  skills: Record<string, string>,
+  skillsConfig: Record<string, unknown> = {},
+): Environment {
   const stateDir = join(dir, ".agent-env");
   const skillsDir = join(dir, ".agents", "skills");
   const cfg = new Config(
     deepMerge(DEFAULTS, {
       paths: { state_dir: stateDir, skills_dir: skillsDir },
-      skills: { rooms, default_room: "general" },
+      skills: { rooms, default_room: "general", ...skillsConfig },
     }),
   );
   const env = new Environment(dir, cfg);
@@ -263,5 +268,39 @@ describe("routeSkillsTool (Turn-Sieve, in-process)", () => {
       if (saved === undefined) delete process.env.HARBOR_SYSTEM_ONE_URL;
       else process.env.HARBOR_SYSTEM_ONE_URL = saved;
     }
+  });
+});
+
+describe("a sensitivity ceiling on the caller's session (in-process)", () => {
+  function labeled(): Environment {
+    return makeEnv(
+      {
+        team: { skills: ["open-guide", "secret-plan", "unlabeled-notes"], capabilities: READ_CAPS },
+      },
+      { "open-guide": skillMd("open-guide"), "secret-plan": skillMd("secret-plan"), "unlabeled-notes": skillMd("unlabeled-notes") },
+      { skill_sensitivity: { "open-guide": "public", "secret-plan": "restricted" } },
+    );
+  }
+  const capped = (env: Environment): GateContext => ({
+    env,
+    session: new AgentSession({ room: "team", capabilities: READ_CAPS, sessionId: "capped", maxSensitivity: "public" }),
+  });
+
+  test("list, search and route show only what the ceiling allows; read is refused", async () => {
+    const env = labeled();
+    const ctx = capped(env);
+    const list = await listSkillsTool(ctx);
+    const text = (r: { content: Array<{ text: string }> }) => r.content.map((c) => c.text).join("\n");
+    expect(text(list)).toContain("open-guide");
+    expect(text(list)).not.toContain("secret-plan");
+    expect(text(list)).not.toContain("unlabeled-notes");
+
+    expect(text(await searchSkillsTool(ctx, "secret plan notes"))).not.toContain("secret-plan");
+    expect(text(await routeSkillsTool(ctx, "please run secret-plan"))).not.toContain("secret-plan");
+
+    const denied = await readSkill(ctx, "secret-plan");
+    expect(JSON.stringify(denied)).not.toContain("# secret-plan");
+    const rows = auditRead(env, { limit: 50 }).filter((r) => r.sessionId === "capped" && r.resource === "secret-plan");
+    expect(rows.some((r) => r.decision === "denied" && r.reason.includes("ceiling is public"))).toBe(true);
   });
 });

@@ -48,6 +48,13 @@ export interface RawRoom {
   mcp?: { servers: RawMcpServer[] };
   /** Optional per-room session token budget. */
   budget?: number;
+  /**
+   * Default sensitivity label for this room's skills (`public` | `internal` |
+   * `restricted`). Enforced against a token's `--max-sensitivity` ceiling; see
+   * sensitivity.ts. Unset = unlabeled. Typed loosely: the loader keeps whatever
+   * TOML holds, and a wrong value is treated as `restricted`, never as "open".
+   */
+  sensitivity?: unknown;
 }
 
 export interface RawConfig {
@@ -82,6 +89,8 @@ export interface RawConfig {
     /** Optional per-skill sub-domain hint (e.g. "litigation"), used to group a
      *  room's skills_index.md into sub-sections. Bare label or "room/label". */
     skill_subdomain: Record<string, string>;
+    /** Per-skill sensitivity override (skill → tier); beats the room default. */
+    skill_sensitivity: Record<string, unknown>;
     default_room: string;
   };
   budgets: {
@@ -179,6 +188,7 @@ export const DEFAULTS: RawConfig = {
     rooms: {},
     skill_category_to_room: {},
     skill_subdomain: {},
+    skill_sensitivity: {},
     // Neutral catch-all; de-personalized from the prototype's machine-specific default.
     default_room: "general",
   },
@@ -442,6 +452,16 @@ export class Config {
   /** Per-skill sub-domain hint map (skill → "label" or "room/label"). */
   get skillSubdomains(): Record<string, string> {
     return { ...(this.data.skills.skill_subdomain ?? {}) };
+  }
+  /** The raw `skills.skill_sensitivity[skill]` value, or undefined. See sensitivity.ts. */
+  skillSensitivityRaw(skill: string): unknown {
+    const t = this.data.skills.skill_sensitivity;
+    return t && Object.prototype.hasOwnProperty.call(t, skill) ? t[skill] : undefined;
+  }
+  /** The raw `skills.rooms.<room>.sensitivity` value, or undefined. */
+  roomSensitivityRaw(room: string): unknown {
+    const r = this.data.skills.rooms[room];
+    return r && Object.prototype.hasOwnProperty.call(r, "sensitivity") ? r.sensitivity : undefined;
   }
   get skillDefaultRoom(): string {
     return this.data.skills.default_room ?? "general";

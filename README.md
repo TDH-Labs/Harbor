@@ -31,6 +31,10 @@ Server operation — self-hosted or as a hosted offering — is documented in
   `devops`, …). Each room has a skill allowlist and a capability set. A session
   in one room asking for another room's skill is refused, and the refusal is
   audited. Unknown rooms fail closed.
+- **Sensitivity labels.** Skills carry a tier (`public` < `internal` <
+  `restricted`) from the operator's config; a token can carry a ceiling, and a
+  skill above it — or unlabeled — is never delivered to it and never listed. This
+  is how a person's own agent is kept from receiving what the house agent may.
 - **Token budgets.** Loading a skill debits the session's budget atomically
   (SQLite `BEGIN IMMEDIATE`); an overspend is refused, never silently absorbed.
   Token counts are estimated as characters ÷ 4.
@@ -145,7 +149,8 @@ Harbor ships the client and the trust boundary around it.
 | Enforcement | `isolation` (`check`, `rooms`, `audit`, `denials`, `doctor`), `gate`, `budget`, `audit`, `approval`, `spawn` (`--confine` pins the child to its room) |
 | Runtime | `scheduler`, `compaction`, `session`, `bench` |
 | Secrets | `secrets` (`set`, `get`, `list`, `rm`, `export`, `doctor`) |
-| Server | `serve`, `tenant` (`create`, `add-room`, `list`, `suspend`, `resume`), `token` (`create`, `list`, `revoke`; `--principal`, daily quotas), `principal` (`list`, `suspend`, `resume`, `revoke`), `service print` |
+| Server | `serve`, `tenant` (`create`, `add-room`, `list`, `suspend`, `resume`), `token` (`create`, `list`, `revoke`; `--principal`, daily quotas, `--max-sensitivity`), `principal` (`list`, `suspend`, `resume`, `revoke`), `service print` |
+| Labels | `label` (`set`, `clear`, `list`) — sensitivity tiers for rooms and skills; a token with `--max-sensitivity` is never handed a skill above it, or an unlabeled one |
 | Sharing | `guard <folder>` — scan for credentials and never-sync files before a folder is shared (never prints the secret) |
 
 `harbor dashboard` serves on loopback by default. Binding it elsewhere requires

@@ -33,6 +33,7 @@ import { DEFAULT_CAPABILITIES } from "./config.ts";
 import { openDb } from "./db.ts";
 import type { Environment } from "./env.ts";
 import { RoomJailViolation, createRoomSandbox, realpathLoose, type RoomRootKind } from "./sandbox.ts";
+import { effectiveSensitivity, withinCeiling, type Sensitivity } from "./sensitivity.ts";
 
 // ── Capabilities ─────────────────────────────────────────────────────────────
 
@@ -98,6 +99,12 @@ export interface AgentSessionInit {
    * pool. The unconfigured default room stays unrestricted either way.
    */
   strictRoom?: boolean;
+  /**
+   * The highest sensitivity label this session may be handed (see
+   * sensitivity.ts). Absent = no ceiling. With a ceiling, an UNLABELED skill is
+   * never delivered.
+   */
+  maxSensitivity?: Sensitivity | null;
 }
 
 /** A session with an identity and a fixed capability set. */
@@ -108,6 +115,8 @@ export class AgentSession {
   readonly sessionId: string;
   readonly createdAt: number;
   readonly strictRoom: boolean;
+  /** Null = no ceiling. */
+  readonly maxSensitivity: Sensitivity | null;
   activeSkill: string | null = null;
   activeSkillStartedAt: number | null = null;
 
@@ -117,6 +126,7 @@ export class AgentSession {
     this.capabilities = new Set(init.capabilities ?? DEFAULT_CAPABILITIES);
     this.createdAt = init.createdAt ?? Date.now() / 1000;
     this.strictRoom = init.strictRoom ?? false;
+    this.maxSensitivity = init.maxSensitivity ?? null;
     this.activeSkill = init.activeSkill ?? null;
     if (this.activeSkill) this.activeSkillStartedAt = this.createdAt;
     this.sessionId =
@@ -190,6 +200,23 @@ export class AgentSession {
     // session, where a configured-but-empty room grants nothing.
     if (allowed.size === 0) return !(this.strictRoom && configured);
     return allowed.has(skillName);
+  }
+
+  /**
+   * May this session be HANDED `skillName` (its label is within the session's
+   * ceiling)? Always true without a ceiling. Labels resolve against `room`
+   * (default: this session's room), so an ADMIN listing another room is judged by
+   * that room's default.
+   */
+  sensitivityAllowed(env: Environment, skillName: string, room: string = this.room): boolean {
+    if (this.maxSensitivity === null) return true;
+    return withinCeiling(effectiveSensitivity(env.config, room, skillName), this.maxSensitivity);
+  }
+
+  /** Drop the skills this session's ceiling forbids (all of them pass without a ceiling). */
+  filterVisible<T extends { name: string }>(env: Environment, skills: T[], room: string = this.room): T[] {
+    if (this.maxSensitivity === null) return skills;
+    return skills.filter((s) => this.sensitivityAllowed(env, s.name, room));
   }
 
   roomMcpAllowed(env: Environment, mcpServer: string): boolean {
@@ -513,6 +540,8 @@ export interface CreateSessionOptions {
   createdAt?: number;
   /** See {@link AgentSessionInit.strictRoom}. */
   strictRoom?: boolean;
+  /** See {@link AgentSessionInit.maxSensitivity}. */
+  maxSensitivity?: Sensitivity | null;
 }
 
 /**
@@ -531,6 +560,7 @@ export function createSession(options: CreateSessionOptions): AgentSession {
     sessionId: options.sessionId,
     createdAt: options.createdAt,
     ...(options.strictRoom ? { strictRoom: true } : {}),
+    ...(options.maxSensitivity ? { maxSensitivity: options.maxSensitivity } : {}),
   });
 
   if (options.env) {

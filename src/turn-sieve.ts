@@ -57,7 +57,9 @@ export async function routeTurn(
   }
   const room = roomOverride ?? session.room;
 
-  const available = listSkills(env, room);
+  // A ceiling hides skills from routing too: they are neither offered to the
+  // router nor returned, so the routed list never names what could not be read.
+  const available = session.filterVisible(env, listSkills(env, room), room);
   const so = env.config.systemOne;
   const sieve = await routeSkillsForTurn(prompt, room, available, {
     timeoutMs: so.timeoutMs,
