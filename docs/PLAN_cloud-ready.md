@@ -310,6 +310,13 @@ privilege-escalation path).
   flagged not followed, oversized/binary/unreadable reported as skipped,
   `--files-from` confined to the root, and output that never contains the secret.
 - `control.db` from the previous release is migrated in place.
+- **Delegate client** (`integrations/delegate-client.ts`, exported as
+  `harbor-tugboat/integrations/delegate-client`): channel-agnostic. A person is reached
+  only through a `VerifiedIdentity` a channel adapter creates after authenticating the
+  human, mapped to a Harbor person by an operator-maintained `IdentityMap`; unmapped or
+  look-alike identities never reach Harbor. Tested against the real server handler;
+  15 mutations each fail a named test. It does not (cannot) authenticate anyone, and no
+  Slack/Discord/web adapter is written: that waits on which channel the house agent uses.
 - **Proposal approval** (D16): `src/proposals.ts`, `harbor proposal`. `skill-install`
   also stopped copying symlinks from a source directory into the pool (found while
   building this: a link in a source skill was copied as a link and would have been

@@ -41,7 +41,9 @@ Server operation — self-hosted or as a hosted offering — is documented in
 - **House agent acting per person.** A `--delegate` token can do nothing on its
   own: each request names the person it acts for (`Harbor-On-Behalf-Of`) and that
   person's grant decides the room, sensitivity and quotas — re-read every request.
-  It bounds what a house agent can hand someone; it cannot verify who is asking.
+  It bounds what a house agent can hand someone; it cannot verify who is asking. A
+  reference client (`integrations/delegate-client`) refuses any person that did not
+  come from an authenticated channel identity.
 - **Audit log.** Every denial (and privileged allowance) is recorded in SQLite:
   who, which room, which capability, which resource, why.
 - **Skill pool with progressive disclosure.** Skills live once in a pool and are

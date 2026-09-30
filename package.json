@@ -63,7 +63,8 @@
     "./install": "./src/install.ts",
     "./cli": "./src/cli.ts",
     "./integrations/pi": "./integrations/pi.ts",
-    "./integrations/mcp-server": "./integrations/mcp-server.ts"
+    "./integrations/mcp-server": "./integrations/mcp-server.ts",
+    "./integrations/delegate-client": "./integrations/delegate-client.ts"
   },
   "scripts": {
     "test": "bun test",

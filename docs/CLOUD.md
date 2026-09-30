@@ -414,6 +414,34 @@ person's request into another's. Harbor bounds the damage to that other person's
 grant; it does not remove the risk. Keep grants small, and keep what only some
 people may read out of rooms that others hold grants for.
 
+A reference client, `harbor-tugboat/integrations/delegate-client`, makes the easy
+mistakes impossible rather than merely documented:
+
+```ts
+import { DelegateClient, IdentityMap, VerifiedIdentity } from "harbor-tugboat/integrations/delegate-client";
+
+// Operator-maintained: which Harbor person each AUTHENTICATED channel identity is.
+const identities = new IdentityMap([["slack:U024BE7LH", "kim@example.com"]]);
+const harbor = new DelegateClient({ endpoint: "https://harbor.example.com/mcp", token: process.env.HARBOR_DELEGATE_TOKEN!, identities });
+
+// In the channel adapter, AFTER the platform has authenticated the request
+// (verified Slack signature, validated SSO session) — never from message text:
+const who = VerifiedIdentity.authenticated("slack", event.user);
+
+const out = await harbor.forIdentity(who).callTool("read_skill", { skill_name: "nda-review" });
+```
+
+There is no call that takes a person as a string. An identity that is not a real
+`VerifiedIdentity` (a look-alike object, a name from a message) is refused, an
+identity with no entry in the map is refused, and neither reaches Harbor. Each
+person has their own session, opened once however many calls are in flight and
+re-opened once if Harbor ended it (a changed grant, idle expiry). A refused person
+is a typed `DelegateForbiddenError`, a refused token `DelegateAuthError`, a limit
+`DelegateRateLimitedError` with `retryAfterSeconds`. The token stays out of errors,
+`JSON.stringify` and logs, and redirects are not followed (they would carry it to
+another host). The client does **not** authenticate anyone: calling
+`VerifiedIdentity.authenticated` with something you did not authenticate defeats it.
+
 One grant per person: a person acts through the house agent in one room at a
 time. For someone who needs two, make a room that holds both skill sets.
 
