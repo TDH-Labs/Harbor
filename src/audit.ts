@@ -160,10 +160,13 @@ export function deny(
 }
 
 /** Recent audit entries, optionally scoped to a room. */
-export function recent(options: { room?: string; limit?: number; env?: Environment } = {}): AuditEntry[] {
+export function recent(
+  options: { room?: string; agentId?: string; limit?: number; env?: Environment } = {},
+): AuditEntry[] {
   const env = options.env ?? Environment.default();
   return auditRead(env, {
     ...(options.room ? { room: options.room } : {}),
+    ...(options.agentId !== undefined ? { agentId: options.agentId } : {}),
     ...(options.limit != null ? { limit: options.limit } : {}),
   });
 }

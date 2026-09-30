@@ -75,6 +75,28 @@ export interface Proposal {
   findings: GuardFinding[];
 }
 
+/**
+ * Characters that make what a person reads differ from what is installed, or carry
+ * text nobody reads: C0/C1 controls (a terminal escape can redraw the screen and hide
+ * lines), soft hyphen, zero-width space, left/right marks, bidirectional overrides and
+ * isolates, invisible operators, the BOM, and the Unicode Tags and variation-selector-
+ * supplement blocks (invisible text an LLM still reads). Tab and newline are fine;
+ * zero-width joiner/non-joiner are left alone (emoji and several scripts need them).
+ */
+const HIDDEN_RE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u00AD\u200B\u200E\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]|[\u{E0000}-\u{E007F}\u{E0100}-\u{E01EF}]/u;
+/** A carriage return that is not half of CRLF rewinds the line and lets later text overwrite earlier text. */
+const LONE_CR_RE = /\r(?!\n)/;
+const HIDDEN_G = new RegExp(HIDDEN_RE.source, "gu");
+
+const hasHidden = (s: string): boolean => HIDDEN_RE.test(s) || LONE_CR_RE.test(s);
+
+/** Text made safe to print: every hidden character (and a lone CR) is shown as `\u{…}`. */
+export function visible(s: string): string {
+  return s
+    .replace(HIDDEN_G, (c) => `\\u{${c.codePointAt(0)!.toString(16)}}`)
+    .replace(/\r(?!\n)/g, "\\r");
+}
+
 const sha256 = (b: Uint8Array | string): string => createHash("sha256").update(b).digest("hex");
 
 /** A candidate's digest: order-independent over files, sensitive to every path and byte. */
@@ -119,12 +141,15 @@ function readCandidate(dir: string, name: string): Read {
     for (const e of entries) {
       const childRel = rel ? `${rel}/${e.name}` : e.name;
       const childAbs = join(abs, e.name);
+      // Paths reach a terminal in messages: never print one raw.
+      const shown = visible(childRel);
+      if (hasHidden(childRel)) problems.push(`hidden characters in a file name: ${shown}`);
       if (e.isSymbolicLink()) {
-        problems.push(`symlink: ${childRel}`);
+        problems.push(`symlink: ${shown}`);
       } else if (e.isDirectory()) {
         walk(childAbs, childRel, depth + 1);
       } else if (!e.isFile()) {
-        problems.push(`not a regular file: ${childRel}`);
+        problems.push(`not a regular file: ${shown}`);
       } else {
         if (files.length >= MAX_PROPOSAL_FILES) {
           if (!truncated) problems.push(`more than ${MAX_PROPOSAL_FILES} files`);
@@ -135,29 +160,32 @@ function readCandidate(dir: string, name: string): Read {
         try {
           size = lstatSync(childAbs).size;
         } catch {
-          problems.push(`unreadable: ${childRel}`);
+          problems.push(`unreadable: ${shown}`);
           continue;
         }
         if (size > MAX_PROPOSAL_FILE_BYTES || total + size > MAX_PROPOSAL_TOTAL_BYTES) {
-          problems.push(size > MAX_PROPOSAL_FILE_BYTES ? `file over ${MAX_PROPOSAL_FILE_BYTES} bytes: ${childRel}` : `total over ${MAX_PROPOSAL_TOTAL_BYTES} bytes`);
+          problems.push(size > MAX_PROPOSAL_FILE_BYTES ? `file over ${MAX_PROPOSAL_FILE_BYTES} bytes: ${shown}` : `total over ${MAX_PROPOSAL_TOTAL_BYTES} bytes`);
           continue;
         }
         let bytes: Buffer;
         try {
           bytes = readFileSync(childAbs);
         } catch {
-          problems.push(`unreadable: ${childRel}`);
+          problems.push(`unreadable: ${shown}`);
           continue;
         }
         // The read may have raced a growing file; trust the bytes, not the earlier stat.
         if (bytes.length > MAX_PROPOSAL_FILE_BYTES) {
-          problems.push(`file over ${MAX_PROPOSAL_FILE_BYTES} bytes: ${childRel}`);
+          problems.push(`file over ${MAX_PROPOSAL_FILE_BYTES} bytes: ${shown}`);
           continue;
         }
         total += bytes.length;
-        if (bytes.includes(0)) problems.push(`binary file (cannot be reviewed): ${childRel}`);
+        if (bytes.includes(0)) problems.push(`binary file (cannot be reviewed): ${shown}`);
         for (const rule of scanFilename(childRel)) findings.push({ path: childRel, kind: "filename", rule });
         if (!bytes.includes(0)) {
+          if (hasHidden(bytes.toString("utf8"))) {
+            problems.push(`hidden characters (control, bidirectional, zero-width or tag; shown as \\u{…} by \`proposal show\`): ${shown}`);
+          }
           for (const m of scanText(bytes.toString("utf8"))) findings.push({ path: childRel, kind: "content", rule: m.rule, line: m.line });
         }
         files.push({ path: childRel, bytes: bytes.length, sha256: sha256(bytes) });
@@ -197,7 +225,12 @@ function candidateDir(inbox: string, name: string): string {
 /** Read one candidate for review. Installs nothing. */
 export function showProposal(inbox: string, name: string): { proposal: Proposal; contents: Map<string, string> } {
   const { proposal, contents } = readCandidate(candidateDir(inbox, name), name);
-  return { proposal, contents: new Map([...contents].map(([p, b]) => [p, b.includes(0) ? "(binary)" : b.toString("utf8")])) };
+  // For a person to read: hidden characters are made visible so what is on screen is
+  // what would be installed.
+  return {
+    proposal,
+    contents: new Map([...contents].map(([p, b]) => [visible(p), b.includes(0) ? "(binary)" : visible(b.toString("utf8"))])),
+  };
 }
 
 /** Every directory in `inbox` that looks like a skill, with what would stop it being approved. */

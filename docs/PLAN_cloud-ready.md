@@ -376,6 +376,17 @@ privilege-escalation path).
   shown the true reason; label editing skipping its pool/tier checks) were each
   caught by the tests. A migration test builds a control.db from before the column
   existed. I did not exercise this against a real Drive-synced setup.
+- Security review of the whole branch (read-only, before opening the PR) found two
+  things in my own new code, both fixed and pinned by tests that fail without the fix:
+  (1) `audit_recent` was open to every session and returned the room-wide log with an
+  unbounded `limit`, so a capped token could read other people's rows, the skills they
+  loaded, and — from the denial reasons I had just added — the names and labels of
+  skills above its ceiling, which undid the "same words as out-of-room" protection;
+  `list_rooms` likewise disclosed every room in a tenant. Server sessions now read only
+  their own rows and room, the limit is bounded, and denials are shown as the agent saw
+  them. (2) `proposal show` printed skill text raw, so a terminal escape or bidi
+  override could make the reviewer's screen differ from the bytes approved; hidden
+  characters now make a candidate unapprovable and are printed as `\u{…}`.
 - Deployment: `scripts/smoke.sh local` drives a real `harbor serve` process through
   provisioning, authentication, a ceiling and a delegate token (25 checks pass) and
   fails when the gate is broken on purpose. `scripts/smoke.sh docker` exists but has

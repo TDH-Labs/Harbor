@@ -470,15 +470,24 @@ export function auditLog(env: Environment, session: AgentSession, input: AuditLo
 /** Read recent audit entries, optionally filtered by room. */
 export function auditRead(
   env: Environment,
-  options: { room?: string; limit?: number } = {},
+  options: { room?: string; agentId?: string; limit?: number } = {},
 ): AuditEntry[] {
-  const limit = options.limit ?? 50;
+  // Non-negative: SQLite treats a negative LIMIT as "no limit".
+  const limit = Math.max(0, Math.trunc(options.limit ?? 50));
   const db = auditDb(env);
-  const rows = options.room
-    ? (db
-        .query("SELECT * FROM audit_log WHERE room = ? ORDER BY timestamp DESC LIMIT ?")
-        .all(options.room, limit) as AuditRow[])
-    : (db.query("SELECT * FROM audit_log ORDER BY timestamp DESC LIMIT ?").all(limit) as AuditRow[]);
+  const where: string[] = [];
+  const params: Array<string | number> = [];
+  if (options.room) {
+    where.push("room = ?");
+    params.push(options.room);
+  }
+  if (options.agentId !== undefined) {
+    where.push("agent_id = ?");
+    params.push(options.agentId);
+  }
+  const rows = db
+    .query(`SELECT * FROM audit_log${where.length ? ` WHERE ${where.join(" AND ")}` : ""} ORDER BY timestamp DESC LIMIT ?`)
+    .all(...params, limit) as AuditRow[];
   return rows.map(rowToAudit);
 }
 

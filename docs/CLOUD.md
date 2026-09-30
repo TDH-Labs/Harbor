@@ -241,6 +241,13 @@ only".
 
 ### Attribution
 
+A session reads back only **its own** audit rows (`audit_recent`, at most 100) and
+sees only **its own room** in `list_rooms`: the room-wide log would otherwise show a
+bring-your-own agent who else is working, which skills they loaded, and — from the
+denial reasons — which skill names sit above its ceiling. A sensitivity denial is
+shown to the agent in the words it was given at the time. Harbor Core (one operator,
+no identity) keeps the room-wide view.
+
 Every audit row for a person's session carries the person in `agent_id`
 (`session_open`, allowed reads, gate denials, quota refusals, routing). A token
 with no person is attributed to the token (`token:<id>`). The operator's access
@@ -479,6 +486,13 @@ harbor proposal approve nda-review --inbox <folder> --room legal \
   oversized file, too many files, no `SKILL.md`, or anything `harbor guard` flags
   (a credential, a secret-shaped filename) **cannot be approved**. Unreviewable
   content cannot be approved by review.
+- **Hidden characters** also make a candidate unapprovable: terminal escapes and other
+  control characters (which can redraw the screen so the file you read is not the one
+  you approve), a lone carriage return (overwrites the line), bidirectional overrides,
+  zero-width and invisible characters, and Unicode tag characters (text an LLM reads
+  and a person cannot). `proposal show` prints any of them as `\u{…}` so you can see
+  what triggered it. Look-alike letters (a Cyrillic `а` in a Latin word) are **not**
+  detected.
 - Each approval is written to the audit log (`skill_approve`, digest, room, who).
   `harbor skill-install` now also refuses a source directory containing a symlink
   (it used to copy the link into the pool, to be served later as skill text).

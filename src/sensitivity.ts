@@ -89,3 +89,20 @@ export function withinCeiling(label: Sensitivity | null, ceiling: Sensitivity | 
   if (label === null) return false;
   return RANK[label] <= RANK[ceiling];
 }
+
+/** The audit-row reason for a sensitivity denial. The one place its wording is defined. */
+export function denialReason(skill: string, label: Sensitivity | null, ceiling: Sensitivity): string {
+  return `skill '${skill}' is ${label ?? "unlabeled"}; this token's ceiling is ${ceiling}`;
+}
+
+const DENIAL_RE = /^skill '(.*)' is (?:public|internal|restricted|unlabeled); this token's ceiling is (?:public|internal|restricted)$/;
+
+/**
+ * What an AGENT may be shown of an audit reason. A sensitivity denial is worded as
+ * an out-of-room refusal, exactly as the denial itself was, so reading the audit
+ * log back cannot reveal that a name exists above the caller's ceiling.
+ */
+export function agentFacingReason(reason: string, room: string): string {
+  const m = DENIAL_RE.exec(reason);
+  return m ? `skill '${m[1]}' not in room '${room}'` : reason;
+}

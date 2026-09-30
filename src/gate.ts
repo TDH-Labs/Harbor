@@ -42,7 +42,7 @@ import { Environment } from "./env.ts";
 import { normalizeRoomEnv } from "./config.ts";
 import { deny, allow, emitHypervisorEvent } from "./audit.ts";
 import { hasLiveGrant } from "./approval.ts";
-import { effectiveSensitivity } from "./sensitivity.ts";
+import { denialReason, effectiveSensitivity, type Sensitivity } from "./sensitivity.ts";
 
 /** Contract-named alias for the isolation error (BUILD_BRIEF / phase interface). */
 export { AccessDenied as AccessDeniedError } from "./isolation.ts";
@@ -251,8 +251,7 @@ export function gate<A extends unknown[], R>(
     // true reason; the AGENT is given the same words as an out-of-room skill, so
     // a capped token cannot probe which skill names exist above its ceiling.
     if (skillGated && resource && !session.sensitivityAllowed(env, resource)) {
-      const label = effectiveSensitivity(env.config, session.room, resource) ?? "unlabeled";
-      const reason = `skill '${resource}' is ${label}; this token's ceiling is ${session.maxSensitivity}`;
+      const reason = denialReason(resource, effectiveSensitivity(env.config, session.room, resource), session.maxSensitivity as Sensitivity);
       deny(session.sessionId, tool, resource, reason, {
         room: session.room,
         agentId: session.agentId,

@@ -62,6 +62,7 @@ import {
   RoomJailViolation,
   routeTurn,
 } from "harbor-tugboat";
+import { agentFacingReason } from "../src/sensitivity.ts";
 import pkg from "../package.json" with { type: "json" };
 
 /** MCP protocol revision this server implements (verified at build time). */
@@ -629,14 +630,13 @@ async function listSkillsImpl(roomOverride?: string): Promise<ToolResult> {
 }
 
 /**
- * Every configured room's name and description. Deliberately NOT gate()-wrapped
- * or room-scoped (same precedent as budget_status/audit_recent below) — room
- * names and descriptions are non-sensitive metadata already visible via `harbor
- * isolation rooms`; only skill CONTENT within a room is access-controlled.
+ * Every configured room's name and description — for a Core session. A Harbor Server
+ * session sees only its own room: which other rooms exist in a tenant (and what they
+ * are called) says who is working on what.
  */
 function listRoomsImpl(): ToolResult {
-  const { env } = currentGateContext();
-  const rooms = Object.entries(env.config.roomSkills);
+  const { env, session } = currentGateContext();
+  const rooms = Object.entries(env.config.roomSkills).filter(([room]) => !session.strictRoom || room === session.room);
   if (rooms.length === 0) return text("No rooms configured.");
   const lines = rooms.map(([room, data]) => `- ${room}: ${data.description || "(no description)"}`);
   return text(["Configured rooms:", "", ...lines].join("\n"));
@@ -656,14 +656,30 @@ function budgetStatusImpl(): ToolResult {
   );
 }
 
-/** Recent audit entries scoped to the session's room. */
+/**
+ * Recent audit entries scoped to the session's room.
+ *
+ * A session that has an identity (every Harbor Server session: the person, or the
+ * token) is shown only ITS OWN rows. The room-wide log names other people, the skills
+ * they loaded, and — since sensitivity labels — which names sit above a ceiling; a
+ * bring-your-own agent must not be able to read that back. A session with no identity
+ * (Harbor Core, one operator) keeps the room-wide view. Sensitivity denials are shown
+ * in the words the agent was given at the time, and `limit` is bounded.
+ */
 function auditRecentImpl(limit: number): ToolResult {
   const { env, session } = currentGateContext();
-  const entries = audit.recent({ env, room: session.room, limit });
+  const n = Math.min(100, Math.max(1, Math.trunc(Number.isFinite(limit) ? limit : 10)));
+  const entries = audit.recent({
+    env,
+    room: session.room,
+    ...(session.agentId ? { agentId: session.agentId } : {}),
+    limit: n,
+  });
   if (entries.length === 0) return text(`No audit entries for room '${session.room}'.`);
-  const lines = entries.map(
-    (e) => `${e.decision.padEnd(7)} ${e.capability || e.event} ${e.resource}${e.reason ? ` — ${e.reason}` : ""}`,
-  );
+  const lines = entries.map((e) => {
+    const reason = agentFacingReason(e.reason, session.room);
+    return `${e.decision.padEnd(7)} ${e.capability || e.event} ${e.resource}${reason ? ` — ${reason}` : ""}`;
+  });
   return text(lines.join("\n"));
 }
 
