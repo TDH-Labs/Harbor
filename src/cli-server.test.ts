@@ -61,7 +61,7 @@ async function cli(...args: string[]): Promise<{ code: number; out: string }> {
     process.stdout.write = origWrite;
   }
   const code = threw ? 1 : typeof process.exitCode === "number" ? process.exitCode : 0;
-  process.exitCode = savedExit;
+  process.exitCode = savedExit ?? 0; // (assigning undefined does NOT reset it in Bun)
   return { code, out: logs.join("\n") };
 }
 

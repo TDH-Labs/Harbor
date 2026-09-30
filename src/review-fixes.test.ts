@@ -208,7 +208,7 @@ describe("harbor guard output is safe to print", () => {
       console.error = origErr;
     }
     const code = typeof process.exitCode === "number" ? process.exitCode : 0;
-    process.exitCode = savedExit;
+    process.exitCode = savedExit ?? 0; // (assigning undefined does NOT reset it in Bun)
     return { code, out: logs.join("\n") };
   }
 

@@ -293,7 +293,7 @@ describe("what a reviewer cannot see", () => {
       await runCommand(main, { rawArgs: ["proposal", "show", "cli-hidden", "--inbox", inbox] });
     } finally {
       console.log = orig;
-      process.exitCode = savedExit;
+      process.exitCode = savedExit ?? 0; // (assigning undefined does NOT reset it in Bun)
     }
     const printed = out.join("\n");
     expect(printed).not.toContain("\u001b");
@@ -458,7 +458,7 @@ describe("harbor proposal (command tree)", () => {
       console.error = origErr;
     }
     const code = threw ? 1 : typeof process.exitCode === "number" ? process.exitCode : 0;
-    process.exitCode = savedExit;
+    process.exitCode = savedExit ?? 0; // (assigning undefined does NOT reset it in Bun)
     return { code, out: logs.join("\n") };
   }
 

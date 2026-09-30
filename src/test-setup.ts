@@ -23,6 +23,7 @@
  *
  * BUILD_BRIEF §7: the build must not perturb the live system under soak.
  */
+import { afterAll } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -38,5 +39,23 @@ process.on("exit", () => {
     rmSync(sandboxHome, { recursive: true, force: true });
   } catch {
     // ignore — temp dir, reclaimed by the OS regardless
+  }
+});
+
+/**
+ * A test that leaves `process.exitCode` non-zero makes `bun test` exit 1 even though every
+ * test passed — and assigning `undefined` back does NOT reset it in Bun, so a helper that
+ * "restores" a saved `undefined` after running a failing CLI command leaks exactly that.
+ * It passes or fails depending on which files run before it (CI's file order differs from
+ * a laptop's), so make the leak a named failure instead of a mystery exit code.
+ */
+afterAll(() => {
+  const leaked = process.exitCode;
+  if (leaked) {
+    process.exitCode = 0; // clear it so this file's report is the one that fails, not the whole run's exit code
+    throw new Error(
+      `a test in this file left process.exitCode = ${String(leaked)}. Restore it with \`process.exitCode = saved ?? 0\` ` +
+        "(assigning undefined does not reset it in Bun).",
+    );
   }
 });

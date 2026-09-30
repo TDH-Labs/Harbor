@@ -397,6 +397,16 @@ privilege-escalation path).
   check, expiry boundary, unbounded 404 retry) and a dozen doc statements that were
   false; those are fixed or corrected. The lesson recorded for future work: a test that
   pins a behaviour as "intended" is not a review of that behaviour.
+- **CI failed on a commit that passed locally, with "1170 pass, 0 fail" and exit code 1.**
+  Cause: in Bun, `process.exitCode = undefined` does NOT reset the exit code, and my new
+  in-process CLI test helpers "restored" a saved `undefined` after running a command that
+  had failed, so the test process exited 1. Whether a file leaked depended on the order
+  files ran in (CI's order differs from a laptop's) and on whether the first command a
+  helper ran succeeded, which is why six older helpers with the same pattern had never
+  shown it. Reproduced by running CI's exact file order under CI's Bun (1.4.2; I had been
+  testing on 1.3.11); fixed in all seven helpers (`saved ?? 0`), and the test preload now
+  fails a file that leaves a non-zero exit code, by name. I had only ever grepped the
+  pass/fail counts locally and never looked at the exit code.
 - Security review of the whole branch (read-only, before opening the PR) found two
   things in my own new code, both fixed and pinned by tests that fail without the fix:
   (1) `audit_recent` was open to every session and returned the room-wide log with an
