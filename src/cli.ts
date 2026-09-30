@@ -809,6 +809,11 @@ const spawnCmd = defineCommand({
     budget: { type: "string", description: "Token budget" },
     timeout: { type: "string", description: "Timeout (ms)" },
     "allow-path": { type: "string", description: "Allowed paths (':'-separated logical sandbox)" },
+    confine: {
+      type: "boolean",
+      description: "Pin the child's cwd (and --allow-path entries) inside the room; symlink-safe",
+    },
+    cwd: { type: "string", description: "Working directory (must be inside the room with --confine)" },
   },
   async run({ args }) {
     const env = envFromArgs(args);
@@ -824,6 +829,8 @@ const spawnCmd = defineCommand({
       ...(args.budget ? { budget: Number.parseInt(args.budget, 10) } : {}),
       ...(args.timeout ? { timeout: Number.parseInt(args.timeout, 10) } : {}),
       ...(args["allow-path"] ? { allowedPaths: args["allow-path"].split(":").filter(Boolean) } : {}),
+      ...(args.confine ? { confineToRoom: true } : {}),
+      ...(args.cwd ? { cwd: args.cwd } : {}),
     });
     const code = await child.exited;
     if (child.stdout) {

@@ -28,7 +28,8 @@
 import { Environment } from "./env.ts";
 import { CompactionEngine } from "./compaction.ts";
 import { SessionTracker } from "./session.ts";
-import { emitHypervisorEvent } from "./audit.ts";
+import { emitHypervisorEvent, deny } from "./audit.ts";
+import { RoomJailViolation, createRoomSandbox } from "./sandbox.ts";
 
 const nowSec = (): number => Date.now() / 1000;
 
@@ -48,6 +49,19 @@ export interface HarborSpawnOptions {
   env?: Record<string, string>;
   /** Working directory for the child. */
   cwd?: string;
+  /**
+   * Pin the child to its room (opt-in). The working directory defaults to the
+   * room's root (`rooms/<room>`, created if missing) and, if `cwd` is given,
+   * must resolve inside the room's roots — symlinks included (see sandbox.ts).
+   * Every `allowedPaths` entry must also resolve inside the room. A violation
+   * throws {@link RoomJailViolation} BEFORE a session is created or a process
+   * launched, and is audited.
+   *
+   * This confines the working directory, not the process: a child can still
+   * open absolute paths itself. It is the deterministic half of "shell commands
+   * are pinned to the room"; the other half needs OS-level confinement.
+   */
+  confineToRoom?: boolean;
   /** Harbor environment (state/session dirs). Defaults to {@link Environment.default}. */
   harborEnv?: Environment;
   /** Create + roll up a tracked session for the child. Default true. */
@@ -256,6 +270,28 @@ export function spawn(
   const budget = options.budget ?? env.config.roomBudget(room);
   const track = options.track ?? true;
 
+  // Room confinement runs FIRST: a rejected spawn must not leak a started
+  // session, and must not launch anything.
+  let cwd = options.cwd;
+  let allowedPaths = options.allowedPaths;
+  if (options.confineToRoom) {
+    try {
+      const sandbox = createRoomSandbox(env.root, room, "files");
+      cwd = sandbox.resolveCwd(options.cwd);
+      for (const p of options.allowedPaths ?? []) sandbox.resolve(p, sandbox.primaryRoot);
+      if (!allowedPaths || allowedPaths.length === 0) allowedPaths = [...sandbox.roots];
+    } catch (err) {
+      if (err instanceof RoomJailViolation) {
+        try {
+          deny(options.sessionId ?? "", "spawn", options.cwd ?? command, err.reason, { room, env });
+        } catch {
+          // an audit failure must not turn a denial into an allow — still throw below
+        }
+      }
+      throw err;
+    }
+  }
+
   let sessionId = options.sessionId ?? "";
   let tracker: SessionTracker | null = null;
   if (track) {
@@ -276,8 +312,8 @@ export function spawn(
     AGENT_ENV_ROOM: room,
     AGENT_ENV_SESSION: sessionId,
   };
-  if (options.allowedPaths && options.allowedPaths.length > 0) {
-    childEnv.AGENT_ENV_ALLOWED_PATHS = options.allowedPaths.join(":");
+  if (allowedPaths && allowedPaths.length > 0) {
+    childEnv.AGENT_ENV_ALLOWED_PATHS = allowedPaths.join(":");
   }
 
   let proc: Bun.Subprocess;
@@ -286,7 +322,7 @@ export function spawn(
       env: childEnv,
       stdout: "pipe",
       stderr: "pipe",
-      ...(options.cwd ? { cwd: options.cwd } : {}),
+      ...(cwd ? { cwd } : {}),
     });
   } catch (err) {
     // Don't leak a started session if the binary can't be launched.
@@ -306,7 +342,7 @@ export function spawn(
     room,
     sessionId,
     budget,
-    allowedPaths: options.allowedPaths ?? [],
+    allowedPaths: allowedPaths ?? [],
     tracker,
     command,
     ...(options.timeout != null ? { timeout: options.timeout } : {}),

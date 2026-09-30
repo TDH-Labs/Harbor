@@ -34,6 +34,7 @@
     "./scheduler": "./src/scheduler.ts",
     "./compaction": "./src/compaction.ts",
     "./isolation": "./src/isolation.ts",
+    "./sandbox": "./src/sandbox.ts",
     "./session": "./src/session.ts",
     "./config": "./src/config.ts",
     "./env": "./src/env.ts",

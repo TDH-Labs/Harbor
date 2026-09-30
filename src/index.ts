@@ -49,6 +49,8 @@ export {
   checkDataAccess,
   checkFileAccess,
   createSession,
+  enforceDataAccess,
+  enforceFileAccess,
   requireCapability,
 } from "./isolation.ts";
 export type {
@@ -58,6 +60,19 @@ export type {
   CreateSessionOptions,
   Decision,
 } from "./isolation.ts";
+
+// ── Room path sandbox (symlink-safe containment) ─────────────────────────────
+export {
+  ROOM_JAIL_PREFIX,
+  RoomJailViolation,
+  RoomPathSandbox,
+  createRoomSandbox,
+  isRealPathWithin,
+  isValidRoomName,
+  realpathLoose,
+  roomRoots,
+} from "./sandbox.ts";
+export type { RoomPathSandboxInit, RoomRootKind, SandboxCheck } from "./sandbox.ts";
 
 // ── Session tracking ─────────────────────────────────────────────────────────
 export { SessionTracker, listSessions, activeSession } from "./session.ts";

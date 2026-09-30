@@ -27,12 +27,12 @@ import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname } from "node:path";
 
 import { DEFAULT_CAPABILITIES } from "./config.ts";
 import { openDb } from "./db.ts";
 import type { Environment } from "./env.ts";
-import { isPathWithin } from "./path-safety.ts";
+import { RoomJailViolation, createRoomSandbox, realpathLoose, type RoomRootKind } from "./sandbox.ts";
 
 // ── Capabilities ─────────────────────────────────────────────────────────────
 
@@ -225,6 +225,24 @@ export function checkMcpAccess(
   return session.roomMcpAllowed(env, mcpServer);
 }
 
+/**
+ * Does `path` resolve — symlinks followed, `..` applied to the resolved path —
+ * inside the room's roots under `base`? An unsafe room name (empty, `..`,
+ * separators) or any resolution failure is a denial.
+ *
+ * An unrooted session must be denied, not granted the shared parent: with no
+ * room segment, `join(base, "data", "")` collapses to `${base}/data` and every
+ * room's data would count as "within". {@link createRoomSandbox} rejects the
+ * empty and traversal-shaped names outright.
+ */
+function roomContains(base: string, room: string, kind: RoomRootKind, path: string): boolean {
+  try {
+    return createRoomSandbox(base, room, kind).contains(path, base);
+  } catch {
+    return false;
+  }
+}
+
 /** Data access: capability + the DB must resolve under `data/<room>/` (or ADMIN). */
 export function checkDataAccess(
   session: AgentSession,
@@ -232,18 +250,17 @@ export function checkDataAccess(
   env?: Environment,
 ): boolean {
   if (!session.has(Capability.DATA_READ)) return false;
+  // ADMIN is the only intended bypass, and it sits BEFORE the room guard so a
+  // room-less bootstrap session keeps its explicit escalation.
   if (session.has(Capability.ADMIN)) return true;
-  // An unrooted session must be denied, not granted the shared parent: with no
-  // guard, join(base, "data", "") collapses to `${base}/data`, and isPathWithin
-  // then treats EVERY room's data as "within" that root — a room="" session
-  // reads/writes every room's data. ADMIN (above) is the only intended bypass.
-  if (!session.room) return false;
   const base = env ? env.root : homedir();
-  const roomRoot = join(base, "data", session.room);
-  return isPathWithin(resolve(base, dbPath), roomRoot);
+  return roomContains(base, session.room, "data", dbPath);
 }
 
-/** File access: capability + the path must resolve under `workspace/<room>/` (or ADMIN). */
+/**
+ * File access: capability + the path must resolve under `rooms/<room>/` or
+ * `workspace/<room>/` (or ADMIN). Symlink-safe: see sandbox.ts.
+ */
 export function checkFileAccess(
   session: AgentSession,
   filePath: string,
@@ -253,14 +270,66 @@ export function checkFileAccess(
   const cap = mode === "write" ? Capability.FILE_WRITE : Capability.FILE_READ;
   if (!session.has(cap)) return false;
   if (session.has(Capability.ADMIN)) return true;
-  // Same collapse as checkDataAccess above: join(base, "workspace", "") is
-  // `${base}/workspace`, which contains every room — deny an unrooted session
-  // outright instead of letting it fall through to a room-root that isn't
-  // actually scoped to any room.
-  if (!session.room) return false;
   const base = env ? env.root : homedir();
-  const roomRoot = join(base, "workspace", session.room);
-  return isPathWithin(resolve(base, filePath), roomRoot);
+  return roomContains(base, session.room, "files", filePath);
+}
+
+/** Cap audited paths so a hostile caller cannot bloat the audit table. */
+function auditableResource(path: string): string {
+  return path.length > 512 ? `${path.slice(0, 509)}...` : path;
+}
+
+function enforceRoomPath(
+  session: AgentSession,
+  path: string,
+  cap: Capability,
+  kind: RoomRootKind,
+  env: Environment | undefined,
+): string {
+  // Capability first: throws AccessDenied (and audits it) when not held.
+  session.check(cap, auditableResource(path), env);
+  const base = env ? env.root : homedir();
+  if (session.has(Capability.ADMIN)) return realpathLoose(path, base);
+  try {
+    return createRoomSandbox(base, session.room, kind).resolve(path, base);
+  } catch (err) {
+    if (err instanceof RoomJailViolation && env) {
+      auditLog(env, session, {
+        event: "room_jail_violation",
+        capability: cap,
+        resource: auditableResource(path),
+        decision: "denied",
+        reason: err.reason,
+      });
+    }
+    throw err;
+  }
+}
+
+/**
+ * Throwing, auditing form of {@link checkFileAccess} for a tool gateway: returns
+ * the REAL path to open, or throws {@link AccessDenied} (missing capability) /
+ * {@link RoomJailViolation} (path leaves the room; audited as
+ * `room_jail_violation`). Open the returned path, not the caller's string.
+ */
+export function enforceFileAccess(
+  session: AgentSession,
+  filePath: string,
+  mode: "read" | "write" = "read",
+  env?: Environment,
+): string {
+  return enforceRoomPath(
+    session,
+    filePath,
+    mode === "write" ? Capability.FILE_WRITE : Capability.FILE_READ,
+    "files",
+    env,
+  );
+}
+
+/** Throwing, auditing form of {@link checkDataAccess}; see {@link enforceFileAccess}. */
+export function enforceDataAccess(session: AgentSession, dbPath: string, env?: Environment): string {
+  return enforceRoomPath(session, dbPath, Capability.DATA_READ, "data", env);
 }
 
 // ── Audit logging ────────────────────────────────────────────────────────────

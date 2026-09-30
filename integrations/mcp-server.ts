@@ -57,6 +57,7 @@ import {
   createSession,
   normalizeRoomEnv,
   AgentSession,
+  RoomJailViolation,
 } from "harbor-tugboat";
 import pkg from "../package.json" with { type: "json" };
 
@@ -387,6 +388,8 @@ async function safeDispatch(
     return await dispatch(name, args);
   } catch (err) {
     if (err instanceof AccessDeniedError) return errorResult(`access denied: ${err.message}`);
+    // Already prefixed "HARBOR ROOM JAIL VIOLATION" — do not double-wrap it.
+    if (err instanceof RoomJailViolation) return errorResult(err.message);
     if (err instanceof BudgetExceededError) return errorResult(`budget exceeded: ${err.message}`);
     return errorResult(`tool error: ${messageOf(err)}`);
   }
