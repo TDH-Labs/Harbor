@@ -25,6 +25,11 @@ import { resolve, sep } from "node:path";
  * still resolves as "within" here, since lexical resolution never touches
  * the filesystem — this is cooperative, tool-level enforcement, not OS-level
  * isolation.
+ *
+ * Use this ONLY where lexical is what you want (the skill pool, whose
+ * entries are deliberately symlinks into other trees). For ROOM boundaries —
+ * files and data an agent could reach through a symlink — use `sandbox.ts`
+ * (`RoomPathSandbox` / `isRealPathWithin`), which follows symlinks.
  */
 export function isPathWithin(candidate: string, root: string): boolean {
   const resolvedRoot = resolve(root);

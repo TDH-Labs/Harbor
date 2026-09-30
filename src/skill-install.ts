@@ -14,7 +14,7 @@
  * Downstream contract: `install(env, name, source, options)` returns the
  * installed path and the room it was routed to.
  */
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -64,6 +64,22 @@ function routeRoom(env: Environment, name: string, description: string, explicit
   return env.config.skillDefaultRoom;
 }
 
+/**
+ * Refuse a source directory that contains a symlink. `cpSync` copies a link as a
+ * link, so a skill directory with `SKILL.md -> /some/other/file` would land in the
+ * pool and be served as skill text. (`source` itself may be a link; what it holds
+ * may not.)
+ */
+function assertNoSymlinks(dir: string, rel = ""): void {
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    const child = join(dir, e.name);
+    if (e.isSymbolicLink() || lstatSync(child).isSymbolicLink()) {
+      throw new SkillInstallError(`source contains a symlink (${rel ? `${rel}/` : ""}${e.name}); replace it with a real file or install without it`);
+    }
+    if (e.isDirectory()) assertNoSymlinks(child, rel ? `${rel}/${e.name}` : e.name);
+  }
+}
+
 /** Read a skill directory's SKILL.md description (best-effort, for routing). */
 function readDescription(skillMdPath: string): string {
   try {
@@ -111,6 +127,7 @@ export function install(
 
   // Determine the description for routing (without copying anything yet).
   const sourceIsDir = statSync(source).isDirectory();
+  if (sourceIsDir) assertNoSymlinks(source);
   const sourceSkillMd = sourceIsDir ? join(source, "SKILL.md") : source;
   const description = readDescription(sourceSkillMd);
   const room = routeRoom(env, name, description, options.room);

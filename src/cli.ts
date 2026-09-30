@@ -16,6 +16,7 @@
  */
 import { type ArgsDef, type CommandDef, defineCommand, runMain } from "citty";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, writeSync } from "node:fs";
+import { homedir } from "node:os";
 import { basename, join } from "node:path";
 
 import pkg from "../package.json" with { type: "json" };
@@ -32,7 +33,16 @@ import { Scheduler, TaskState } from "./scheduler.ts";
 import { SessionTracker, activeSession, listSessions } from "./session.ts";
 import { runGenerate, fullSync, writeIfChanged } from "./sync.ts";
 import { runBench, formatSummary, latestReport } from "./bench.ts";
-import { startDashboard, DEFAULT_PORT } from "./dashboard.ts";
+import { startDashboard, DEFAULT_PORT, isLoopbackHost } from "./dashboard.ts";
+import { closeAllDbs } from "./db.ts";
+import { DEFAULT_EXCLUDE, DEFAULT_MAX_BYTES, guardPassed, scanTree } from "./guard.ts";
+import { ConfigEditError } from "./config-edit.ts";
+import { labelReport, setRoomLabel, setSkillLabel } from "./labels.ts";
+import { visiblePath } from "./printable.ts";
+import { ProposalError, approveProposal, listProposals, showProposal } from "./proposals.ts";
+import type { Sensitivity } from "./sensitivity.ts";
+import { ControlPlane, TenantError, tokenHandle } from "./tenants.ts";
+import { SERVICE_TARGETS, SERVICE_UNITS, ServiceError, renderService, splitCommand, type ServiceTarget, type ServiceUnit } from "./service.ts";
 import { runForeground, startDaemon, stopDaemon, watcherStatus, PidFile } from "./watch.ts";
 import { spawn } from "./spawn.ts";
 import { checkBudget, spendBudget, BudgetExceededError } from "./budget.ts";
@@ -50,7 +60,7 @@ import {
   validateRoom,
 } from "./mcp.ts";
 import { scaffold } from "./skill-create.ts";
-import { install } from "./skill-install.ts";
+import { SkillInstallError, install } from "./skill-install.ts";
 import { assignOrphans, assignOrphansAndReload, getOrphanSkills } from "./skill-assign.ts";
 import { addSkillToAnotherRoom, listConfiguredRooms, roomsForSkill } from "./skill-room-add.ts";
 import { update as updateSkill, removeSkill } from "./skill-update.ts";
@@ -191,13 +201,38 @@ const stopCmd = defineCommand({
 });
 
 const dashboardCmd = defineCommand({
-  meta: { name: "dashboard", description: "Serve the health dashboard" },
-  args: { ...commonArgs, port: { type: "string", description: `Port (default ${DEFAULT_PORT})` } },
+  meta: { name: "dashboard", description: "Serve the health dashboard (loopback by default)" },
+  args: {
+    ...commonArgs,
+    port: { type: "string", description: `Port (default ${DEFAULT_PORT})` },
+    host: {
+      type: "string",
+      description:
+        "Bind address (default 127.0.0.1). A non-loopback host is refused unless HARBOR_DASHBOARD_TOKEN is set.",
+    },
+  },
   async run({ args }) {
     const env = envFromArgs(args);
     const port = args.port ? Number.parseInt(args.port, 10) : DEFAULT_PORT;
-    const server = startDashboard(env, { port });
-    console.log(`dashboard: http://127.0.0.1:${server.port}`);
+    // The token comes from the environment, never argv: an argv secret sits in
+    // the process table for every local user to read (same rule as `harbor secrets`).
+    const token = process.env.HARBOR_DASHBOARD_TOKEN || undefined;
+    let server: ReturnType<typeof startDashboard>;
+    try {
+      server = startDashboard(env, {
+        port,
+        ...(args.host ? { host: args.host } : {}),
+        ...(token ? { token } : {}),
+      });
+    } catch (err) {
+      console.error(`dashboard: ${err instanceof Error ? err.message : String(err)}`);
+      process.exitCode = 1;
+      return;
+    }
+    console.log(`dashboard: http://${server.host.includes(":") ? `[${server.host}]` : server.host}:${server.port}`);
+    if (token) {
+      console.log("dashboard: token required — send `Authorization: Bearer <token>`, or open /?token=<token> once in a browser");
+    }
     await awaitInterrupt();
     server.stop();
   },
@@ -809,6 +844,11 @@ const spawnCmd = defineCommand({
     budget: { type: "string", description: "Token budget" },
     timeout: { type: "string", description: "Timeout (ms)" },
     "allow-path": { type: "string", description: "Allowed paths (':'-separated logical sandbox)" },
+    confine: {
+      type: "boolean",
+      description: "Pin the child's cwd (and --allow-path entries) inside the room; symlink-safe",
+    },
+    cwd: { type: "string", description: "Working directory (must be inside the room with --confine)" },
   },
   async run({ args }) {
     const env = envFromArgs(args);
@@ -824,6 +864,8 @@ const spawnCmd = defineCommand({
       ...(args.budget ? { budget: Number.parseInt(args.budget, 10) } : {}),
       ...(args.timeout ? { timeout: Number.parseInt(args.timeout, 10) } : {}),
       ...(args["allow-path"] ? { allowedPaths: args["allow-path"].split(":").filter(Boolean) } : {}),
+      ...(args.confine ? { confineToRoom: true } : {}),
+      ...(args.cwd ? { cwd: args.cwd } : {}),
     });
     const code = await child.exited;
     if (child.stdout) {
@@ -2158,6 +2200,813 @@ const approvalCmd = defineCommand({
   },
 });
 
+// ── Harbor Server: serve / tenant / token / service ───────────────────────────
+
+const DEFAULT_SERVER_DATA_DIR = join(homedir(), ".harbor-server");
+
+const serverArgs = {
+  "data-dir": {
+    type: "string",
+    description: `Server data directory (env HARBOR_DATA_DIR; default ${DEFAULT_SERVER_DATA_DIR})`,
+  },
+} satisfies ArgsDef;
+
+function serverDataDir(args: { "data-dir"?: string }): string {
+  return args["data-dir"] || process.env.HARBOR_DATA_DIR || DEFAULT_SERVER_DATA_DIR;
+}
+
+/** Parse an integer option; on a bad value print `<cmd>: ...` and return undefined. */
+function intOption(cmd: string, name: string, raw: string, min: number, max: number): number | undefined {
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < min || n > max) {
+    console.error(`${cmd}: ${name} must be an integer between ${min} and ${max} (got '${raw}')`);
+    process.exitCode = 1;
+    return undefined;
+  }
+  return n;
+}
+
+/** Run `fn`, turning a TenantError into a one-line message and a non-zero exit. */
+/**
+ * A server session in a room with no configured skill list can read nothing (only
+ * Core treats that as "unrestricted"), so a token or grant for such a room is
+ * useless until skills are assigned. Say so rather than let it look broken.
+ */
+function warnIfRoomEmpty(cp: ControlPlane, tenantId: string, room: string): void {
+  if (!room) return;
+  try {
+    const r = cp.tenantEnvironment(tenantId).config.roomSkills[room];
+    if (r && (r.skills ?? []).length > 0) return;
+    console.error(
+      `note: room '${room}' has no skills configured for tenant '${tenantId}', so this can read nothing yet. ` +
+        `Install one with: harbor skill-install <dir> --room ${room} --config ${cp.tenantConfigPath(tenantId)}`,
+    );
+  } catch {
+    // the tenant environment is reported by the command itself
+  }
+}
+
+function tenantAction<T>(cmd: string, fn: () => T): T | undefined {
+  try {
+    return fn();
+  } catch (err) {
+    if (err instanceof TenantError) {
+      console.error(`${cmd}: ${err.message}`);
+      process.exitCode = 1;
+      return undefined;
+    }
+    throw err;
+  }
+}
+
+const serveCmd = defineCommand({
+  meta: {
+    name: "serve",
+    description: "Run Harbor Server: authenticated HTTP MCP (POST /mcp) for many tenants",
+  },
+  args: {
+    ...serverArgs,
+    host: { type: "string", description: "Bind address (env HARBOR_HOST; default 127.0.0.1)" },
+    port: { type: "string", description: "Port (env HARBOR_PORT; default 8787)" },
+    "allowed-origins": {
+      type: "string",
+      description: "Comma-separated browser Origins allowed to call /mcp (env HARBOR_ALLOWED_ORIGINS; default none)",
+    },
+    "rate-limit": {
+      type: "string",
+      description: "Requests per minute per token (env HARBOR_RATE_LIMIT; default 120)",
+    },
+  },
+  async run({ args }) {
+    const dataDir = serverDataDir(args);
+    const host = args.host || process.env.HARBOR_HOST || "127.0.0.1";
+    const port = intOption("serve", "--port", args.port || process.env.HARBOR_PORT || "8787", 0, 65535);
+    const rate = intOption("serve", "--rate-limit", args["rate-limit"] || process.env.HARBOR_RATE_LIMIT || "120", 1, 1_000_000);
+    if (port === undefined || rate === undefined) return;
+    const allowedOrigins = parseCommaList(args["allowed-origins"] || process.env.HARBOR_ALLOWED_ORIGINS);
+
+    // Loaded lazily, like mcp-server: it pulls in the whole MCP integration.
+    const { startServer } = await import("./http-server.ts");
+    let server: ReturnType<typeof startServer>;
+    try {
+      server = startServer({ dataDir, host, port, allowedOrigins, rateLimitPerMinute: rate });
+    } catch (err) {
+      console.error(`serve: ${err instanceof Error ? err.message : String(err)}`);
+      process.exitCode = 1;
+      return;
+    }
+    // Human messages go to stderr; stdout carries only the JSON access log.
+    const tenants = server.controlPlane.listTenants().length;
+    console.error(`serve: listening on http://${host.includes(":") ? `[${host}]` : host}:${server.port} (data: ${dataDir}, ${tenants} tenant(s))`);
+    if (tenants === 0) {
+      console.error("serve: no tenants yet — `harbor tenant create <id>` then `harbor token create --tenant <id> --room <room>`");
+    }
+    if (!isLoopbackHost(host)) {
+      console.error("serve: bound beyond loopback — put a TLS-terminating reverse proxy in front (tokens travel in the clear otherwise)");
+    }
+    await awaitInterrupt();
+    console.error("serve: draining in-flight requests…");
+    await server.stop();
+    closeAllDbs();
+  },
+});
+
+const tenantCmd = defineCommand({
+  meta: { name: "tenant", description: "Manage Harbor Server tenants" },
+  subCommands: {
+    create: defineCommand({
+      meta: { name: "create", description: "Create a tenant (its own skill pool, config, audit log and budgets)" },
+      args: {
+        ...serverArgs,
+        id: { type: "positional", required: true, description: "Tenant id (3-40 chars: a-z, 0-9, '-')" },
+        note: { type: "string", description: "Free-text note" },
+      },
+      run({ args }) {
+        const cp = new ControlPlane(serverDataDir(args));
+        const t = tenantAction("tenant create", () => cp.createTenant(args.id, args.note ? { note: args.note } : {}));
+        if (!t) return;
+        const cfg = cp.tenantConfigPath(t.id);
+        console.log(`✓ tenant '${t.id}' created`);
+        console.log(`  root:   ${cp.tenantRoot(t.id)}`);
+        console.log(`  config: ${cfg}`);
+        console.log("Next:");
+        console.log(`  harbor tenant add-room ${t.id} --room <room>                     # create a room`);
+        console.log(`  harbor skill-install <skill-dir> --room <room> --config ${cfg}   # add a skill to it`);
+        console.log(`  harbor token create --tenant ${t.id} --room <room>              # mint an access token`);
+      },
+    }),
+    list: defineCommand({
+      meta: { name: "list", description: "List tenants" },
+      args: { ...serverArgs, json: { type: "boolean", description: "Emit JSON" } },
+      run({ args }) {
+        const cp = new ControlPlane(serverDataDir(args));
+        const rows = cp.listTenants().map((t) => ({
+          ...t,
+          root: cp.tenantRoot(t.id),
+          tokens: cp.listTokens(t.id).filter((k) => k.revokedAt === null).length,
+        }));
+        if (args.json) return printJson(rows);
+        if (rows.length === 0) return console.log("(no tenants)");
+        for (const r of rows) {
+          console.log(`  ${r.id.padEnd(24)} ${r.status.padEnd(10)} ${String(r.tokens).padStart(3)} token(s)  ${r.root}`);
+        }
+      },
+    }),
+    "add-room": defineCommand({
+      meta: {
+        name: "add-room",
+        description: "Create a room for a tenant (what skill-install --room and token create --room require)",
+      },
+      args: {
+        ...serverArgs,
+        id: { type: "positional", required: true, description: "Tenant id" },
+        room: { type: "string", description: "Room name (letters, digits, '-', '_')" },
+        description: { type: "string", description: "One-line description for the room's rules file" },
+      },
+      run({ args }) {
+        if (!args.room) {
+          console.error("tenant add-room: --room is required");
+          process.exitCode = 1;
+          return;
+        }
+        const cp = new ControlPlane(serverDataDir(args));
+        const r = tenantAction("tenant add-room", () =>
+          cp.createRoom(args.id, args.room as string, args.description ? { description: args.description } : {}),
+        );
+        if (!r) return;
+        console.log(r.created ? `✓ room '${args.room}' created for tenant '${args.id}'` : `room '${args.room}' already exists for tenant '${args.id}'`);
+        console.log(`  It holds no skills yet: harbor skill-install <skill-dir> --room ${args.room} --config ${cp.tenantConfigPath(args.id)}`);
+      },
+    }),
+    suspend: defineCommand({
+      meta: { name: "suspend", description: "Suspend a tenant: all its tokens stop working immediately" },
+      args: { ...serverArgs, id: { type: "positional", required: true, description: "Tenant id" } },
+      run({ args }) {
+        const t = tenantAction("tenant suspend", () => new ControlPlane(serverDataDir(args)).setTenantStatus(args.id, "suspended"));
+        if (t) console.log(`✓ tenant '${t.id}' suspended`);
+      },
+    }),
+    resume: defineCommand({
+      meta: { name: "resume", description: "Resume a suspended tenant" },
+      args: { ...serverArgs, id: { type: "positional", required: true, description: "Tenant id" } },
+      run({ args }) {
+        const t = tenantAction("tenant resume", () => new ControlPlane(serverDataDir(args)).setTenantStatus(args.id, "active"));
+        if (t) console.log(`✓ tenant '${t.id}' resumed`);
+      },
+    }),
+  },
+});
+
+const tokenCmd = defineCommand({
+  meta: { name: "token", description: "Manage Harbor Server access tokens" },
+  subCommands: {
+    create: defineCommand({
+      meta: {
+        name: "create",
+        description: "Mint a token bound to a tenant and a room. The secret is shown ONCE and cannot be recovered.",
+      },
+      args: {
+        ...serverArgs,
+        tenant: { type: "string", description: "Tenant id" },
+        room: { type: "string", description: "Room the token is fixed to" },
+        label: { type: "string", description: "Free-text label (who/what this token is for)" },
+        "ttl-days": { type: "string", description: "Expire after N days (default: never)" },
+        capabilities: { type: "string", description: "Comma-separated capability ceiling (default: the room's own)" },
+        "allow-admin": { type: "boolean", description: "Permit the 'admin' capability (bypasses room gating!)" },
+        "allow-unconfigured-room": { type: "boolean", description: "Allow a room the tenant has not configured yet" },
+        principal: {
+          type: "string",
+          description: "The person this token is for (audit names them; suspend/revoke and quotas apply per person)",
+        },
+        "daily-token-quota": {
+          type: "string",
+          description: "Max skill-content tokens delivered per UTC day, counted per person across all their tokens and sessions",
+        },
+        "daily-read-quota": { type: "string", description: "Max skill loads (read_skill + activate_skill) per UTC day, same accounting" },
+        "max-sensitivity": {
+          type: "string",
+          description:
+            "Highest sensitivity a skill may carry to be delivered to this token (public | internal | restricted). Above it is hidden and refused; unlabeled skills are refused too. Omit for no ceiling.",
+        },
+        delegate: {
+          type: "boolean",
+          description:
+            "A house-agent token: no room, person, quota or ceiling of its own; each request names the person it acts for (Harbor-On-Behalf-Of) and that person's grant decides the rest. See `principal grant`.",
+        },
+        json: { type: "boolean", description: "Emit JSON" },
+      },
+      run({ args }) {
+        if (!args.tenant || (!args.room && !args.delegate)) {
+          console.error("token create: --tenant and --room are required (a --delegate token takes no --room)");
+          process.exitCode = 1;
+          return;
+        }
+        let ttlSeconds: number | undefined;
+        if (args["ttl-days"]) {
+          const days = Number(args["ttl-days"]);
+          if (!Number.isFinite(days) || days <= 0) {
+            console.error("token create: --ttl-days must be a positive number");
+            process.exitCode = 1;
+            return;
+          }
+          ttlSeconds = Math.round(days * 86400);
+        }
+        const caps = parseCommaList(args.capabilities);
+        let dailyTokenQuota: number | undefined;
+        let dailyReadQuota: number | undefined;
+        if (args["daily-token-quota"]) {
+          dailyTokenQuota = intOption("token create", "--daily-token-quota", args["daily-token-quota"], 1, Number.MAX_SAFE_INTEGER);
+          if (dailyTokenQuota === undefined) return;
+        }
+        if (args["daily-read-quota"]) {
+          dailyReadQuota = intOption("token create", "--daily-read-quota", args["daily-read-quota"], 1, Number.MAX_SAFE_INTEGER);
+          if (dailyReadQuota === undefined) return;
+        }
+        const cp = new ControlPlane(serverDataDir(args));
+        const made = tenantAction("token create", () =>
+          cp.createToken({
+            tenantId: args.tenant as string,
+            ...(args.room ? { room: args.room } : {}),
+            ...(args.delegate ? { delegate: true } : {}),
+            ...(args.principal ? { principal: args.principal } : {}),
+            ...(dailyTokenQuota !== undefined ? { dailyTokenQuota } : {}),
+            ...(dailyReadQuota !== undefined ? { dailyReadQuota } : {}),
+            ...(args["max-sensitivity"] ? { maxSensitivity: args["max-sensitivity"] as Sensitivity } : {}),
+            ...(args.label ? { label: args.label } : {}),
+            ...(ttlSeconds !== undefined ? { ttlSeconds } : {}),
+            ...(caps.length > 0 ? { capabilities: caps } : {}),
+            ...(args["allow-admin"] ? { allowAdmin: true } : {}),
+            ...(args["allow-unconfigured-room"] ? { allowUnconfiguredRoom: true } : {}),
+          }),
+        );
+        if (!made) return;
+        warnIfRoomEmpty(cp, made.record.tenantId, made.record.room);
+        if (args.json) return printJson({ token: made.token, ...made.record });
+        console.log(made.token);
+        console.error(
+          `token ${made.record.id} for tenant '${made.record.tenantId}', ` +
+            (made.record.delegate
+              ? `DELEGATE (acts only for a person named in Harbor-On-Behalf-Of, with their grant)`
+              : `room '${made.record.room}'` +
+                `${made.record.principal ? `, person '${made.record.principal}'` : ""}` +
+                `, ceiling ${made.record.maxSensitivity ?? "none (every skill its room grants)"}`) +
+            `${made.record.expiresAt ? `, expires ${new Date(made.record.expiresAt * 1000).toISOString()}` : ""}.`,
+        );
+        console.error("This is the only time the secret is shown. Store it now; revoke with `harbor token revoke " + made.record.id + "`.");
+      },
+    }),
+    list: defineCommand({
+      meta: { name: "list", description: "List tokens (never shows secrets)" },
+      args: { ...serverArgs, tenant: { type: "string", description: "Only this tenant" }, json: { type: "boolean", description: "Emit JSON" } },
+      run({ args }) {
+        const rows = new ControlPlane(serverDataDir(args)).listTokens(args.tenant || undefined);
+        if (args.json) return printJson(rows);
+        if (rows.length === 0) return console.log("(no tokens)");
+        const now = Date.now() / 1000;
+        for (const r of rows) {
+          const state = r.revokedAt !== null ? "revoked" : r.expiresAt !== null && r.expiresAt <= now ? "expired" : "active";
+          const quota =
+            r.dailyTokenQuota !== null || r.dailyReadQuota !== null
+              ? ` [quota/day: ${r.dailyTokenQuota ?? "∞"} tok, ${r.dailyReadQuota ?? "∞"} loads]`
+              : "";
+          const ceiling = r.delegate ? " [delegate]" : r.maxSensitivity ? ` [ceiling: ${r.maxSensitivity}]` : "";
+          console.log(
+            `  ${tokenHandle(r.id).padEnd(20)} ${r.tenantId.padEnd(20)} ${(r.room || "-").padEnd(16)} ${state.padEnd(8)} ` +
+              `${(r.principal || "-").padEnd(24)} ${r.label}${quota}${ceiling}`,
+          );
+        }
+      },
+    }),
+    revoke: defineCommand({
+      meta: { name: "revoke", description: "Revoke a token by id (takes effect on its next request)" },
+      args: { ...serverArgs, id: { type: "positional", required: true, description: "Token id (the 12 hex chars after hbr_)" } },
+      run({ args }) {
+        const t = tenantAction("token revoke", () => new ControlPlane(serverDataDir(args)).revokeToken(args.id));
+        if (t) console.log(`✓ token ${t.id} revoked`);
+      },
+    }),
+  },
+});
+
+const principalCmd = defineCommand({
+  meta: {
+    name: "principal",
+    description: "Manage the people tokens are issued to (suspend, resume, offboard, see today's usage)",
+  },
+  subCommands: {
+    list: defineCommand({
+      meta: { name: "list", description: "List people, their status, live tokens and today's delivery" },
+      args: {
+        ...serverArgs,
+        tenant: { type: "string", description: "Only this tenant" },
+        json: { type: "boolean", description: "Emit JSON" },
+      },
+      run({ args }) {
+        const rows = new ControlPlane(serverDataDir(args)).listPrincipals(args.tenant || undefined);
+        if (args.json) return printJson(rows);
+        if (rows.length === 0) return console.log("(no people yet — issue a token with --principal)");
+        for (const r of rows) {
+          console.log(
+            `  ${r.tenantId.padEnd(20)} ${r.id.padEnd(32)} ${r.status.padEnd(10)} ${String(r.activeTokens).padStart(2)} token(s)  ` +
+              `today: ${r.usedTokensToday} tok, ${r.usedReadsToday} loads`,
+          );
+        }
+      },
+    }),
+    suspend: defineCommand({
+      meta: { name: "suspend", description: "Suspend a person: every token issued to them stops working on its next request" },
+      args: {
+        ...serverArgs,
+        id: { type: "positional", required: true, description: "Person (the --principal used at token creation)" },
+        tenant: { type: "string", description: "Tenant id" },
+      },
+      run({ args }) {
+        if (!args.tenant) return void (console.error("principal suspend: --tenant is required"), (process.exitCode = 1));
+        const p = tenantAction("principal suspend", () =>
+          new ControlPlane(serverDataDir(args)).setPrincipalStatus(args.tenant as string, args.id, "suspended"),
+        );
+        if (p) console.log(`✓ '${p.id}' suspended in tenant '${p.tenantId}' (${p.activeTokens} token(s) now refused)`);
+      },
+    }),
+    resume: defineCommand({
+      meta: { name: "resume", description: "Resume a suspended person" },
+      args: {
+        ...serverArgs,
+        id: { type: "positional", required: true, description: "Person" },
+        tenant: { type: "string", description: "Tenant id" },
+      },
+      run({ args }) {
+        if (!args.tenant) return void (console.error("principal resume: --tenant is required"), (process.exitCode = 1));
+        const p = tenantAction("principal resume", () =>
+          new ControlPlane(serverDataDir(args)).setPrincipalStatus(args.tenant as string, args.id, "active"),
+        );
+        if (p) console.log(`✓ '${p.id}' resumed in tenant '${p.tenantId}'`);
+      },
+    }),
+    grant: defineCommand({
+      meta: {
+        name: "grant",
+        description:
+          "Set what a delegate (house-agent) token may do FOR this person: their room, the highest sensitivity they may be handed, and daily quotas. Replaces any earlier grant.",
+      },
+      args: {
+        ...serverArgs,
+        id: { type: "positional", required: true, description: "Person" },
+        tenant: { type: "string", description: "Tenant id" },
+        room: { type: "string", description: "The room the house agent works in for them" },
+        clearance: { type: "string", description: "public | internal | restricted (required: there is no implicit 'everything')" },
+        "daily-token-quota": { type: "string", description: "Max skill-content tokens delivered per UTC day (shared with their own tokens)" },
+        "daily-read-quota": { type: "string", description: "Max skill loads per UTC day (shared with their own tokens)" },
+      },
+      run({ args }) {
+        if (!args.tenant || !args.room || !args.clearance) {
+          console.error("principal grant: --tenant, --room and --clearance are required");
+          process.exitCode = 1;
+          return;
+        }
+        let dailyTokenQuota: number | undefined;
+        let dailyReadQuota: number | undefined;
+        if (args["daily-token-quota"]) {
+          dailyTokenQuota = intOption("principal grant", "--daily-token-quota", args["daily-token-quota"], 1, Number.MAX_SAFE_INTEGER);
+          if (dailyTokenQuota === undefined) return;
+        }
+        if (args["daily-read-quota"]) {
+          dailyReadQuota = intOption("principal grant", "--daily-read-quota", args["daily-read-quota"], 1, Number.MAX_SAFE_INTEGER);
+          if (dailyReadQuota === undefined) return;
+        }
+        const g = tenantAction("principal grant", () =>
+          new ControlPlane(serverDataDir(args)).setGrant(args.tenant as string, args.id, {
+            room: args.room as string,
+            clearance: args.clearance as Sensitivity,
+            ...(dailyTokenQuota !== undefined ? { dailyTokenQuota } : {}),
+            ...(dailyReadQuota !== undefined ? { dailyReadQuota } : {}),
+          }),
+        );
+        if (g) {
+          warnIfRoomEmpty(new ControlPlane(serverDataDir(args)), g.tenantId, g.room);
+          console.log(`✓ a delegate token may act for '${g.principal}' in tenant '${g.tenantId}': room '${g.room}', up to ${g.clearance}`);
+          console.log("  Takes effect on the person's next request. A session open under a different room or clearance is ended and must re-initialize.");
+        }
+      },
+    }),
+    ungrant: defineCommand({
+      meta: { name: "ungrant", description: "Remove a person's grant: a delegate token can no longer act for them" },
+      args: {
+        ...serverArgs,
+        id: { type: "positional", required: true, description: "Person" },
+        tenant: { type: "string", description: "Tenant id" },
+      },
+      run({ args }) {
+        if (!args.tenant) return void (console.error("principal ungrant: --tenant is required"), (process.exitCode = 1));
+        const removed = tenantAction("principal ungrant", () =>
+          new ControlPlane(serverDataDir(args)).removeGrant(args.tenant as string, args.id),
+        );
+        if (removed !== undefined) console.log(removed ? `✓ grant for '${args.id}' removed` : `'${args.id}' had no grant`);
+      },
+    }),
+    grants: defineCommand({
+      meta: { name: "grants", description: "List what delegate tokens may do for whom" },
+      args: {
+        ...serverArgs,
+        tenant: { type: "string", description: "Only this tenant" },
+        json: { type: "boolean", description: "Emit JSON" },
+      },
+      run({ args }) {
+        const rows = new ControlPlane(serverDataDir(args)).listGrants(args.tenant || undefined);
+        if (args.json) return printJson(rows);
+        if (rows.length === 0) return console.log("(no grants — a delegate token can act for nobody)");
+        for (const g of rows) {
+          const quota =
+            g.dailyTokenQuota !== null || g.dailyReadQuota !== null
+              ? `  [quota/day: ${g.dailyTokenQuota ?? "∞"} tok, ${g.dailyReadQuota ?? "∞"} loads]`
+              : "";
+          console.log(`  ${g.tenantId.padEnd(20)} ${g.principal.padEnd(32)} ${g.room.padEnd(16)} up to ${g.clearance}${quota}`);
+        }
+      },
+    }),
+    revoke: defineCommand({
+      meta: {
+        name: "revoke",
+        description: "Offboard: permanently revoke every token issued to a person and remove their grant (use suspend for a reversible stop)",
+      },
+      args: {
+        ...serverArgs,
+        id: { type: "positional", required: true, description: "Person" },
+        tenant: { type: "string", description: "Tenant id" },
+      },
+      run({ args }) {
+        if (!args.tenant) return void (console.error("principal revoke: --tenant is required"), (process.exitCode = 1));
+        const n = tenantAction("principal revoke", () =>
+          new ControlPlane(serverDataDir(args)).revokePrincipalTokens(args.tenant as string, args.id),
+        );
+        if (n !== undefined) console.log(`✓ revoked ${n} token(s) issued to '${args.id}' in tenant '${args.tenant}'`);
+      },
+    }),
+  },
+});
+
+const labelCmd = defineCommand({
+  meta: {
+    name: "label",
+    description:
+      "Sensitivity labels: what a token with --max-sensitivity may be handed. A room has a default; a skill can override it.",
+  },
+  subCommands: {
+    list: defineCommand({
+      meta: { name: "list", description: "Show every skill's label, where it comes from, and what would be refused to a capped token" },
+      args: { ...commonArgs, json: { type: "boolean", description: "Emit JSON" } },
+      run({ args }) {
+        const report = labelReport(envFromArgs(args));
+        if (args.json) return printJson(report);
+        if (report.rows.length === 0) return console.log("(no rooms with skills)");
+        for (const r of report.rows) {
+          const label = r.label ?? "UNLABELED";
+          const src = r.source === "none" ? "" : ` (${r.source}${r.invalid ? ", INVALID value — treated as restricted" : ""})`;
+          console.log(`  ${r.room.padEnd(20)} ${r.skill.padEnd(32)} ${label}${src}`);
+        }
+        if (report.unlabeled > 0) {
+          console.log(`\n${report.unlabeled} skill listing(s) are unlabeled: a token with a ceiling is refused them.`);
+          console.log("  Label a room:  harbor label set --room <room> --tier <public|internal|restricted>");
+          console.log("  Label a skill: harbor label set --skill <skill> --tier <public|internal|restricted>");
+        }
+        for (const s of report.strayOverrides) console.log(`note: override for '${s}' matches no skill in the pool (typo or removed).`);
+      },
+    }),
+    set: defineCommand({
+      meta: { name: "set", description: "Label a room (its default) or one skill (overrides the room)" },
+      args: {
+        ...commonArgs,
+        room: { type: "string", description: "Label this room's skills by default" },
+        skill: { type: "string", description: "Label this one skill (beats the room default)" },
+        tier: { type: "string", required: true, description: "public | internal | restricted" },
+      },
+      run({ args }) {
+        applyLabel("label set", args, args.tier);
+      },
+    }),
+    clear: defineCommand({
+      meta: { name: "clear", description: "Remove a room's default or a skill's override" },
+      args: {
+        ...commonArgs,
+        room: { type: "string", description: "Clear this room's default label" },
+        skill: { type: "string", description: "Clear this skill's override" },
+      },
+      run({ args }) {
+        applyLabel("label clear", args, null);
+      },
+    }),
+  },
+});
+
+function applyLabel(cmd: string, args: CommonArgs & { room?: string; skill?: string }, tier: string | null): void {
+  if (Boolean(args.room) === Boolean(args.skill)) {
+    console.error(`${cmd}: pass exactly one of --room or --skill`);
+    process.exitCode = 1;
+    return;
+  }
+  try {
+    const env = envFromArgs(args);
+    const r = args.room ? setRoomLabel(env, args.room, tier) : setSkillLabel(env, args.skill as string, tier);
+    const what = args.room ? `room '${args.room}'` : `skill '${args.skill}'`;
+    console.log(
+      r.changed
+        ? `✓ ${what}: ${tier === null ? "label cleared" : `labeled ${tier}`} (${r.path})`
+        : `${what}: already ${tier === null ? "unlabeled" : tier}`,
+    );
+  } catch (err) {
+    if (err instanceof ConfigEditError) {
+      console.error(`${cmd}: ${err.message}`);
+      process.exitCode = 1;
+      return;
+    }
+    throw err;
+  }
+}
+
+const proposalCmd = defineCommand({
+  meta: {
+    name: "proposal",
+    description:
+      "Owner approval for skills that arrive through a shared folder: review a candidate, then install it only if it is exactly what you reviewed. Nothing installs by itself.",
+  },
+  subCommands: {
+    list: defineCommand({
+      meta: { name: "list", description: "List candidate skills in a folder, their digests, and what would stop each being approved" },
+      args: { inbox: { type: "string", required: true, description: "The folder holding candidate skill directories" }, json: { type: "boolean", description: "Emit JSON" } },
+      run({ args }) {
+        try {
+          const rows = listProposals(args.inbox);
+          if (args.json) return printJson(rows.map(({ dir: _dir, ...p }) => p));
+          if (rows.length === 0) return console.log("(no candidate skills)");
+          for (const p of rows) {
+            console.log(`  ${p.name.padEnd(32)} ${p.problems.length === 0 ? "reviewable" : "NOT APPROVABLE"}  ${p.files.length} file(s), ${p.totalBytes} bytes`);
+            console.log(`    digest ${p.digest}`);
+            for (const why of p.problems) console.log(`    ! ${why}`);
+          }
+          console.log("\nRead a candidate with `harbor proposal show <name> --inbox <dir>` before approving it.");
+        } catch (err) {
+          proposalFailure("proposal list", err);
+        }
+      },
+    }),
+    show: defineCommand({
+      meta: { name: "show", description: "Print a candidate in full — every file — with its digest, for review" },
+      args: {
+        name: { type: "positional", required: true, description: "Candidate directory name" },
+        inbox: { type: "string", required: true, description: "The folder holding candidate skill directories" },
+      },
+      run({ args }) {
+        try {
+          const { proposal, contents } = showProposal(args.inbox, args.name);
+          console.log(`# ${proposal.name}  —  ${proposal.files.length} file(s), ${proposal.totalBytes} bytes`);
+          console.log(`# digest ${proposal.digest}`);
+          for (const why of proposal.problems) console.log(`# NOT APPROVABLE: ${why}`);
+          for (const [path, text] of contents) console.log(`\n===== ${path} =====\n${text}`);
+          console.log(`\n# To install exactly this (pass the TENANT's --config, or it installs into your own Harbor home):\n#   harbor proposal approve ${proposal.name} --inbox ${args.inbox} --room <room> --digest ${proposal.digest} --config <config.toml>`);
+        } catch (err) {
+          proposalFailure("proposal show", err);
+        }
+      },
+    }),
+    approve: defineCommand({
+      meta: {
+        name: "approve",
+        description: "Install one candidate into a room, only if its content matches --digest (what you reviewed). Refuses symlinks, binaries, credentials.",
+      },
+      args: {
+        ...commonArgs,
+        name: { type: "positional", required: true, description: "Candidate directory name" },
+        inbox: { type: "string", required: true, description: "The folder holding candidate skill directories" },
+        room: { type: "string", required: true, description: "Room to install it into" },
+        digest: { type: "string", required: true, description: "The digest printed by `proposal show`" },
+        "approved-by": { type: "string", description: "Recorded in the audit trail (default: operator)" },
+      },
+      run({ args }) {
+        try {
+          const r = approveProposal(envFromArgs(args), args.inbox, args.name, {
+            room: args.room,
+            digest: args.digest,
+            ...(args["approved-by"] ? { approvedBy: args["approved-by"] } : {}),
+          });
+          console.log(`✓ '${r.name}' installed into room '${r.room}' (${r.installedPath})`);
+        } catch (err) {
+          proposalFailure("proposal approve", err);
+        }
+      },
+    }),
+  },
+});
+
+function proposalFailure(cmd: string, err: unknown): void {
+  if (err instanceof ProposalError || err instanceof SkillInstallError || err instanceof ConfigEditError) {
+    console.error(`${cmd}: ${err.message}`);
+    process.exitCode = 1;
+    return;
+  }
+  throw err;
+}
+
+const guardCmd = defineCommand({
+  meta: {
+    name: "guard",
+    description:
+      "Scan a folder for credentials and never-sync files before it is shared. Prints paths and rule names, NEVER the secret.",
+  },
+  args: {
+    dir: { type: "positional", required: true, description: "Folder to scan" },
+    json: { type: "boolean", description: "Emit JSON" },
+    strict: { type: "boolean", description: "Also fail when something could not be inspected (too large, binary, unreadable)" },
+    allow: { type: "string", description: "Comma-separated globs (relative paths; * within a segment, ** across) exempt from findings" },
+    exclude: {
+      type: "string",
+      description: `Comma-separated names never entered (default ${DEFAULT_EXCLUDE.join(",")}; pass 'none' to scan everything)`,
+    },
+    "max-bytes": { type: "string", description: `Skip files larger than this (default ${DEFAULT_MAX_BYTES})` },
+    "files-from": {
+      type: "string",
+      description: "Scan only the paths listed in this file (relative to <dir>, one per line; '-' reads stdin). Paths leaving <dir> are refused.",
+    },
+  },
+  run({ args }) {
+    let maxBytes: number | undefined;
+    if (args["max-bytes"]) {
+      maxBytes = intOption("guard", "--max-bytes", args["max-bytes"], 1, Number.MAX_SAFE_INTEGER);
+      if (maxBytes === undefined) {
+        process.exitCode = 2;
+        return;
+      }
+    }
+    let files: string[] | undefined;
+    if (args["files-from"]) {
+      try {
+        files = readFileSync(args["files-from"] === "-" ? 0 : args["files-from"], "utf8").split("\n");
+      } catch (err) {
+        console.error(`guard: cannot read --files-from: ${err instanceof Error ? err.message : String(err)}`);
+        process.exitCode = 2;
+        return;
+      }
+    }
+    const exclude = args.exclude === undefined ? undefined : args.exclude === "none" ? [] : parseCommaList(args.exclude);
+    let report;
+    try {
+      report = scanTree(args.dir, {
+        ...(maxBytes !== undefined ? { maxBytes } : {}),
+        ...(files ? { files } : {}),
+        ...(exclude ? { exclude } : {}),
+        allow: parseCommaList(args.allow),
+      });
+    } catch (err) {
+      console.error(`guard: ${err instanceof Error ? err.message : String(err)}`);
+      process.exitCode = 2;
+      return;
+    }
+    const passed = guardPassed(report, Boolean(args.strict));
+    if (!passed) process.exitCode = 1;
+    if (args.json) return printJson({ ...report, passed });
+
+    // Paths are chosen by whoever can write to the folder: never print one raw (a file
+    // named with a terminal escape would otherwise run on every pre-sync check).
+    console.log(`guard: scanned ${report.scanned} file(s) in ${visiblePath(report.root)}${report.excluded ? ` (${report.excluded} excluded, NOT scanned)` : ""}`);
+    for (const f of report.findings) {
+      console.log(`  BLOCK  ${visiblePath(f.path)}${f.line ? `:${f.line}` : ""}  ${f.kind}  ${f.rule}`);
+    }
+    for (const sk of report.skipped) console.log(`  skip   ${visiblePath(sk.path)}  (${sk.reason})`);
+    for (const x of report.excludedPaths) console.log(`  excl   ${visiblePath(x)}  (not scanned; --exclude none scans it)`);
+    if (report.findings.length > 0) {
+      console.log(`guard: ${report.findings.length} finding(s) — do NOT share this folder as is.`);
+      console.log("guard: if a real credential was pasted, ROTATE IT: everyone with access to the folder could already read it.");
+    } else if (!passed) {
+      console.log(`guard: ${report.skipped.length} item(s) could not be inspected and ${report.excluded} excluded, and --strict is set.`);
+    } else {
+      console.log(report.skipped.length ? `guard: no findings (${report.skipped.length} item(s) not inspected — see above; use --strict to fail on them)` : "guard: no findings.");
+    }
+  },
+});
+
+const serviceCmd = defineCommand({
+  meta: { name: "service", description: "Render launchd / systemd definitions for Harbor's long-running parts" },
+  subCommands: {
+    print: defineCommand({
+      meta: {
+        name: "print",
+        description: "Print (or --write) a service definition. Never installs or starts anything.",
+      },
+      args: {
+        unit: { type: "string", description: `Which part: ${SERVICE_UNITS.join(" | ")}` },
+        target: { type: "string", description: `Supervisor: ${SERVICE_TARGETS.join(" | ")} (default: launchd on macOS, systemd elsewhere)` },
+        "harbor-bin": { type: "string", description: "Absolute path to the harbor executable (serve, watcher)" },
+        "harbor-prefix": { type: "string", description: "Words placed before the subcommand, e.g. a CLI script for bun" },
+        command: { type: "string", description: "Full command line of the System One daemon (required for system-one)" },
+        label: { type: "string", description: "launchd Label / unit-name stem" },
+        env: { type: "string", description: "Comma-separated KEY=VALUE environment for the service" },
+        "working-dir": { type: "string", description: "Working directory (absolute)" },
+        "data-dir": { type: "string", description: "serve: HARBOR_DATA_DIR (absolute)" },
+        host: { type: "string", description: "serve: HARBOR_HOST" },
+        port: { type: "string", description: "serve: HARBOR_PORT" },
+        home: { type: "string", description: "Home directory for install/log paths (default: the current user's)" },
+        write: { type: "boolean", description: "Write the file to the standard per-user location (no activation)" },
+      },
+      run({ args }) {
+        const unit = args.unit as ServiceUnit | undefined;
+        if (!unit || !SERVICE_UNITS.includes(unit)) {
+          console.error(`service print: --unit is required (${SERVICE_UNITS.join(" | ")})`);
+          process.exitCode = 1;
+          return;
+        }
+        const target = (args.target as ServiceTarget | undefined) ?? (process.platform === "darwin" ? "launchd" : "systemd");
+        if (!SERVICE_TARGETS.includes(target)) {
+          console.error(`service print: --target must be ${SERVICE_TARGETS.join(" | ")}`);
+          process.exitCode = 1;
+          return;
+        }
+        let port: number | undefined;
+        if (args.port) {
+          port = intOption("service print", "--port", args.port, 0, 65535);
+          if (port === undefined) return;
+        }
+        try {
+          const r = renderService({
+            unit,
+            target,
+            ...(args["harbor-bin"] ? { harborBin: args["harbor-bin"] } : {}),
+            ...(args["harbor-prefix"] ? { harborPrefixArgs: splitCommand(args["harbor-prefix"]) } : {}),
+            ...(args.command ? { command: splitCommand(args.command) } : {}),
+            ...(args.label ? { label: args.label } : {}),
+            ...(args.env ? { env: parseEnvPairs(args.env) } : {}),
+            ...(args["working-dir"] ? { workingDir: args["working-dir"] } : {}),
+            ...(args["data-dir"] ? { dataDir: args["data-dir"] } : {}),
+            ...(args.host ? { host: args.host } : {}),
+            ...(port !== undefined ? { port } : {}),
+            ...(args.home ? { home: args.home } : {}),
+          });
+          if (args.write) {
+            mkdirSync(join(r.installPath, ".."), { recursive: true });
+            // Refuse to clobber a definition someone may have edited by hand.
+            if (existsSync(r.installPath) && readFileSync(r.installPath, "utf8") !== r.content) {
+              console.error(`service print: ${r.installPath} already exists with different content — not overwriting (remove it first)`);
+              process.exitCode = 1;
+              return;
+            }
+            writeFileSync(r.installPath, r.content);
+            console.log(`wrote ${r.installPath}`);
+          } else {
+            process.stdout.write(r.content);
+          }
+          console.error("\nTo activate (Harbor does not run these for you):");
+          for (const line of r.activate) console.error(`  ${line}`);
+        } catch (err) {
+          if (err instanceof ServiceError) {
+            console.error(`service print: ${err.message}`);
+            process.exitCode = 1;
+            return;
+          }
+          throw err;
+        }
+      },
+    }),
+  },
+});
+
 // ── Root command ──────────────────────────────────────────────────────────────
 
 export const main: CommandDef = defineCommand({
@@ -2205,6 +3054,14 @@ export const main: CommandDef = defineCommand({
     "room-personas": roomPersonasCmd,
     "room-persona": roomPersonaCmd,
     approval: approvalCmd,
+    serve: serveCmd,
+    tenant: tenantCmd,
+    token: tokenCmd,
+    principal: principalCmd,
+    guard: guardCmd,
+    label: labelCmd,
+    proposal: proposalCmd,
+    service: serviceCmd,
   },
 });
 

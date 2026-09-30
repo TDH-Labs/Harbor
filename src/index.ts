@@ -49,6 +49,8 @@ export {
   checkDataAccess,
   checkFileAccess,
   createSession,
+  enforceDataAccess,
+  enforceFileAccess,
   requireCapability,
 } from "./isolation.ts";
 export type {
@@ -58,6 +60,19 @@ export type {
   CreateSessionOptions,
   Decision,
 } from "./isolation.ts";
+
+// ── Room path sandbox (symlink-safe containment) ─────────────────────────────
+export {
+  ROOM_JAIL_PREFIX,
+  RoomJailViolation,
+  RoomPathSandbox,
+  createRoomSandbox,
+  isRealPathWithin,
+  isValidRoomName,
+  realpathLoose,
+  roomRoots,
+} from "./sandbox.ts";
+export type { RoomPathSandboxInit, RoomRootKind, SandboxCheck } from "./sandbox.ts";
 
 // ── Session tracking ─────────────────────────────────────────────────────────
 export { SessionTracker, listSessions, activeSession } from "./session.ts";
@@ -156,7 +171,7 @@ export { checkBudget, spendBudget, BudgetExceededError } from "./budget.ts";
 export type { BudgetResult, BudgetOptions } from "./budget.ts";
 
 export { gate, AccessDeniedError, runWithGateContext, currentGateContext } from "./gate.ts";
-export type { GateContext } from "./gate.ts";
+export type { DeliveryQuota, GateContext } from "./gate.ts";
 
 export {
   audit,
@@ -189,6 +204,10 @@ export {
   renderRoomIndex,
   routeSkillsForTurn,
   searchSkills,
+  sieveLimits,
+  MIN_DETERMINISTIC_SCORE,
+  TURN_SIEVE_DEFAULT_MAX,
+  TURN_SIEVE_ESCALATED_MAX,
 } from "./skills.ts";
 export type {
   SkillRecord,
@@ -198,6 +217,41 @@ export type {
   TurnSieveResult,
   RouteSkillsOptions,
 } from "./skills.ts";
+
+// ── Multi-tenant control plane + service definitions (Harbor Server) ─────────
+// The HTTP server itself (`harbor-tugboat/http-server`) is a subpath export, like
+// the MCP server: it imports this barrel, so it cannot also be re-exported from it.
+export { ControlPlane, PRINCIPAL_RE, TENANT_ID_RE, TOKEN_PREFIX, TenantError, tokenHandle, usageSubject, utcDay } from "./tenants.ts";
+export type {
+  AuthFailure,
+  AuthResult,
+  ChargeResult,
+  CreateTokenOptions,
+  PrincipalRecord,
+  PrincipalStatus,
+  UsageLimits,
+  TenantErrorCode,
+  TenantRecord,
+  TenantStatus,
+  TokenRecord,
+} from "./tenants.ts";
+export { DEFAULT_EXCLUDE, DEFAULT_MAX_BYTES, guardPassed, scanFilename, scanText, scanTree } from "./guard.ts";
+export type { GuardFinding, GuardOptions, GuardReport, GuardSkip } from "./guard.ts";
+export { SERVICE_TARGETS, SERVICE_UNITS, ServiceError, renderService, splitCommand } from "./service.ts";
+export type { RenderedService, ServiceOptions, ServiceTarget, ServiceUnit } from "./service.ts";
+
+// ── System One router client + session-scoped Turn-Sieve ─────────────────────
+export {
+  DEFAULT_RESERVED_PORTS,
+  ROUTE_SKILLS_PATH,
+  SYSTEM_ONE_DEFAULT_URL,
+  parseRouteSkillsResponse,
+  requestRouteSkills,
+  resolveRouteSkillsEndpoint,
+} from "./system-one.ts";
+export type { EndpointResolution, RouteSkillsAnswer } from "./system-one.ts";
+export { formatTurnRoute, routeTurn } from "./turn-sieve.ts";
+export type { RouteTurnResult } from "./turn-sieve.ts";
 
 // ── Reflexion episodic memory ───────────────────────────────────────────────
 export { logReflexionEvent, getReflexionLessons, sanitizeRemedy } from "./reflexion.ts";

@@ -1,0 +1,25 @@
+.git
+.github
+.vibehard
+node_modules
+dist
+*.tgz
+*.db
+*.db-wal
+*.db-shm
+.DS_Store
+
+# Tests and their scaffolding never ship in the image.
+**/*.test.ts
+src/test-setup.ts
+src/concurrency.worker.ts
+bunfig.toml
+
+# Not needed at runtime.
+docs
+deploy
+Dockerfile
+docker-compose.yml
+.dockerignore
+README.md
+LICENSE

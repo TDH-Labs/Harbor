@@ -1,6 +1,6 @@
 {
   "name": "harbor-tugboat",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Agent control plane — scheduler, compaction, isolation, session tracking.",
   "type": "module",
   "license": "MIT",
@@ -34,6 +34,11 @@
     "./scheduler": "./src/scheduler.ts",
     "./compaction": "./src/compaction.ts",
     "./isolation": "./src/isolation.ts",
+    "./sandbox": "./src/sandbox.ts",
+    "./tenants": "./src/tenants.ts",
+    "./http-server": "./src/http-server.ts",
+    "./service": "./src/service.ts",
+    "./guard": "./src/guard.ts",
     "./session": "./src/session.ts",
     "./config": "./src/config.ts",
     "./env": "./src/env.ts",
@@ -47,6 +52,8 @@
     "./audit": "./src/audit.ts",
     "./evict": "./src/evict.ts",
     "./skills": "./src/skills.ts",
+    "./system-one": "./src/system-one.ts",
+    "./turn-sieve": "./src/turn-sieve.ts",
     "./reflexion": "./src/reflexion.ts",
     "./mcp": "./src/mcp.ts",
     "./skill-create": "./src/skill-create.ts",
@@ -56,7 +63,8 @@
     "./install": "./src/install.ts",
     "./cli": "./src/cli.ts",
     "./integrations/pi": "./integrations/pi.ts",
-    "./integrations/mcp-server": "./integrations/mcp-server.ts"
+    "./integrations/mcp-server": "./integrations/mcp-server.ts",
+    "./integrations/delegate-client": "./integrations/delegate-client.ts"
   },
   "scripts": {
     "test": "bun test",

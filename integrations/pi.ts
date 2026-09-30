@@ -42,6 +42,7 @@ import { normalizeRoomEnv } from "harbor-tugboat/config";
 import { Capability, AgentSession } from "harbor-tugboat/isolation";
 import { estimateTokens } from "harbor-tugboat/compaction";
 import { audit } from "harbor-tugboat/audit";
+import { routeTurn } from "harbor-tugboat/turn-sieve";
 
 // ── Pi extension API (structural — no package dependency) ─────────────────────
 
@@ -115,6 +116,8 @@ export function piContext(options: PiHarborOptions = {}): GateContext {
 const readSkillGated = gate("read_skill", readSkillImpl);
 const listSkillsGated = gate("list_skills", listSkillsImpl);
 const searchSkillsGated = gate("search_skills", searchSkillsImpl);
+// Routing is a room-scoped search variant, so it rides the same capability.
+const routeSkillsGated = gate("search_skills", routeSkillsImpl);
 const activateSkillGated = gate("activate_skill", activateSkillImpl);
 const deactivateSkillGated = gate("deactivate_skill", deactivateSkillImpl);
 
@@ -127,14 +130,14 @@ async function searchSkillsImpl(
   const { env, session } = currentGateContext();
   if (roomOverride && roomOverride !== session.room && !session.has(Capability.ADMIN)) {
     const reason = `room '${session.room}' may not search skills for room '${roomOverride}'`;
-    audit.deny(session.sessionId, "search_skills", roomOverride, reason, { room: session.room, env });
+    audit.deny(session.sessionId, "search_skills", roomOverride, reason, { room: session.room, agentId: session.agentId, env });
     return {
       content: [{ type: "text", text: `Access denied: ${reason}.` }],
       details: { error: "access_denied", room: roomOverride },
     };
   }
   const room = roomOverride ?? session.room;
-  const results = searchSkills(env, query, room, limit);
+  const results = searchSkills(env, query, room, limit, (sk) => session.sensitivityAllowed(env, sk.name, room));
   if (results.length === 0) {
     return {
       content: [{ type: "text", text: `No skills matched query "${query}" in room "${room}".` }],
@@ -167,6 +170,7 @@ async function activateSkillImpl(skillName: string): Promise<PiToolResult> {
   if (!check.ok) {
     audit.deny(session.sessionId, "activate_skill", skillName, check.reason ?? "budget exceeded", {
       room: session.room,
+      agentId: session.agentId,
       env,
     });
     return {
@@ -180,6 +184,7 @@ async function activateSkillImpl(skillName: string): Promise<PiToolResult> {
   session.activeSkillStartedAt = Date.now() / 1000;
   audit.allow(session.sessionId, "activate_skill", skillName, `activated ${tokens} tokens`, {
     room: session.room,
+    agentId: session.agentId,
     env,
   });
   const banner = `[HARBOR: SKILL '${skillName}' IS NOW ACTIVE]\nSequential policy: Focus exclusively on '${skillName}' until complete. Call deactivate_skill when finished.\n---\n\n`;
@@ -197,6 +202,7 @@ async function deactivateSkillImpl(): Promise<PiToolResult> {
   session.activeSkillStartedAt = null;
   audit.allow(session.sessionId, "deactivate_skill", previous ?? "none", "deactivated skill", {
     room: session.room,
+    agentId: session.agentId,
     env,
   });
   return {
@@ -229,6 +235,7 @@ async function readSkillImpl(skillName: string): Promise<PiToolResult> {
   if (!check.ok) {
     audit.deny(session.sessionId, "read_skill", skillName, check.reason ?? "budget exceeded", {
       room: session.room,
+      agentId: session.agentId,
       env,
     });
     return {
@@ -240,6 +247,7 @@ async function readSkillImpl(skillName: string): Promise<PiToolResult> {
   spendBudget(session.sessionId, `skill:${skillName}`, tokens, budgetOpts);
   audit.allow(session.sessionId, "read_skill", skillName, `loaded ${tokens} tokens`, {
     room: session.room,
+    agentId: session.agentId,
     env,
   });
   return {
@@ -253,14 +261,14 @@ async function listSkillsImpl(roomOverride?: string): Promise<PiToolResult> {
   const { env, session } = currentGateContext();
   if (roomOverride && roomOverride !== session.room && !session.has(Capability.ADMIN)) {
     const reason = `room '${session.room}' may not list skills for room '${roomOverride}'`;
-    audit.deny(session.sessionId, "list_skills", roomOverride, reason, { room: session.room, env });
+    audit.deny(session.sessionId, "list_skills", roomOverride, reason, { room: session.room, agentId: session.agentId, env });
     return {
       content: [{ type: "text", text: `Access denied: ${reason}.` }],
       details: { error: "access_denied", room: roomOverride },
     };
   }
   const room = roomOverride ?? session.room;
-  const skills = listSkills(env, room);
+  const skills = session.filterVisible(env, listSkills(env, room), room);
   if (skills.length === 0) {
     return {
       content: [{ type: "text", text: `No skills available in room "${room}".` }],
@@ -276,7 +284,46 @@ async function listSkillsImpl(roomOverride?: string): Promise<PiToolResult> {
   };
 }
 
+/** Turn-Sieve: the 1-3 skills of this room that fit a task (see src/turn-sieve.ts). */
+async function routeSkillsImpl(prompt: string, roomOverride?: string): Promise<PiToolResult> {
+  const r = await routeTurn(currentGateContext(), prompt, roomOverride);
+  return {
+    content: [{ type: "text", text: r.ok ? r.text : `Access denied: ${r.text}` }],
+    details: r.ok
+      ? { room: r.room, source: r.sieve?.source, selected: r.sieve?.selectedSkills ?? [] }
+      : { error: "access_denied" },
+  };
+}
+
 // ── Public tool functions (run inside the gate context) ───────────────────────
+
+/** Route a turn to the room's most relevant skills in-process, bound to `context`. */
+export async function routeSkillsTool(
+  context: GateContext,
+  prompt: string,
+  room?: string,
+): Promise<PiToolResult> {
+  const p = prompt.trim();
+  if (!p) {
+    return {
+      content: [{ type: "text", text: "Error: prompt is required." }],
+      details: { error: "empty_prompt" },
+    };
+  }
+  return runWithGateContext(context, async () => {
+    try {
+      return await routeSkillsGated(p, room);
+    } catch (err) {
+      if (err instanceof AccessDeniedError) {
+        return {
+          content: [{ type: "text", text: `Access denied: ${err.message}` }],
+          details: { error: "access_denied" },
+        };
+      }
+      throw err;
+    }
+  });
+}
 
 /** Search skills in-process, bound to `context`. */
 export async function searchSkillsTool(
@@ -397,6 +444,32 @@ export async function listSkillsTool(context: GateContext, room?: string): Promi
  * Register Harbor's tools on a Pi extension API.
  */
 export function registerHarborSkills(pi: PiExtensionApi, options: PiHarborOptions = {}): void {
+  pi.registerTool({
+    name: "route_skills",
+    label: "Route Skills",
+    description:
+      "Pick the 1-3 skills (up to 5 when the task spans domains) from this room that best fit " +
+      "the task you are about to do. Call at the start of a task or when the topic changes, " +
+      "then activate_skill what it names.",
+    promptSnippet: "Pick the few skills that fit the current task (room-scoped, lean).",
+    promptGuidelines: [
+      "Call route_skills with the task at the start of each task to find the skill(s) you need.",
+    ],
+    parameters: {
+      type: "object",
+      properties: {
+        prompt: { type: "string", description: "The task or user request you are about to work on." },
+        room: { type: "string", description: "Optional room override (defaults to session room)." },
+      },
+      required: ["prompt"],
+    },
+    async execute(_toolCallId, params) {
+      const prompt = typeof params.prompt === "string" ? params.prompt : "";
+      const room = typeof params.room === "string" && params.room ? params.room : undefined;
+      return routeSkillsTool(piContext(options), prompt, room);
+    },
+  });
+
   pi.registerTool({
     name: "search_skills",
     label: "Search Skills",

@@ -1,0 +1,541 @@
+/**
+ * http-server.ts — Harbor Server: the hypervisor behind an authenticated HTTP
+ * transport (MCP "Streamable HTTP", POST + JSON responses, no SSE).
+ *
+ * The same `createMcpServer` that backs the stdio integration handles every
+ * request; what this file adds is everything a network service needs that a
+ * child process does not:
+ *
+ *   identity    bearer token → (tenant, room). The room is fixed by the token.
+ *               Nothing the client sends — header, body, query — can change it.
+ *   isolation   one Environment per tenant (tenants.ts). The process locks
+ *               `Environment.default()`, so any code path that forgot to pass an
+ *               explicit env fails loudly instead of touching the operator's home.
+ *   sessions    `Mcp-Session-Id`, issued at `initialize`, bound to the token that
+ *               made it (a session id alone is worthless), idle-expiring.
+ *   limits      body size, per-token request rate, sessions per token.
+ *   hygiene     Origin validation (spec MUST), no CORS, structured access log
+ *               that never contains a token or a request body.
+ *
+ * Endpoints
+ *   GET    /healthz   liveness (no auth)
+ *   GET    /readyz    readiness: control plane reachable (no auth)
+ *   POST   /mcp       one JSON-RPC message (auth) — batches are rejected, as in
+ *                     protocol 2025-06-18
+ *   DELETE /mcp       end the session named by `Mcp-Session-Id` (auth)
+ *   GET    /mcp       405 — this server offers no server-initiated stream
+ *
+ * TLS is terminated by a reverse proxy (see docs/CLOUD.md). Sessions are held in
+ * memory: a restart makes clients re-initialize, which the protocol defines (404).
+ * Budgets are cooperative cost control here, not a hard tenant quota.
+ */
+import { randomBytes } from "node:crypto";
+
+import { createMcpServer, MCP_PROTOCOL_VERSION, type JsonRpcRequest } from "../integrations/mcp-server.ts";
+import { Environment } from "./env.ts";
+import type { DeliveryQuota, GateContext } from "./gate.ts";
+import { TokenBucketLimiter, declaredLength, readBodyCapped } from "./http-util.ts";
+import { AgentSession, createSession } from "./isolation.ts";
+import { audit } from "./audit.ts";
+import { ControlPlane, PRINCIPAL_RE, TenantError, tokenHandle, usageSubject, type AuthResult } from "./tenants.ts";
+import type { Sensitivity } from "./sensitivity.ts";
+
+export const DEFAULT_SERVER_PORT = 8787;
+export const DEFAULT_SERVER_HOST = "127.0.0.1";
+const SESSION_HEADER = "mcp-session-id";
+/**
+ * Sent with a delegate (house-agent) token on EVERY request: the person the
+ * request is made for. The server, not the client, decides what that person may
+ * receive (their grant); the header only names them.
+ */
+export const ON_BEHALF_OF_HEADER = "harbor-on-behalf-of";
+/** Revisions accepted in `MCP-Protocol-Version` (absent ⇒ the spec's back-compat default). */
+const ACCEPTED_PROTOCOL_VERSIONS = new Set([MCP_PROTOCOL_VERSION, "2025-03-26"]);
+
+export interface ServerOptions {
+  /** Data directory holding `control.db` and `tenants/`. */
+  dataDir: string;
+  /** An existing control plane (tests); otherwise one is opened on `dataDir`. */
+  controlPlane?: ControlPlane;
+  host?: string;
+  port?: number;
+  /**
+   * Origins allowed to call /mcp from a browser. Default none: a request that
+   * carries an `Origin` not in this list is refused (MCP spec: servers MUST
+   * validate Origin to stop DNS-rebinding). Non-browser clients send no Origin.
+   */
+  allowedOrigins?: string[];
+  /** Requests per minute per token (default 120). */
+  rateLimitPerMinute?: number;
+  /** Largest accepted request body in bytes (default 1 MiB). */
+  maxBodyBytes?: number;
+  /** A session idle this long is dropped (default 3600s). */
+  sessionIdleSeconds?: number;
+  /** Concurrent sessions allowed per token (default 32). */
+  maxSessionsPerToken?: number;
+  /** Access-log sink (default: one JSON object per line on stdout). */
+  logger?: (entry: Record<string, unknown>) => void;
+  /** A tenant with no request for this long has its cached environment and DB handles released (default 600s). */
+  tenantIdleSeconds?: number;
+  /** Clock in ms (tests). */
+  now?: () => number;
+}
+
+interface HttpSession {
+  id: string;
+  tenantId: string;
+  tokenId: string;
+  /** The person the token was issued to, or (for a delegate token) the person it acts for ("" if none). */
+  principal: string;
+  room: string;
+  /** The sensitivity ceiling the session was opened with. */
+  ceiling: Sensitivity | null;
+  /** The capabilities it was opened with, as a stable key: a config edit that changes them ends the session. */
+  capsKey: string;
+  agent: AgentSession;
+  lastSeen: number;
+}
+
+export interface ServerHandler {
+  readonly controlPlane: ControlPlane;
+  fetch(req: Request): Promise<Response>;
+  /** Number of live MCP sessions (diagnostics / tests). */
+  sessionCount(): number;
+  /** Run the periodic maintenance now: expire idle sessions, prune rate buckets, evict idle tenants. */
+  sweep(): void;
+  /** Stop timers. Does not close the control plane's database. */
+  close(): void;
+}
+
+export interface RunningServer extends ServerHandler {
+  readonly host: string;
+  readonly port: number;
+  stop(): Promise<void>;
+}
+
+// ── helpers ──────────────────────────────────────────────────────────────────
+
+function json(status: number, body: unknown, headers: Record<string, string> = {}): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json", ...headers },
+  });
+}
+
+function rpcError(status: number, code: number, message: string, headers: Record<string, string> = {}): Response {
+  return json(status, { jsonrpc: "2.0", id: null, error: { code, message } }, headers);
+}
+
+const UNAUTHORIZED = () =>
+  json(401, { error: "unauthorized" }, { "www-authenticate": 'Bearer realm="harbor"' });
+
+/**
+ * The capabilities a token-bound session gets: the room's configured
+ * capabilities, capped by the token's own ceiling, with `admin` only when the
+ * operator explicitly issued it. A room whose config lists `admin` does not
+ * hand it to a network caller.
+ */
+export function sessionCapabilities(
+  roomCapabilities: readonly string[],
+  auth: Extract<AuthResult, { ok: true }>,
+): string[] {
+  let caps = roomCapabilities.filter((c) => c !== "admin");
+  if (auth.capabilities) caps = caps.filter((c) => auth.capabilities!.includes(c));
+  if (auth.adminAllowed && auth.capabilities?.includes("admin")) caps = [...caps, "admin"];
+  return caps;
+}
+
+const capsKey = (caps: readonly string[]): string => [...caps].sort().join(",");
+
+// ── handler ──────────────────────────────────────────────────────────────────
+
+export function createServerHandler(options: ServerOptions): ServerHandler {
+  const now = options.now ?? Date.now;
+  const cp = options.controlPlane ?? new ControlPlane(options.dataDir);
+  const allowedOrigins = new Set(options.allowedOrigins ?? []);
+  const maxBody = options.maxBodyBytes ?? 1024 * 1024;
+  const idleMs = (options.sessionIdleSeconds ?? 3600) * 1000;
+  const maxSessionsPerToken = options.maxSessionsPerToken ?? 32;
+  const limiter = new TokenBucketLimiter(options.rateLimitPerMinute ?? 120, now);
+  const log =
+    options.logger ??
+    ((entry: Record<string, unknown>) => {
+      process.stdout.write(JSON.stringify(entry) + "\n");
+    });
+
+  // A multi-tenant process must never fall back to the operator's own home.
+  Environment.lockDefault("Harbor Server is multi-tenant: every call must use an explicit tenant Environment");
+
+  const sessions = new Map<string, HttpSession>();
+  const tenantIdleMs = (options.tenantIdleSeconds ?? 600) * 1000;
+  /** Last request per tenant — drives release of idle tenants' database handles. */
+  const tenantLastActive = new Map<string, number>();
+
+  function sweepSessions(): void {
+    const t = now();
+    for (const [id, s] of sessions) if (t - s.lastSeen > idleMs) sessions.delete(id);
+    limiter.sweep();
+    // db.ts caches connections for the process lifetime; without this a server
+    // that has ever served N tenants holds descriptors for all N.
+    for (const [tenantId, last] of tenantLastActive) {
+      if (t - last <= tenantIdleMs) continue;
+      tenantLastActive.delete(tenantId);
+      try {
+        cp.evictTenant(tenantId);
+      } catch {
+        // tenant id no longer valid — nothing cached under it
+      }
+    }
+  }
+  const sweeper = setInterval(sweepSessions, 60_000);
+  sweeper.unref?.();
+
+  type Auth = Extract<AuthResult, { ok: true }>;
+
+  function liveSession(id: string | null, auth: Auth): HttpSession | null {
+    if (!id) return null;
+    const s = sessions.get(id);
+    if (!s) return null;
+    if (now() - s.lastSeen > idleMs) {
+      sessions.delete(id);
+      return null;
+    }
+    // A session belongs to the token that opened it. Anyone else gets the same
+    // answer as for an unknown id, so ids cannot be probed.
+    if (s.tokenId !== auth.tokenId || s.tenantId !== auth.tenantId) return null;
+    // A delegate token serves many people: a session belongs to the person it was
+    // opened for, and is dropped if their grant has since changed what it may see
+    // (the client re-initializes and gets the new one).
+    if (s.principal !== auth.principal) return null;
+    if (s.room !== auth.room || s.ceiling !== auth.maxSensitivity) {
+      sessions.delete(id);
+      return null;
+    }
+    s.lastSeen = now();
+    return s;
+  }
+
+  async function handleMcp(req: Request, note: (k: string, v: unknown) => void): Promise<Response> {
+    // 1. Origin — a browser page must be explicitly allowed.
+    const origin = req.headers.get("origin");
+    if (origin !== null && !allowedOrigins.has(origin)) {
+      note("deny", "origin");
+      return json(403, { error: "forbidden_origin" });
+    }
+
+    // 2. Authentication.
+    const bearer = /^Bearer (\S+)$/i.exec(req.headers.get("authorization") ?? "")?.[1];
+    if (!bearer) {
+      note("deny", "no_bearer");
+      return UNAUTHORIZED();
+    }
+    const presented = cp.authenticate(bearer, now() / 1000);
+    if (!presented.ok) {
+      note("deny", presented.reason); // the operator learns why; the client only learns "no"
+      return UNAUTHORIZED();
+    }
+    note("tenant", presented.tenantId);
+    note("token", tokenHandle(presented.tokenId));
+    tenantLastActive.set(presented.tenantId, now());
+
+    // 2b. Acting on behalf of a person. A delegate token has no room, person,
+    // quota or ceiling of its own: each request names the person, and that
+    // person's GRANT supplies all of them — re-read every time, so suspending or
+    // offboarding them, or changing their grant, applies to the next call. A
+    // token that is not a delegate may not claim to act for anyone.
+    let auth: Auth = presented;
+    const onBehalf = req.headers.get(ON_BEHALF_OF_HEADER);
+    if (presented.delegate) {
+      if (onBehalf === null) {
+        note("deny", "missing_on_behalf_of");
+        return json(400, { error: "missing_on_behalf_of" });
+      }
+      if (!PRINCIPAL_RE.test(onBehalf)) {
+        note("deny", "invalid_on_behalf_of");
+        return json(400, { error: "invalid_on_behalf_of" });
+      }
+      const d = cp.resolveDelegation(presented.tenantId, onBehalf);
+      if (!d.ok) {
+        note("deny", `delegation:${d.reason}`); // the operator learns why; the client only learns "no"
+        return json(403, { error: "forbidden" });
+      }
+      auth = {
+        ...presented,
+        room: d.room,
+        principal: d.principal,
+        maxSensitivity: d.clearance,
+        dailyTokenQuota: d.dailyTokenQuota,
+        dailyReadQuota: d.dailyReadQuota,
+      };
+      note("on_behalf_of", d.principal);
+    } else if (onBehalf !== null) {
+      note("deny", "on_behalf_of_without_delegate");
+      return json(403, { error: "forbidden" });
+    }
+    if (auth.principal) note("principal", auth.principal);
+
+    // 3. Rate limit, per token — and, for a delegate, per person, so one busy
+    // person does not spend the allowance of everyone the house agent serves.
+    const taken = limiter.take(presented.delegate ? `${presented.tokenId}:${auth.principal}` : auth.tokenId);
+    if (!taken.ok) {
+      note("deny", "rate_limited");
+      return json(429, { error: "rate_limited" }, { "retry-after": String(taken.retryAfterSec) });
+    }
+
+    // 4. Tenant environment (a broken tenant config is the operator's problem, not a 500 leak).
+    let env: Environment;
+    try {
+      env = cp.tenantEnvironment(auth.tenantId);
+    } catch (err) {
+      note("error", err instanceof TenantError ? err.code : "tenant_environment");
+      return json(503, { error: "tenant_unavailable" });
+    }
+
+    if (req.method === "DELETE") {
+      const sid = req.headers.get(SESSION_HEADER);
+      const s = liveSession(sid, auth);
+      if (!s) return json(404, { error: "unknown_session" });
+      sessions.delete(s.id);
+      note("session", s.id.slice(0, 8));
+      return new Response(null, { status: 204 });
+    }
+
+    // 5. Request shape.
+    const ctype = req.headers.get("content-type") ?? "";
+    if (!/^application\/json\b/i.test(ctype)) {
+      return json(415, { error: "content_type_must_be_application_json" });
+    }
+    const version = req.headers.get("mcp-protocol-version");
+    if (version !== null && !ACCEPTED_PROTOCOL_VERSIONS.has(version)) {
+      return json(400, { error: "unsupported_protocol_version", supported: [...ACCEPTED_PROTOCOL_VERSIONS] });
+    }
+    const declared = declaredLength(req.headers);
+    if (declared !== null && declared > maxBody) return json(413, { error: "body_too_large" });
+    const raw = await readBodyCapped(req.body, maxBody);
+    if (raw === null) return json(413, { error: "body_too_large" });
+
+    let message: unknown;
+    try {
+      message = JSON.parse(raw);
+    } catch {
+      return rpcError(400, -32700, "parse error");
+    }
+    if (message === null || typeof message !== "object") return rpcError(400, -32600, "invalid request");
+    if (Array.isArray(message)) return rpcError(400, -32600, "batching is not supported");
+    const request = message as JsonRpcRequest;
+
+    // A client's reply to a server request, or a bare notification: accepted, no body.
+    const isResponse = request.method === undefined && ("result" in request || "error" in request);
+    if (isResponse) return new Response(null, { status: 202 });
+
+    // 6. Session.
+    const headers: Record<string, string> = {};
+    let session: HttpSession | null;
+    if (request.method === "initialize") {
+      const open = [...sessions.values()].filter((s) => s.tokenId === auth.tokenId && s.principal === auth.principal).length;
+      if (open >= maxSessionsPerToken) {
+        note("deny", "too_many_sessions");
+        return json(429, { error: "too_many_sessions" }, { "retry-after": "30" });
+      }
+      const id = randomBytes(16).toString("hex");
+      const caps = sessionCapabilities(env.config.roomCapabilities(auth.room), auth);
+      // strictRoom: on a network server a configured room with no skills grants
+      // nothing (Core would read that as "unrestricted" — a cross-room leak here).
+      // Every audit row for this session names the PERSON (or, with none, the
+      // token), so a read can be traced to who received it.
+      const agentId = auth.principal || `token:${auth.tokenId}`;
+      const via = presented.delegate ? ` via=delegate:${tokenHandle(auth.tokenId)}` : "";
+      const agent = createSession({
+        room: auth.room,
+        agentId,
+        capabilities: caps,
+        env,
+        sessionId: id,
+        strictRoom: true,
+        // The token's sensitivity ceiling, fixed for the life of the session.
+        maxSensitivity: auth.maxSensitivity,
+      });
+      audit.allow(id, "session_open", tokenHandle(auth.tokenId), `principal=${auth.principal || "-"} ceiling=${auth.maxSensitivity ?? "none"}${via}`, {
+        room: auth.room,
+        agentId,
+        env,
+      });
+      session = {
+        id,
+        tenantId: auth.tenantId,
+        tokenId: auth.tokenId,
+        principal: auth.principal,
+        room: auth.room,
+        ceiling: auth.maxSensitivity,
+        capsKey: capsKey(caps),
+        agent,
+        lastSeen: now(),
+      };
+      sessions.set(id, session);
+      headers["mcp-session-id"] = id;
+      note("session", id.slice(0, 8));
+    } else {
+      const sid = req.headers.get(SESSION_HEADER);
+      if (sid === null) return json(400, { error: "missing_mcp_session_id" });
+      session = liveSession(sid, auth);
+      if (!session) return json(404, { error: "unknown_session" }); // client must re-initialize
+      // A session carries the capabilities it was opened with. If the operator has
+      // since edited the room's capabilities (or the token's ceiling was re-read
+      // differently), end the session so nothing outlives the entitlements it was
+      // opened under — the client re-initializes and gets the current ones.
+      if (session.capsKey !== capsKey(sessionCapabilities(env.config.roomCapabilities(auth.room), auth))) {
+        sessions.delete(session.id);
+        note("deny", "capabilities_changed");
+        return json(404, { error: "unknown_session" });
+      }
+      note("session", session.id.slice(0, 8));
+    }
+
+    // 7. Dispatch through the SAME server the stdio transport uses, with the
+    // context fixed by the token — never resolved from anything the client sent.
+    // Delivery is capped per PERSON (per token when there is none), across every
+    // session and token they hold — so opening more sessions buys no more content.
+    const subject = usageSubject(auth.principal, auth.tokenId);
+    // ALWAYS built, even when this credential has no limit: delivery is recorded
+    // against the person either way, so what `principal list` reports (and what a
+    // limit on another of their credentials counts) is what was actually delivered.
+    const quota: DeliveryQuota = {
+      charge: (tokens) => {
+        const r = cp.chargeUsage(
+          auth.tenantId,
+          subject,
+          { tokens, reads: 1 },
+          { tokens: auth.dailyTokenQuota, reads: auth.dailyReadQuota },
+          now(),
+        );
+        return r.ok ? { ok: true } : { ok: false, reason: r.reason };
+      },
+    };
+    const ctx: GateContext = { env, session: session.agent, quota };
+    // trustConfigSystemOneUrl:false — a tenant's config must not be able to aim
+    // the server's outbound requests at an arbitrary host (SSRF).
+    const server = createMcpServer({ env, resolveContext: () => ctx, trustConfigSystemOneUrl: false });
+    const response = await server.handle(request);
+    if (response === null) return new Response(null, { status: 202, headers });
+    return json(200, response, headers);
+  }
+
+  async function route(req: Request, note: (k: string, v: unknown) => void): Promise<Response> {
+    const url = new URL(req.url);
+    switch (url.pathname) {
+      case "/healthz":
+        return req.method === "GET" || req.method === "HEAD"
+          ? json(200, { status: "ok" })
+          : json(405, { error: "method_not_allowed" }, { allow: "GET, HEAD" });
+      case "/readyz":
+        if (req.method !== "GET" && req.method !== "HEAD") {
+          return json(405, { error: "method_not_allowed" }, { allow: "GET, HEAD" });
+        }
+        return cp.ping() ? json(200, { status: "ready" }) : json(503, { status: "unavailable" });
+      case "/mcp":
+        if (req.method === "POST" || req.method === "DELETE") return handleMcp(req, note);
+        return json(405, { error: "method_not_allowed" }, { allow: "POST, DELETE" });
+      default:
+        return json(404, { error: "not_found" });
+    }
+  }
+
+  async function fetchHandler(req: Request): Promise<Response> {
+    const started = now();
+    const fields: Record<string, unknown> = {};
+    const note = (k: string, v: unknown) => {
+      fields[k] = v;
+    };
+    let res: Response;
+    try {
+      res = await route(req, note);
+    } catch (err) {
+      // Never leak internals to the client; the operator gets the message.
+      note("error", err instanceof Error ? err.message : String(err));
+      res = json(500, { error: "internal_error" });
+    }
+    res.headers.set("x-content-type-options", "nosniff");
+    res.headers.set("cache-control", "no-store");
+    log({
+      ts: new Date(started).toISOString(),
+      event: "request",
+      method: req.method,
+      path: new URL(req.url).pathname,
+      status: res.status,
+      ms: now() - started,
+      ...fields,
+    });
+    return res;
+  }
+
+  return {
+    controlPlane: cp,
+    fetch: fetchHandler,
+    sessionCount: () => sessions.size,
+    sweep: sweepSessions,
+    close() {
+      clearInterval(sweeper);
+      sessions.clear();
+      tenantLastActive.clear();
+      Environment.unlockDefault();
+    },
+  };
+}
+
+/** How long {@link RunningServer.stop} waits for in-flight requests before closing them. */
+export const DEFAULT_SHUTDOWN_GRACE_MS = 10_000;
+
+/**
+ * Bind the handler to a port. Throws if the address is unavailable.
+ *
+ * `stop()` drains, in this order: (1) every NEW request — including one arriving
+ * on a pooled keep-alive connection — gets 503 + `Connection: close`, and
+ * `/readyz` fails so an orchestrator stops routing here (`/healthz` stays 200 so
+ * a liveness probe does not kill the process mid-drain); (2) requests already
+ * running finish, up to `graceMs`; (3) the listener and every remaining
+ * connection are closed. That is the behavior a rolling deploy needs.
+ *
+ * The listener deliberately stays open during (1)-(2): in Bun, `stop(false)`
+ * followed by `stop(true)` does NOT close pooled connections (the second call is
+ * a no-op), so a single final `stop(true)` is the only reliable close.
+ */
+export function startServer(options: ServerOptions & { graceMs?: number }): RunningServer {
+  const handler = createServerHandler(options);
+  const host = options.host ?? DEFAULT_SERVER_HOST;
+  let inflight = 0;
+  let draining = false;
+
+  const server = Bun.serve({
+    hostname: host,
+    port: options.port ?? DEFAULT_SERVER_PORT,
+    // Bun rejects an oversized body before it reaches us; the handler re-checks.
+    maxRequestBodySize: (options.maxBodyBytes ?? 1024 * 1024) + 4096,
+    async fetch(req) {
+      if (draining && new URL(req.url).pathname !== "/healthz") {
+        return new Response(JSON.stringify({ error: "shutting_down" }), {
+          status: 503,
+          headers: { "content-type": "application/json", connection: "close", "retry-after": "5" },
+        });
+      }
+      inflight++;
+      try {
+        return await handler.fetch(req);
+      } finally {
+        inflight--;
+      }
+    },
+  });
+
+  return {
+    ...handler,
+    host,
+    port: server.port ?? options.port ?? DEFAULT_SERVER_PORT,
+    async stop() {
+      draining = true;
+      const deadline = Date.now() + (options.graceMs ?? DEFAULT_SHUTDOWN_GRACE_MS);
+      while (inflight > 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
+      handler.close();
+      await server.stop(true); // closes the listener and every remaining connection
+    },
+  };
+}

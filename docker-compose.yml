@@ -1,0 +1,63 @@
+# Self-hosted Harbor Server.
+#
+#   docker compose up -d
+#   docker compose exec harbor bun src/cli.ts tenant create acme
+#   docker compose exec harbor bun src/cli.ts tenant add-room acme --room legal
+#   (install a skill into it, see docs/CLOUD.md, then:)
+#   docker compose exec harbor bun src/cli.ts token create --tenant acme --room legal
+#
+# With TLS (a Caddy reverse proxy that gets certificates automatically):
+#   HARBOR_DOMAIN=harbor.example.com docker compose --profile tls up -d
+#
+# The Harbor port is published on loopback only: reach it through the proxy, never
+# directly over a network — bearer tokens must not cross the wire unencrypted.
+
+services:
+  harbor:
+    build: .
+    image: harbor-tugboat:local
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8787:8787"
+    environment:
+      HARBOR_DATA_DIR: /data
+      HARBOR_HOST: 0.0.0.0
+      HARBOR_PORT: "8787"
+      # Browser-based MCP clients only; leave unset for CLI/desktop agents.
+      # HARBOR_ALLOWED_ORIGINS: https://app.example.com
+      # Optional System One router (a separate service you run; not part of this repo).
+      # Unset = keyword matching only. Never point this at port 8000 (reserved).
+      # HARBOR_SYSTEM_ONE_URL: http://system-one:8150
+    volumes:
+      - harbor-data:/data
+      # Skills to install (each a directory containing SKILL.md), read-only inside
+      # the container: `skill-install /skills/<name> --room <room> --config ...`.
+      # Docker creates ./skills on the host if it does not exist yet.
+      - ./skills:/skills:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 15s   # `serve` drains in-flight requests on SIGTERM (up to 10s)
+
+  caddy:
+    image: caddy:2
+    profiles: ["tls"]
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      HARBOR_DOMAIN: ${HARBOR_DOMAIN:-localhost}
+    volumes:
+      - ./deploy/Caddyfile.example:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    depends_on:
+      - harbor
+
+volumes:
+  harbor-data:
+  caddy-data:

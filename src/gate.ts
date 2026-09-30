@@ -42,6 +42,7 @@ import { Environment } from "./env.ts";
 import { normalizeRoomEnv } from "./config.ts";
 import { deny, allow, emitHypervisorEvent } from "./audit.ts";
 import { hasLiveGrant } from "./approval.ts";
+import { denialReason, effectiveSensitivity, type Sensitivity } from "./sensitivity.ts";
 
 /** Contract-named alias for the isolation error (BUILD_BRIEF / phase interface). */
 export { AccessDenied as AccessDeniedError } from "./isolation.ts";
@@ -81,10 +82,22 @@ const SKILL_GATED_TOOLS = new Set<string>(["read_skill", "read_skill_digest", "a
  */
 const ROOM_OVERRIDE_GATED_TOOLS = new Set<string>(["list_skills"]);
 
+/**
+ * A cap on how much skill content one caller may be DELIVERED per day, enforced
+ * by whoever owns the caller's identity (Harbor Server counts per person). A
+ * tool that hands skill text to an agent calls {@link DeliveryQuota.charge} with
+ * the size first and returns the refusal instead of the content.
+ */
+export interface DeliveryQuota {
+  charge(tokens: number): { ok: true } | { ok: false; reason: string };
+}
+
 /** Ambient gate context: which session/environment wrapped calls run under. */
 export interface GateContext {
   env: Environment;
   session: AgentSession;
+  /** Optional delivery quota (Harbor Server sets it; Harbor Core has none). */
+  quota?: DeliveryQuota;
 }
 
 /**
@@ -229,6 +242,37 @@ export function gate<A extends unknown[], R>(
         });
         throw new AccessDenied(reason, { session, capability: tool, resource });
       }
+    }
+
+    // 2b. Sensitivity ceiling. Room membership decided the skill is reachable
+    // from this room; a token's ceiling decides whether THIS caller may be handed
+    // it. It applies to an approved cross-room grant too. Unlabeled skills are
+    // denied under a ceiling (see sensitivity.ts). The audit row carries the
+    // true reason; the AGENT is given the same words as an out-of-room skill, so
+    // a capped token cannot probe which skill names exist above its ceiling.
+    if (skillGated && resource && !session.sensitivityAllowed(env, resource)) {
+      const reason = denialReason(resource, effectiveSensitivity(env.config, session.room, resource), session.maxSensitivity as Sensitivity);
+      deny(session.sessionId, tool, resource, reason, {
+        room: session.room,
+        agentId: session.agentId,
+        env,
+      });
+      emitHypervisorEvent({
+        kind: "gate",
+        event: "sensitivity_denied",
+        decision: "denied",
+        sessionId: session.sessionId,
+        room: session.room,
+        capability: tool,
+        resource,
+        reason,
+        timestamp: nowSec(),
+      });
+      throw new AccessDenied(`skill '${resource}' not in room '${session.room}'`, {
+        session,
+        capability: tool,
+        resource,
+      });
     }
 
     // 3. Room-override check for tools whose first arg is an optional room

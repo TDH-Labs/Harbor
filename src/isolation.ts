@@ -27,12 +27,13 @@ import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname } from "node:path";
 
 import { DEFAULT_CAPABILITIES } from "./config.ts";
 import { openDb } from "./db.ts";
 import type { Environment } from "./env.ts";
-import { isPathWithin } from "./path-safety.ts";
+import { RoomJailViolation, createRoomSandbox, realpathLoose, type RoomRootKind } from "./sandbox.ts";
+import { effectiveSensitivity, withinCeiling, type Sensitivity } from "./sensitivity.ts";
 
 // ── Capabilities ─────────────────────────────────────────────────────────────
 
@@ -89,6 +90,21 @@ export interface AgentSessionInit {
   sessionId?: string;
   createdAt?: number;
   activeSkill?: string | null;
+  /**
+   * A CONFIGURED room whose skill list is empty grants nothing, instead of the
+   * Core default of "no restriction configured ⇒ every skill". Core keeps that
+   * default (a fresh single-user install relies on it); a network server sets
+   * this, because there the default is a cross-room read: removing the last
+   * skill from `finance` would let a `finance` token `read_skill` anything in the
+   * pool. The unconfigured default room stays unrestricted either way.
+   */
+  strictRoom?: boolean;
+  /**
+   * The highest sensitivity label this session may be handed (see
+   * sensitivity.ts). Absent = no ceiling. With a ceiling, an UNLABELED skill is
+   * never delivered.
+   */
+  maxSensitivity?: Sensitivity | null;
 }
 
 /** A session with an identity and a fixed capability set. */
@@ -98,6 +114,9 @@ export class AgentSession {
   readonly capabilities: Set<string>;
   readonly sessionId: string;
   readonly createdAt: number;
+  readonly strictRoom: boolean;
+  /** Null = no ceiling. */
+  readonly maxSensitivity: Sensitivity | null;
   activeSkill: string | null = null;
   activeSkillStartedAt: number | null = null;
 
@@ -106,6 +125,8 @@ export class AgentSession {
     this.agentId = init.agentId ?? "";
     this.capabilities = new Set(init.capabilities ?? DEFAULT_CAPABILITIES);
     this.createdAt = init.createdAt ?? Date.now() / 1000;
+    this.strictRoom = init.strictRoom ?? false;
+    this.maxSensitivity = init.maxSensitivity ?? null;
     this.activeSkill = init.activeSkill ?? null;
     if (this.activeSkill) this.activeSkillStartedAt = this.createdAt;
     this.sessionId =
@@ -163,19 +184,43 @@ export class AgentSession {
    * room read a legal-room skill's full content while the correctly-scoped
    * `productivity` room was properly denied the same skill.
    *
-   * The configured default room is exempt: a fresh install legitimately runs
-   * in a default room (e.g. "general") that has no `[skills.rooms.*]` section
-   * yet, and that has always meant "unrestricted" — see skill-install.ts's
-   * isDefaultRoom branch, which likewise declines to write a config entry for
-   * it. Every OTHER unconfigured room is an error state, not a wildcard.
+   * The configured default room is exempt on a NON-strict (Core) session: a fresh
+   * install legitimately runs in a default room (e.g. "general") that has no
+   * `[skills.rooms.*]` section yet, and that has always meant "unrestricted" — see
+   * skill-install.ts's isDefaultRoom branch, which likewise declines to write a
+   * config entry for it. On a STRICT (server) session it grants nothing until it is
+   * configured with a skill list. Every OTHER unconfigured room is an error state,
+   * not a wildcard.
    */
   roomSkillAllowed(env: Environment, skillName: string): boolean {
-    if (!env.config.hasRoom(this.room) && this.room !== env.config.skillDefaultRoom) {
+    const configured = env.config.hasRoom(this.room);
+    if (!configured && this.room !== env.config.skillDefaultRoom) {
       return false;
     }
     const allowed = this.roomSkills(env);
-    if (allowed.size === 0) return true; // no restriction configured
+    // Empty list ⇒ "no restriction configured" — except on a strict (server)
+    // session, where an empty room grants nothing. That includes the UNCONFIGURED
+    // default room: "unrestricted" is a single-operator convenience (Core), but on a
+    // server it would let a token for `general` read every room's skills.
+    if (allowed.size === 0) return !this.strictRoom;
     return allowed.has(skillName);
+  }
+
+  /**
+   * May this session be HANDED `skillName` (its label is within the session's
+   * ceiling)? Always true without a ceiling. Labels resolve against `room`
+   * (default: this session's room), so an ADMIN listing another room is judged by
+   * that room's default.
+   */
+  sensitivityAllowed(env: Environment, skillName: string, room: string = this.room): boolean {
+    if (this.maxSensitivity === null) return true;
+    return withinCeiling(effectiveSensitivity(env.config, room, skillName), this.maxSensitivity);
+  }
+
+  /** Drop the skills this session's ceiling forbids (all of them pass without a ceiling). */
+  filterVisible<T extends { name: string }>(env: Environment, skills: T[], room: string = this.room): T[] {
+    if (this.maxSensitivity === null) return skills;
+    return skills.filter((s) => this.sensitivityAllowed(env, s.name, room));
   }
 
   roomMcpAllowed(env: Environment, mcpServer: string): boolean {
@@ -225,6 +270,24 @@ export function checkMcpAccess(
   return session.roomMcpAllowed(env, mcpServer);
 }
 
+/**
+ * Does `path` resolve — symlinks followed, `..` applied to the resolved path —
+ * inside the room's roots under `base`? An unsafe room name (empty, `..`,
+ * separators) or any resolution failure is a denial.
+ *
+ * An unrooted session must be denied, not granted the shared parent: with no
+ * room segment, `join(base, "data", "")` collapses to `${base}/data` and every
+ * room's data would count as "within". {@link createRoomSandbox} rejects the
+ * empty and traversal-shaped names outright.
+ */
+function roomContains(base: string, room: string, kind: RoomRootKind, path: string): boolean {
+  try {
+    return createRoomSandbox(base, room, kind).contains(path, base);
+  } catch {
+    return false;
+  }
+}
+
 /** Data access: capability + the DB must resolve under `data/<room>/` (or ADMIN). */
 export function checkDataAccess(
   session: AgentSession,
@@ -232,18 +295,17 @@ export function checkDataAccess(
   env?: Environment,
 ): boolean {
   if (!session.has(Capability.DATA_READ)) return false;
+  // ADMIN is the only intended bypass, and it sits BEFORE the room guard so a
+  // room-less bootstrap session keeps its explicit escalation.
   if (session.has(Capability.ADMIN)) return true;
-  // An unrooted session must be denied, not granted the shared parent: with no
-  // guard, join(base, "data", "") collapses to `${base}/data`, and isPathWithin
-  // then treats EVERY room's data as "within" that root — a room="" session
-  // reads/writes every room's data. ADMIN (above) is the only intended bypass.
-  if (!session.room) return false;
   const base = env ? env.root : homedir();
-  const roomRoot = join(base, "data", session.room);
-  return isPathWithin(resolve(base, dbPath), roomRoot);
+  return roomContains(base, session.room, "data", dbPath);
 }
 
-/** File access: capability + the path must resolve under `workspace/<room>/` (or ADMIN). */
+/**
+ * File access: capability + the path must resolve under `rooms/<room>/` or
+ * `workspace/<room>/` (or ADMIN). Symlink-safe: see sandbox.ts.
+ */
 export function checkFileAccess(
   session: AgentSession,
   filePath: string,
@@ -253,14 +315,66 @@ export function checkFileAccess(
   const cap = mode === "write" ? Capability.FILE_WRITE : Capability.FILE_READ;
   if (!session.has(cap)) return false;
   if (session.has(Capability.ADMIN)) return true;
-  // Same collapse as checkDataAccess above: join(base, "workspace", "") is
-  // `${base}/workspace`, which contains every room — deny an unrooted session
-  // outright instead of letting it fall through to a room-root that isn't
-  // actually scoped to any room.
-  if (!session.room) return false;
   const base = env ? env.root : homedir();
-  const roomRoot = join(base, "workspace", session.room);
-  return isPathWithin(resolve(base, filePath), roomRoot);
+  return roomContains(base, session.room, "files", filePath);
+}
+
+/** Cap audited paths so a hostile caller cannot bloat the audit table. */
+function auditableResource(path: string): string {
+  return path.length > 512 ? `${path.slice(0, 509)}...` : path;
+}
+
+function enforceRoomPath(
+  session: AgentSession,
+  path: string,
+  cap: Capability,
+  kind: RoomRootKind,
+  env: Environment | undefined,
+): string {
+  // Capability first: throws AccessDenied (and audits it) when not held.
+  session.check(cap, auditableResource(path), env);
+  const base = env ? env.root : homedir();
+  if (session.has(Capability.ADMIN)) return realpathLoose(path, base);
+  try {
+    return createRoomSandbox(base, session.room, kind).resolve(path, base);
+  } catch (err) {
+    if (err instanceof RoomJailViolation && env) {
+      auditLog(env, session, {
+        event: "room_jail_violation",
+        capability: cap,
+        resource: auditableResource(path),
+        decision: "denied",
+        reason: err.reason,
+      });
+    }
+    throw err;
+  }
+}
+
+/**
+ * Throwing, auditing form of {@link checkFileAccess} for a tool gateway: returns
+ * the REAL path to open, or throws {@link AccessDenied} (missing capability) /
+ * {@link RoomJailViolation} (path leaves the room; audited as
+ * `room_jail_violation`). Open the returned path, not the caller's string.
+ */
+export function enforceFileAccess(
+  session: AgentSession,
+  filePath: string,
+  mode: "read" | "write" = "read",
+  env?: Environment,
+): string {
+  return enforceRoomPath(
+    session,
+    filePath,
+    mode === "write" ? Capability.FILE_WRITE : Capability.FILE_READ,
+    "files",
+    env,
+  );
+}
+
+/** Throwing, auditing form of {@link checkDataAccess}; see {@link enforceFileAccess}. */
+export function enforceDataAccess(session: AgentSession, dbPath: string, env?: Environment): string {
+  return enforceRoomPath(session, dbPath, Capability.DATA_READ, "data", env);
 }
 
 // ── Audit logging ────────────────────────────────────────────────────────────
@@ -360,15 +474,28 @@ export function auditLog(env: Environment, session: AgentSession, input: AuditLo
 /** Read recent audit entries, optionally filtered by room. */
 export function auditRead(
   env: Environment,
-  options: { room?: string; limit?: number } = {},
+  options: { room?: string; agentId?: string; sessionId?: string; limit?: number } = {},
 ): AuditEntry[] {
-  const limit = options.limit ?? 50;
+  // Non-negative: SQLite treats a negative LIMIT as "no limit".
+  const limit = Math.max(0, Math.trunc(options.limit ?? 50));
   const db = auditDb(env);
-  const rows = options.room
-    ? (db
-        .query("SELECT * FROM audit_log WHERE room = ? ORDER BY timestamp DESC LIMIT ?")
-        .all(options.room, limit) as AuditRow[])
-    : (db.query("SELECT * FROM audit_log ORDER BY timestamp DESC LIMIT ?").all(limit) as AuditRow[]);
+  const where: string[] = [];
+  const params: Array<string | number> = [];
+  if (options.room) {
+    where.push("room = ?");
+    params.push(options.room);
+  }
+  if (options.agentId !== undefined) {
+    where.push("agent_id = ?");
+    params.push(options.agentId);
+  }
+  if (options.sessionId !== undefined) {
+    where.push("session_id = ?");
+    params.push(options.sessionId);
+  }
+  const rows = db
+    .query(`SELECT * FROM audit_log${where.length ? ` WHERE ${where.join(" AND ")}` : ""} ORDER BY timestamp DESC LIMIT ?`)
+    .all(...params, limit) as AuditRow[];
   return rows.map(rowToAudit);
 }
 
@@ -428,6 +555,10 @@ export interface CreateSessionOptions {
   env?: Environment;
   sessionId?: string;
   createdAt?: number;
+  /** See {@link AgentSessionInit.strictRoom}. */
+  strictRoom?: boolean;
+  /** See {@link AgentSessionInit.maxSensitivity}. */
+  maxSensitivity?: Sensitivity | null;
 }
 
 /**
@@ -445,6 +576,8 @@ export function createSession(options: CreateSessionOptions): AgentSession {
     capabilities,
     sessionId: options.sessionId,
     createdAt: options.createdAt,
+    ...(options.strictRoom ? { strictRoom: true } : {}),
+    ...(options.maxSensitivity ? { maxSensitivity: options.maxSensitivity } : {}),
   });
 
   if (options.env) {

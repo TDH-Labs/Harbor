@@ -11,6 +11,8 @@
  *
  * Tools (room-gating + budget enforcement happen INSIDE the server, via Phase 3's
  * `gate()` / `checkBudget()` / `spendBudget()` — not in the agent):
+ *   - route_skills(prompt)     Turn-Sieve: the 1-3 skills (5 if cross-domain) that
+ *                              fit a task, from the session's room only
  *   - read_skill(skill_name)   load a skill's SKILL.md, gated + budgeted
  *   - list_skills(room?)       list pool skills for the session's room
  *   - list_rooms()             every configured room's name + description, no
@@ -57,7 +59,10 @@ import {
   createSession,
   normalizeRoomEnv,
   AgentSession,
+  RoomJailViolation,
+  routeTurn,
 } from "harbor-tugboat";
+import { agentFacingReason } from "../src/sensitivity.ts";
 import pkg from "../package.json" with { type: "json" };
 
 /** MCP protocol revision this server implements (verified at build time). */
@@ -132,6 +137,23 @@ export const TOOL_DEFINITIONS = [
         limit: { type: "number", description: "Max results to return (default 5, max 50)." },
       },
       required: ["query"],
+    },
+  },
+  {
+    name: "route_skills",
+    description:
+      "Pick the 1-3 skills (up to 5 when the task spans domains) from THIS room that best fit " +
+      "the task you are about to do. Call it at the start of a task and whenever the topic " +
+      "changes, then activate_skill what it names. Uses the System One router when reachable, " +
+      "otherwise keyword matching; the answer says which. Returns names and one-line " +
+      "descriptions only, so it costs a few dozen tokens instead of listing the whole room.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        prompt: { type: "string", description: "The task or user request you are about to work on." },
+        room: { type: "string", description: "Optional room override (defaults to the session room)." },
+      },
+      required: ["prompt"],
     },
   },
   {
@@ -220,6 +242,12 @@ export interface McpServerOptions {
   resolveContext?: (request: JsonRpcRequest) => GateContext;
   /** Process env to read AGENT_ENV_ROOM / AGENT_ENV_SESSION from (default `process.env`). */
   procEnv?: Record<string, string | undefined>;
+  /**
+   * Honor `[system_one] url` from the session's config (default true). Harbor
+   * Server sets false: a tenant-editable URL would make the server issue
+   * requests to arbitrary hosts. See {@link routeTurn}.
+   */
+  trustConfigSystemOneUrl?: boolean;
 }
 
 export interface McpServer {
@@ -245,6 +273,10 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
   const readSkillGated = gate("read_skill", readSkillImpl);
   const listSkillsGated = gate("list_skills", listSkillsImpl);
   const searchSkillsGated = gate("search_skills", searchSkillsImpl);
+  // Routing is a room-scoped search variant, so it rides the same capability.
+  const routeSkillsGated = gate("search_skills", (prompt: string, room?: string) =>
+    routeSkillsImpl(prompt, room, options.trustConfigSystemOneUrl ?? true),
+  );
   const activateSkillGated = gate("activate_skill", activateSkillImpl);
   const deactivateSkillGated = gate("deactivate_skill", deactivateSkillImpl);
 
@@ -256,6 +288,12 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
         const room = typeof args.room === "string" && args.room ? args.room : undefined;
         const limit = typeof args.limit === "number" ? args.limit : 5;
         return searchSkillsGated(query, room, limit);
+      }
+      case "route_skills": {
+        const prompt = typeof args.prompt === "string" ? args.prompt.trim() : "";
+        if (!prompt) return errorResult("route_skills: prompt is required.");
+        const room = typeof args.room === "string" && args.room ? args.room : undefined;
+        return routeSkillsGated(prompt, room);
       }
       case "activate_skill": {
         const skill = typeof args.skill_name === "string" ? args.skill_name.trim() : "";
@@ -324,7 +362,8 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
               serverInfo: SERVER_INFO,
               instructions:
                 "This channel has curated skills for the work done here. BEFORE you start " +
-                "a task, call list_skills to see what's available, and read_skill to load any " +
+                "a task, call route_skills with the task to get the few skills that fit " +
+                "(or list_skills to see everything), and read_skill to load any " +
                 "whose description fits — a matching skill's instructions are authoritative, so " +
                 "prefer following one over improvising. Skills are gated by room and token " +
                 "budget; denials and budget limits are enforced server-side and surfaced as " +
@@ -387,6 +426,8 @@ async function safeDispatch(
     return await dispatch(name, args);
   } catch (err) {
     if (err instanceof AccessDeniedError) return errorResult(`access denied: ${err.message}`);
+    // Already prefixed "HARBOR ROOM JAIL VIOLATION" — do not double-wrap it.
+    if (err instanceof RoomJailViolation) return errorResult(err.message);
     if (err instanceof BudgetExceededError) return errorResult(`budget exceeded: ${err.message}`);
     return errorResult(`tool error: ${messageOf(err)}`);
   }
@@ -403,11 +444,11 @@ async function searchSkillsImpl(
   const { env, session } = currentGateContext();
   if (roomOverride && roomOverride !== session.room && !session.has(Capability.ADMIN)) {
     const reason = `room '${session.room}' may not search skills for room '${roomOverride}'`;
-    audit.deny(session.sessionId, "search_skills", roomOverride, reason, { room: session.room, env });
+    audit.deny(session.sessionId, "search_skills", roomOverride, reason, { room: session.room, agentId: session.agentId, env });
     return errorResult(`access denied: ${reason}.`);
   }
   const room = roomOverride ?? session.room;
-  const results = searchSkills(env, query, room, limit);
+  const results = searchSkills(env, query, room, limit, (sk) => session.sensitivityAllowed(env, sk.name, room));
   if (results.length === 0) {
     return text(`No skills matched query '${query}' in room '${room}'.`);
   }
@@ -417,6 +458,30 @@ async function searchSkillsImpl(
   }
   lines.push("", "To load a skill sequentially, call: activate_skill({ skill_name: '<name>' })");
   return text(lines.join("\n"));
+}
+
+/** Route a turn to the room's 1-3 most relevant skills (Turn-Sieve; see turn-sieve.ts). */
+async function routeSkillsImpl(
+  prompt: string,
+  roomOverride: string | undefined,
+  trustConfigUrl: boolean,
+): Promise<ToolResult> {
+  const r = await routeTurn(currentGateContext(), prompt, roomOverride, { trustConfigUrl });
+  return r.ok ? text(r.text) : errorResult(r.text);
+}
+
+/**
+ * Charge the caller's delivery quota for `tokens` of skill content. Returns the
+ * refusal to send back INSTEAD of the content (audited as a denial), or null to
+ * proceed. Harbor Core has no quota; Harbor Server sets one per person.
+ */
+function quotaRefusal(tool: string, skillName: string, tokens: number): ToolResult | null {
+  const { env, session, quota } = currentGateContext();
+  if (!quota) return null;
+  const q = quota.charge(tokens);
+  if (q.ok) return null;
+  audit.deny(session.sessionId, tool, skillName, q.reason, { room: session.room, agentId: session.agentId, env });
+  return errorResult(`quota exceeded: ${q.reason}`);
 }
 
 /** Activate a skill for sequential execution, debiting the budget and setting session activeSkill. */
@@ -433,6 +498,7 @@ async function activateSkillImpl(skillName: string): Promise<ToolResult> {
   if (!check.ok) {
     audit.deny(session.sessionId, "activate_skill", skillName, check.reason ?? "budget exceeded", {
       room: session.room,
+      agentId: session.agentId,
       env,
     });
     return errorResult(
@@ -441,11 +507,15 @@ async function activateSkillImpl(skillName: string): Promise<ToolResult> {
     );
   }
 
+  const refused = quotaRefusal("activate_skill", skillName, tokens);
+  if (refused) return refused;
+
   spendBudget(session.sessionId, `skill:${skillName}`, tokens, budgetOpts);
   session.activeSkill = skillName;
   session.activeSkillStartedAt = Date.now() / 1000;
   audit.allow(session.sessionId, "activate_skill", skillName, `activated ${tokens} tokens`, {
     room: session.room,
+    agentId: session.agentId,
     env,
   });
 
@@ -487,6 +557,7 @@ async function deactivateSkillImpl(): Promise<ToolResult> {
   session.activeSkillStartedAt = null;
   audit.allow(session.sessionId, "deactivate_skill", previous ?? "none", "deactivated skill", {
     room: session.room,
+    agentId: session.agentId,
     env,
   });
   return text(
@@ -510,6 +581,7 @@ async function readSkillImpl(skillName: string): Promise<ToolResult> {
   if (!check.ok) {
     audit.deny(session.sessionId, "read_skill", skillName, check.reason ?? "budget exceeded", {
       room: session.room,
+      agentId: session.agentId,
       env,
     });
     return errorResult(
@@ -518,10 +590,14 @@ async function readSkillImpl(skillName: string): Promise<ToolResult> {
     );
   }
 
+  const refused = quotaRefusal("read_skill", skillName, tokens);
+  if (refused) return refused;
+
   // Pre-check passed; debit. trySpend re-enforces the gate atomically.
   spendBudget(session.sessionId, `skill:${skillName}`, tokens, budgetOpts);
   audit.allow(session.sessionId, "read_skill", skillName, `loaded ${tokens} tokens`, {
     room: session.room,
+    agentId: session.agentId,
     env,
   });
   return text(detail.content);
@@ -537,11 +613,11 @@ async function listSkillsImpl(roomOverride?: string): Promise<ToolResult> {
   // guard `list_skills(room='legal')` from a marketing session leaks legal's pool.
   if (roomOverride && roomOverride !== session.room && !session.has(Capability.ADMIN)) {
     const reason = `room '${session.room}' may not list skills for room '${roomOverride}'`;
-    audit.deny(session.sessionId, "list_skills", roomOverride, reason, { room: session.room, env });
+    audit.deny(session.sessionId, "list_skills", roomOverride, reason, { room: session.room, agentId: session.agentId, env });
     return errorResult(`access denied: ${reason}.`);
   }
   const room = roomOverride ?? session.room;
-  const skills = listSkills(env, room);
+  const skills = session.filterVisible(env, listSkills(env, room), room);
   if (skills.length === 0) {
     return text(`No skills available in room '${room}'.`);
   }
@@ -554,14 +630,13 @@ async function listSkillsImpl(roomOverride?: string): Promise<ToolResult> {
 }
 
 /**
- * Every configured room's name and description. Deliberately NOT gate()-wrapped
- * or room-scoped (same precedent as budget_status/audit_recent below) — room
- * names and descriptions are non-sensitive metadata already visible via `harbor
- * isolation rooms`; only skill CONTENT within a room is access-controlled.
+ * Every configured room's name and description — for a Core session. A Harbor Server
+ * session sees only its own room: which other rooms exist in a tenant (and what they
+ * are called) says who is working on what.
  */
 function listRoomsImpl(): ToolResult {
-  const { env } = currentGateContext();
-  const rooms = Object.entries(env.config.roomSkills);
+  const { env, session } = currentGateContext();
+  const rooms = Object.entries(env.config.roomSkills).filter(([room]) => !session.strictRoom || room === session.room);
   if (rooms.length === 0) return text("No rooms configured.");
   const lines = rooms.map(([room, data]) => `- ${room}: ${data.description || "(no description)"}`);
   return text(["Configured rooms:", "", ...lines].join("\n"));
@@ -581,14 +656,37 @@ function budgetStatusImpl(): ToolResult {
   );
 }
 
-/** Recent audit entries scoped to the session's room. */
+/**
+ * Recent audit entries for the session's room.
+ *
+ * A session that has an identity (every Harbor Server session) is shown only the rows
+ * of THIS SESSION — not its person's, because one person can hold several credentials
+ * at once (a capped bring-your-own token and a house agent acting for them), and what
+ * the uncapped one loaded must not be readable by the capped one. It also needs the
+ * `audit_read` capability, which no room holds by default, so the operator can leave
+ * it off entirely. A session with no identity (Harbor Core, one operator) keeps the
+ * room-wide view. Sensitivity denials are shown in the words the agent was given at
+ * the time, and `limit` is bounded.
+ */
 function auditRecentImpl(limit: number): ToolResult {
   const { env, session } = currentGateContext();
-  const entries = audit.recent({ env, room: session.room, limit });
+  if (session.strictRoom && !session.has(Capability.AUDIT_READ)) {
+    const reason = `session lacks capability '${Capability.AUDIT_READ}'`;
+    audit.deny(session.sessionId, "audit_recent", "", reason, { room: session.room, agentId: session.agentId, env });
+    return errorResult(`access denied: ${reason}.`);
+  }
+  const n = Math.min(100, Math.max(1, Math.trunc(Number.isFinite(limit) ? limit : 10)));
+  const entries = audit.recent({
+    env,
+    room: session.room,
+    ...(session.agentId ? { sessionId: session.sessionId } : {}),
+    limit: n,
+  });
   if (entries.length === 0) return text(`No audit entries for room '${session.room}'.`);
-  const lines = entries.map(
-    (e) => `${e.decision.padEnd(7)} ${e.capability || e.event} ${e.resource}${e.reason ? ` — ${e.reason}` : ""}`,
-  );
+  const lines = entries.map((e) => {
+    const reason = agentFacingReason(e.reason, session.room);
+    return `${e.decision.padEnd(7)} ${e.capability || e.event} ${e.resource}${reason ? ` — ${reason}` : ""}`;
+  });
   return text(lines.join("\n"));
 }
 
