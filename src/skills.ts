@@ -881,7 +881,8 @@ export function matchSkillsDeterministically(
 
 /**
  * Route relevant skills and tools for an agent turn.
- * Calls daemon at http://127.0.0.1:8000/v1/route-skills with sub-50ms timeout.
+ * Calls daemon at http://127.0.0.1:8150/v1/route-skills with sub-50ms timeout.
+ * (Port 8000 is reserved exclusively for Reachy Mini).
  * Falls back gracefully to deterministic keyword matching if daemon is unreachable or times out.
  */
 export async function routeSkillsForTurn(
@@ -897,7 +898,7 @@ export async function routeSkillsForTurn(
   const endpoint =
     options?.endpoint ??
     process.env.HARBOR_ROUTE_SKILLS_ENDPOINT ??
-    "http://127.0.0.1:8000/v1/route-skills";
+    "http://127.0.0.1:8150/v1/route-skills";
   const timeoutMs = options?.timeoutMs ?? 45;
 
   try {
