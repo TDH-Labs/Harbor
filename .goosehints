@@ -1,0 +1,18 @@
+# Project Hints: Agent Env Public
+
+## Overview
+Public-facing version of the agent-environment package (PyPI: agent-environment).
+
+## Structure
+- `agent_env/` — Python package for multi-agent environment management
+- `bun.lock`, `bunfig.toml` — Bun runtime config
+- `README.md` — Public docs
+- `LICENSE` — Open source license
+
+## Key Commands
+- `pip install agent-environment` — Install from PyPI
+- `agent-env sync` — Generate beacons
+
+## Rules
+- This is the public OSS version — no internal credentials or secrets
+- Keep documentation generic and reusable
