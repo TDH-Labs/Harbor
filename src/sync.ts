@@ -38,6 +38,9 @@ import {
 import { dirname, join } from "node:path";
 
 import type { Environment } from "./env.ts";
+import { isValidRoomName } from "./config-edit.ts";
+import { roomMcpConfig } from "./mcp.ts";
+import { syncMuseCode } from "./muse-code.ts";
 import { computeAssignments, renderRoomIndex } from "./skills.ts";
 
 /** Ownership marker appended to every home-level beacon. */
@@ -472,11 +475,28 @@ export function runGenerate(env: Environment): GenerateResult {
     );
   }
 
-  // Room skill indexes (config-driven; no-op when no rooms configured).
+  // Room skill indexes and .room-mcp.json (config-driven; no-op when no rooms configured).
   for (const room of Object.keys(env.config.roomSkills)) {
     const p = join(env.rooms, room, "skills_index.md");
     written[p] = writeIfChanged(p, generateRoomIndex(env, room));
+    if (isValidRoomName(room)) {
+      const servers = env.config.roomSkills[room]?.mcp?.servers ?? [];
+      if (servers.length > 0) {
+        const mcpPath = join(env.rooms, room, ".room-mcp.json");
+        written[mcpPath] = writeIfChanged(
+          mcpPath,
+          JSON.stringify(roomMcpConfig(servers), null, 2) + "\n",
+        );
+      }
+    }
   }
+
+  // Muse Code: keep its room-scoped skill activation in line with the
+  // pool (no-op when Muse is not installed on this machine). The watcher
+  // runs runGenerate on pool changes, so Muse never drifts back to loading
+  // the whole pool after a skill-install/remove.
+  const muse = syncMuseCode(env);
+  if (muse.action === "synced") written[muse.path] = muse.changed;
   return { written };
 }
 

@@ -66,6 +66,8 @@ import { addSkillToAnotherRoom, listConfiguredRooms, roomsForSkill } from "./ski
 import { update as updateSkill, removeSkill } from "./skill-update.ts";
 import { canPrompt, confirmAction, pickRooms } from "./room-picker.ts";
 import { AGENT_IDS, agentConfigPaths, applyConfig, emitSnippet, type AgentId } from "./install.ts";
+import { computeMuseActivation, museInstalled, persistMuseRoom, resolveMuseRoom } from "./muse-code.ts";
+import { getAllSkillNames } from "./skills.ts";
 import { analyzeIsolation, formatReport } from "./isolation-doctor.ts";
 import { findSensitive, planPack, writePack } from "./buzz-pack.ts";
 import {
@@ -644,6 +646,11 @@ const checkCmd = defineCommand({
       const more = dups.length > 5 ? ` (+${dups.length - 5} more)` : "";
       warn(`${dups.length} skill(s) resolve from more than one pool — first match wins: ${sample}${more}`);
     }
+    if (museInstalled(env.root)) {
+      const room = resolveMuseRoom(env);
+      const act = computeMuseActivation(env, room);
+      ok(`muse-code scoped to room '${room}' (${act.enabled.length} pool skills on, ${act.disabled.length} off; run 'harbor sync' to refresh)`);
+    }
   },
 });
 
@@ -743,8 +750,10 @@ If the room isn't in config yet but exists on disk
     harbor install --for <agent>          # print the config block (writes nothing)
     harbor install --for <agent> --write  # apply it (backs up the existing file)
 
-Supported <agent>: claude-code, cursor, opencode, codex, gemini, goose,
-antigravity, pi, orchestrator. Each gets its own verified env-substitution
+Supported <agent>: claude-code, muse-code, cursor, opencode, codex, gemini, goose,
+antigravity, pi, orchestrator. Muse Code is the exception to the MCP pattern:
+it discovers the Harbor pool on the filesystem, so Harbor instead maintains
+its room-scoped skills.activation block (harbor sync keeps it fresh). Each gets its own verified env-substitution
 dialect — Antigravity is a DIFFERENT product from the Gemini CLI and has its
 own config file. This wires Harbor's own \`read_skill\`/\`list_skills\`/etc. server —
 it does NOT add a third-party MCP server (AgentPhone, Composio, ...); there is
@@ -1592,25 +1601,42 @@ const mcpServerCmd = defineCommand({
       ...(args.session ? { AGENT_ENV_SESSION: args.session } : {}),
     };
 
-    // ── Per-room singleton ──────────────────────────────────────────────────
-    // A stdio MCP server can't be handed off to a new parent (the pipe is
-    // owned by whoever spawned it), so we can't literally "reuse" a running
-    // instance across a reconnect. What we CAN do: a harness that reconnects
-    // without killing its old child (the observed Goose/oh-my-pi leak) leaves
-    // that child running forever. Reap any stale predecessor for this room
-    // before claiming the slot, so duplicates cap at 1-in-flight instead of
-    // accumulating indefinitely.
+    // ── Per-room orphan reaper ──────────────────────────────────────────────
+    // Multiple MCP clients (e.g. Antigravity IDE + subagents + Claude Code +
+    // `harbor mcp-check --connect`) legitimately run concurrent `harbor mcp-server`
+    // processes in the same room, each owning its own private stdio pipe.
+    // We MUST NOT kill a live predecessor whose parent process (ppid > 1) is
+    // still alive — doing so severs an active client's MCP connection. We only
+    // reap a predecessor if it has been orphaned (reparented to launchd/init,
+    // ppid === 1). Active servers exit naturally on stdin EOF or idleTimer.
     const roomKey = args.room ?? procEnv.AGENT_ENV_ROOM ?? "default";
     const pidfile = new PidFile(join(env.stateDir, "mcp-server", `${roomKey}.pid`));
     const stalePid = pidfile.read();
+    let predecessorAliveWithParent = false;
     if (stalePid !== null && stalePid !== process.pid && pidfile.isRunning()) {
+      let ppid = -1;
       try {
-        process.kill(stalePid, "SIGTERM");
+        const out = Bun.spawnSync(["ps", "-o", "ppid=", "-p", String(stalePid)], {
+          stdout: "pipe",
+          stderr: "ignore",
+        });
+        ppid = Number.parseInt(out.stdout.toString().trim(), 10);
       } catch {
-        // already gone
+        ppid = -1;
+      }
+      if (ppid === 1) {
+        try {
+          process.kill(stalePid, "SIGTERM");
+        } catch {
+          // already gone
+        }
+      } else if (ppid > 1) {
+        predecessorAliveWithParent = true;
       }
     }
-    pidfile.write(process.pid);
+    if (!predecessorAliveWithParent) {
+      pidfile.write(process.pid);
+    }
     let cleaned = false;
     const cleanup = () => {
       if (cleaned) return;
@@ -1698,9 +1724,32 @@ const installCmd = defineCommand({
       // literal value; the rest ignore it. Resolved here, not inside
       // install.ts, so that module stays free of an Environment dependency.
       room: args.room ?? envFromArgs(args).config.skillDefaultRoom,
+      // Muse Code has no MCP entry to emit: its integration is the
+      // room-scoped skills.activation block computed from the live pool
+      // (muse-code.ts). Resolved here so install.ts stays environment-free.
+      ...(agent === "muse-code"
+        ? (() => {
+            const env = envFromArgs(args);
+            const room = resolveMuseRoom(env, args.room);
+            const act = computeMuseActivation(env, room);
+            return {
+              room,
+              muse: { room, pool: getAllSkillNames(env), user: act.user, project: act.project, projectRoot: env.root },
+            };
+          })()
+        : {}),
     };
     if (args.write) {
       const r = applyConfig(agent, { ...opts, ...(args.path ? { path: args.path } : {}) });
+      if (agent === "muse-code") {
+        // Record the room so `harbor sync` (and the watcher) keep Muse
+        // scoped to it instead of reverting to the configured default.
+        persistMuseRoom(envFromArgs(args), (opts as { room: string }).room);
+        const muse = (opts as { muse: { room: string; user: Record<string, string> } }).muse;
+        console.log(
+          `install: muse-code scoped to room '${muse.room}' (${Object.keys(muse.user).length} pool skills disabled; harbor sync keeps this fresh)`,
+        );
+      }
       if (r.action === "unchanged") {
         console.log(`install: ${agent} already configured at ${r.path} (no change)`);
       } else {
@@ -3048,6 +3097,42 @@ const serviceCmd = defineCommand({
 
 // ── Root command ──────────────────────────────────────────────────────────────
 
+const agyIndexCmd = defineCommand({
+  meta: {
+    name: "agy-index",
+    description: "Antigravity cross-session TOC & Index engine (rebuild, search, show, stats)",
+  },
+  args: {
+    action: {
+      type: "positional",
+      required: false,
+      description: "Subcommand (rebuild | search | show | stats) or search query",
+    },
+    target: {
+      type: "positional",
+      required: false,
+      description: "Query string (for search) or session UUID prefix (for show)",
+    },
+    incremental: { type: "boolean", description: "Incremental rebuild" },
+    toc: { type: "boolean", description: "Show session TOC.md" },
+    index: { type: "boolean", description: "Show session INDEX.md" },
+    both: { type: "boolean", description: "Show both TOC.md and INDEX.md" },
+    limit: { type: "string", description: "Max search results" },
+    json: { type: "boolean", description: "Output structured JSON" },
+  },
+  run({ rawArgs }) {
+    const bin = join(defaultHome(), ".local", "bin", "agy-index");
+    const proc = Bun.spawnSync([bin, ...rawArgs], {
+      stdout: "inherit",
+      stderr: "inherit",
+      stdin: "inherit",
+    });
+    if (proc.exitCode !== 0) {
+      process.exitCode = proc.exitCode ?? 1;
+    }
+  },
+});
+
 export const main: CommandDef = defineCommand({
   meta: {
     name: "harbor",
@@ -3101,6 +3186,7 @@ export const main: CommandDef = defineCommand({
     label: labelCmd,
     proposal: proposalCmd,
     service: serviceCmd,
+    "agy-index": agyIndexCmd,
   },
 });
 

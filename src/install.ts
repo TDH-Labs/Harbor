@@ -46,6 +46,7 @@ import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 
 export type AgentId =
   | "claude-code"
+  | "muse-code"
   | "cursor"
   | "opencode"
   | "codex"
@@ -57,6 +58,7 @@ export type AgentId =
 
 export const AGENT_IDS: readonly AgentId[] = [
   "claude-code",
+  "muse-code",
   "cursor",
   "opencode",
   "codex",
@@ -68,7 +70,7 @@ export const AGENT_IDS: readonly AgentId[] = [
 ];
 
 /** Wire format of an agent's config — drives both emission and `--write` merge. */
-export type ConfigFormat = "json-mcpServers" | "json-mcp" | "toml" | "yaml" | "typescript" | "yaml-orchestrator";
+export type ConfigFormat = "json-mcpServers" | "json-mcp" | "toml" | "yaml" | "typescript" | "yaml-orchestrator" | "json-muse-settings";
 
 export interface EmitOptions {
   /** Server command (default "harbor"). */
@@ -100,6 +102,13 @@ export interface EmitOptions {
    * room (the CLI does).
    */
   room?: string;
+  /**
+   * Muse Code only: the precomputed room-scoped activation maps (see
+   * muse-code.ts). Muse discovers the whole Harbor pool on the filesystem,
+   * so its "config" is an activation allowlist, not an MCP server entry. The
+   * CLI computes this from the live pool; install.ts stays environment-free.
+   */
+  muse?: { room: string; pool: string[]; user: Record<string, string>; project: Record<string, string>; projectRoot: string };
 }
 
 export interface InstallSnippet {
@@ -163,6 +172,29 @@ const AGENTS: Record<AgentId, AgentSpec> = {
       `Project scope: add the block to ./.mcp.json (top-level "mcpServers").`,
       `Or use the CLI: claude mcp add-json ${serverName} '<the JSON object above>'`,
       `Verify with: claude mcp list`,
+    ],
+  },
+  // Muse Code reads skills from the filesystem ($HOME/.agents/skills is
+  // its user-skills dir — Harbor's pool), so there is no MCP server to wire:
+  // Harbor instead maintains the room-scoped skills.activation block in
+  // Muse's own settings.json (see muse-code.ts). `harbor sync` refreshes it
+  // whenever the pool changes; this install entry applies it once and records
+  // the chosen room.
+  "muse-code": {
+    tier: 1,
+    format: "json-muse-settings",
+    pathFromHome: [".config", "muse", "settings.json"],
+    envSyntax: "literal",
+    extraInstructions: () => [
+      `Merge the skills.activation block into ~/.config/muse/settings.json`,
+      `(create the file with it if needed). It disables every Harbor pool skill`,
+      `outside the target room at BOTH user scope ($HOME/.agents/skills/...) and`,
+      `home-root project scope (.agents/skills/...) — a trusted home-root`,
+      `workspace reports the pool as project skills and ignores user entries.`,
+      `Pool skills in the room get no entry (Muse defaults to on). Bundled and`,
+      `plugin skills are not Harbor's and are never touched.`,
+      `Re-run with --room <room> to re-scope; harbor sync keeps the maps fresh`,
+      `as skills are installed or removed.`,
     ],
   },
   cursor: {
@@ -352,6 +384,11 @@ const ENFORCEMENT_NOTE =
   "level boundary, not an OS sandbox — an agent with raw filesystem access can still " +
   "read skill files directly.";
 
+const MUSE_NOTE =
+  "Note: this scopes which Harbor pool skills Muse Code auto-loads (its native " +
+  "filesystem discovery), using Muse's own activation settings. It does not move " +
+  "or modify the shared pool, and no other agent's config is touched.";
+
 /** Build the config snippet + guidance for one agent. */
 export function emitSnippet(agent: AgentId, options: EmitOptions = {}): InstallSnippet {
   const spec = AGENTS[agent];
@@ -365,11 +402,11 @@ export function emitSnippet(agent: AgentId, options: EmitOptions = {}): InstallS
   const rooms = options.rooms ?? [];
   const room = options.room ?? "general";
   const snippet = renderSnippet(spec.format, {
-    command, args, serverName, rooms, room, envSyntax: spec.envSyntax,
+    command, args, serverName, rooms, room, envSyntax: spec.envSyntax, muse: options.muse,
   });
   const lines: string[] = [`Add to ${defaultPath}:`];
   if (spec.extraInstructions) lines.push(...spec.extraInstructions({ command, args, serverName }));
-  lines.push(ENFORCEMENT_NOTE);
+  lines.push(agent === "muse-code" ? MUSE_NOTE : ENFORCEMENT_NOTE);
 
   return { agent, tier: spec.tier, format: spec.format, defaultPath, snippet, instructions: lines.join("\n") };
 }
@@ -386,6 +423,8 @@ export function renderSnippet(
     /** The agent's verified substitution syntax; two agents can share a format
      *  but differ here (claude-code and cursor are both json-mcpServers). */
     envSyntax?: EnvSyntax;
+    /** Muse Code only: precomputed activation maps (see {@link EmitOptions.muse}). */
+    muse?: EmitOptions["muse"];
   },
 ): string {
   const { command, args, serverName, rooms = [], room = "general", envSyntax = "shell" } = ctx;
@@ -430,6 +469,14 @@ export function renderSnippet(
         'export { default } from "harbor-tugboat/integrations/pi";',
         "",
       ].join("\n");
+    case "json-muse-settings": {
+      const muse = ctx.muse ?? { room, pool: [], user: {}, project: {}, projectRoot: "" };
+      return JSON.stringify(
+        { skills: { activation: { user: muse.user, projects: { [muse.projectRoot]: muse.project } } } },
+        null,
+        2,
+      );
+    }
     case "yaml-orchestrator":
       return renderOrchestratorMcpServers(serverName, command, args, rooms, 0);
     default:
@@ -550,6 +597,7 @@ export function applyConfig(agent: AgentId, options: ApplyOptions = {}): ApplyRe
     rooms: options.rooms ?? [],
     room: options.room ?? "general",
     envSyntax: spec.envSyntax,
+    muse: options.muse,
   });
   if (result.action === "unchanged") {
     return { path, backup: null, action: "unchanged" };
@@ -580,6 +628,7 @@ type MergeFn = (
     rooms?: string[];
     room?: string;
     envSyntax?: EnvSyntax;
+    muse?: EmitOptions["muse"];
   },
 ) => MergeOutcome;
 
@@ -604,6 +653,8 @@ function mergeFor(format: ConfigFormat): MergeFn {
       return (existing, existed, ctx) => mergeToml(existing, existed, ctx);
     case "yaml":
       return (existing, existed, ctx) => mergeGoose(existing, existed, ctx);
+    case "json-muse-settings":
+      return (existing, existed, ctx) => mergeMuseSettings(existing, existed, ctx);
     case "yaml-orchestrator":
       return (existing, existed, ctx) => mergeOrchestrator(existing, existed, ctx.serverName, ctx.command, ctx.args, ctx.rooms ?? []);
     case "typescript":
@@ -637,6 +688,54 @@ function mergeJson(
   section[serverName] = entry;
   doc[topKey] = section;
   return { content: JSON.stringify(doc, null, 2) + "\n", action: existed ? "merged" : "created" };
+}
+
+/**
+ * Merge Muse's room-scoped activation block into settings.json. Only the
+ * pool-skill keys in the precomputed maps are written; room skills get NO
+ * entry (Muse defaults to on), so any stale "off" for a now-in-room skill
+ * under either map is removed. Every other settings key is preserved.
+ */
+function mergeMuseSettings(
+  existing: string,
+  existed: boolean,
+  ctx: { muse?: EmitOptions["muse"] },
+): MergeOutcome {
+  const muse = ctx.muse;
+  if (!muse) return { content: existing, action: "unchanged" };
+  let doc: Record<string, unknown> = {};
+  if (existed && existing.trim()) {
+    const parsed = JSON.parse(existing) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      doc = parsed as Record<string, unknown>;
+    }
+  }
+  const before = JSON.stringify(doc);
+  const root = doc as Record<string, Record<string, unknown>>;
+  const skills = (root.skills ??= {}) as unknown as Record<string, Record<string, Record<string, string>>>;
+  const act = (skills.activation ??= {}) as unknown as Record<string, Record<string, string>>;
+  const user = (act.user ??= {}) as Record<string, string>;
+  const projects = (act.projects ??= {}) as unknown as Record<string, Record<string, string>>;
+  const project = (projects[muse.projectRoot] ??= {}) as Record<string, string>;
+  // Desired state: exactly muse.user / muse.project carry "off"; every other
+  // pool key (in-room skills) must be absent. Keys outside the Harbor pool
+  // key shapes are never touched.
+  for (const [k, v] of Object.entries(muse.user)) user[k] = v;
+  for (const [k, v] of Object.entries(muse.project)) project[k] = v;
+  // Remove stale "off" entries only for skills in Harbor's pool (in-room
+  // skills must default to on). Personal skills a user installed themselves
+  // under the same directory are not Harbor's to re-enable.
+  for (const skill of muse.pool) {
+    const uKey = `$HOME/.agents/skills/${skill}/SKILL.md`;
+    const pKey = `.agents/skills/${skill}/SKILL.md`;
+    if (!(uKey in muse.user)) delete user[uKey];
+    if (!(pKey in muse.project)) delete project[pKey];
+  }
+  if (Object.keys(project).length === 0) delete projects[muse.projectRoot];
+  const content = JSON.stringify(doc, null, 2) + "\n";
+  return JSON.stringify(doc) === before
+    ? { content: existing, action: "unchanged" }
+    : { content, action: existed ? "merged" : "created" };
 }
 
 function mergeToml(
