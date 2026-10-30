@@ -39,30 +39,30 @@ describe("remote (url) MCP servers", () => {
       { name: "a", url: "https://x/mcp" },
       { name: "b", url: "https://y/mcp", type: "sse" },
     ]);
-    expect(cfg.mcpServers.a.type).toBe("http");
-    expect(cfg.mcpServers.b.type).toBe("sse");
+    expect(cfg.mcpServers.a?.type).toBe("http");
+    expect(cfg.mcpServers.b?.type).toBe("sse");
   });
 
   test("headers are carried and stringified", () => {
     const cfg = roomMcpConfig([
       { name: "authed", url: "https://z/mcp", headers: { Authorization: "Bearer x" } },
     ]);
-    expect(cfg.mcpServers.authed.headers).toEqual({ Authorization: "Bearer x" });
+    expect(cfg.mcpServers.authed?.headers).toEqual({ Authorization: "Bearer x" });
   });
 
   test("a url server ignores stale command/args/env rather than merging them", () => {
     const cfg = roomMcpConfig([
       { name: "mixed", url: "https://w/mcp", command: "node", args: ["x"], env: { A: "B" } },
     ]);
-    expect(cfg.mcpServers.mixed.command).toBeUndefined();
-    expect(cfg.mcpServers.mixed.args).toBeUndefined();
-    expect(cfg.mcpServers.mixed.env).toBeUndefined();
+    expect(cfg.mcpServers.mixed?.command).toBeUndefined();
+    expect(cfg.mcpServers.mixed?.args).toBeUndefined();
+    expect(cfg.mcpServers.mixed?.env).toBeUndefined();
   });
 
   test("an empty url is treated as stdio, not a remote server", () => {
     const cfg = roomMcpConfig([{ name: "blank", url: "", command: "node" }]);
-    expect(cfg.mcpServers.blank.url).toBeUndefined();
-    expect(cfg.mcpServers.blank.command).toBe("node");
+    expect(cfg.mcpServers.blank?.url).toBeUndefined();
+    expect(cfg.mcpServers.blank?.command).toBe("node");
   });
 
   test("mixed rooms keep both transports side by side", () => {
@@ -71,7 +71,7 @@ describe("remote (url) MCP servers", () => {
       { name: "remote", url: "https://huggingface.co/mcp" },
     ]);
     expect(Object.keys(cfg.mcpServers).sort()).toEqual(["local", "remote"]);
-    expect(cfg.mcpServers.local.command).toBe("node");
-    expect(cfg.mcpServers.remote.url).toBe("https://huggingface.co/mcp");
+    expect(cfg.mcpServers.local?.command).toBe("node");
+    expect(cfg.mcpServers.remote?.url).toBe("https://huggingface.co/mcp");
   });
 });
