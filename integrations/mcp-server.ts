@@ -63,6 +63,8 @@ import {
   routeTurn,
 } from "harbor-tugboat";
 import { agentFacingReason } from "../src/sensitivity.ts";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import pkg from "../package.json" with { type: "json" };
 
 /** MCP protocol revision this server implements (verified at build time). */
@@ -226,6 +228,63 @@ export const TOOL_DEFINITIONS = [
       },
     },
   },
+  {
+    name: "agy_session_search",
+    description:
+      "Search across all Antigravity sessions, artifacts, files touched, and SQLite FTS5 " +
+      "history using the parallel Rust agy-index engine.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "Search keyword, file path, topic, or FTS5 query (e.g. 'DCWI', 'VibeHard', 'verify.py').",
+        },
+        limit: { type: "number", description: "Max results to return (default 15, max 50)." },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "agy_session_toc",
+    description:
+      "Read the Table of Contents (TOC.md) or detailed Index (INDEX.md) for a specific " +
+      "Antigravity session ID/prefix, or the Master cross-session TOC.md / INDEX.md when " +
+      "conversation_id is 'master' or omitted.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        conversation_id: {
+          type: "string",
+          description: "Session UUID, prefix (e.g. 'aa0b8a02'), or 'master' (default 'master').",
+        },
+        session: {
+          type: "string",
+          description: "Optional alias for conversation_id (Session UUID, prefix, or 'master').",
+        },
+        view: {
+          type: "string",
+          enum: ["toc", "index", "both"],
+          description: "Which view to return: 'toc' (default), 'index', or 'both'.",
+        },
+      },
+    },
+  },
+  {
+    name: "agy_session_rebuild",
+    description:
+      "Trigger a fast parallel Rust rebuild of all per-session and Master Antigravity " +
+      "TOC.md and INDEX.md files via agy-index.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        incremental: {
+          type: "boolean",
+          description: "Only rewrite session files whose transcript.jsonl is newer than TOC.md (default false).",
+        },
+      },
+    },
+  },
 ] as const;
 
 // ── Server ───────────────────────────────────────────────────────────────────
@@ -318,6 +377,27 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
       case "audit_recent": {
         const limit = typeof args.limit === "number" ? args.limit : 10;
         return auditRecentImpl(limit);
+      }
+      case "agy_session_search": {
+        const query = typeof args.query === "string" ? args.query.trim() : "";
+        if (!query) return errorResult("agy_session_search: query is required.");
+        const limit = typeof args.limit === "number" ? Math.min(Math.max(1, args.limit), 50) : 15;
+        return runAgyIndex(["search", query, "--limit", String(limit)]);
+      }
+      case "agy_session_toc": {
+        const rawCid =
+          (typeof args.conversation_id === "string" && args.conversation_id.trim()) ||
+          (typeof args.session === "string" && args.session.trim()) ||
+          (typeof args.id === "string" && args.id.trim()) ||
+          "";
+        const cid = rawCid || "master";
+        const view = typeof args.view === "string" ? args.view : "toc";
+        const flag = view === "index" ? "--index" : view === "both" ? "--both" : "--toc";
+        return runAgyIndex(["show", cid, flag]);
+      }
+      case "agy_session_rebuild": {
+        const inc = Boolean(args.incremental);
+        return runAgyIndex(inc ? ["rebuild", "--incremental"] : ["rebuild"]);
       }
       default:
         return errorResult(`unknown tool: ${name}`);
@@ -688,6 +768,21 @@ function auditRecentImpl(limit: number): ToolResult {
     return `${e.decision.padEnd(7)} ${e.capability || e.event} ${e.resource}${reason ? ` — ${reason}` : ""}`;
   });
   return text(lines.join("\n"));
+}
+
+/** Invoke the standalone Rust agy-index binary for session search, TOC read, or rebuild. */
+function runAgyIndex(cliArgs: string[]): ToolResult {
+  const bin = join(homedir(), ".local", "bin", "agy-index");
+  const proc = Bun.spawnSync([bin, ...cliArgs], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const out = proc.stdout.toString().trim();
+  const err = proc.stderr.toString().trim();
+  if (proc.exitCode !== 0) {
+    return errorResult(`agy-index failed (exit ${proc.exitCode}): ${err || out}`);
+  }
+  return text(out || "(completed with empty output)");
 }
 
 // ── Context resolution ───────────────────────────────────────────────────────

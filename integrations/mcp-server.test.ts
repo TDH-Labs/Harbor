@@ -113,6 +113,9 @@ describe("MCP protocol", () => {
     const names = result.tools.map((t) => t.name).sort();
     expect(names).toEqual([
       "activate_skill",
+      "agy_session_rebuild",
+      "agy_session_search",
+      "agy_session_toc",
       "audit_recent",
       "budget_status",
       "deactivate_skill",

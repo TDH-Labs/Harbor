@@ -226,7 +226,9 @@ describe("de-personalization", () => {
       // Tier 2 (typescript) has no config env block; the orchestrator emits one
       // connection PER ROOM and so emits an empty placeholder when this loop
       // passes it none — both are covered by their own snapshot tests above.
-      if (s.format !== "typescript" && s.format !== "yaml-orchestrator") {
+      // Muse Code (json-muse-settings) likewise has no env block: its
+      // snippet is a skills.activation map, covered by its own tests below.
+      if (s.format !== "typescript" && s.format !== "yaml-orchestrator" && s.format !== "json-muse-settings") {
         expect(s.snippet).toContain("AGENT_ENV_ROOM");
         // The only literal room that may be baked in is the harmless generic
         // default. Emitting for a specific room is opt-in via `room`, tested
@@ -448,14 +450,75 @@ describe("applyConfig — create, merge, backup, idempotent", () => {
   });
 });
 
+// ── Muse Code: room-scoped activation, not an MCP entry ────────────────────
+
+const MUSE_OPTS = {
+  room: "productivity",
+  pool: ["alpha", "beta"],
+  user: { "$HOME/.agents/skills/beta/SKILL.md": "off" },
+  project: { ".agents/skills/beta/SKILL.md": "off" },
+};
+
+describe("muse-code install", () => {
+  test("emit: settings snippet carries the activation maps, no mcpServers", () => {
+    const s = emitSnippet("muse-code", { home, muse: { ...MUSE_OPTS, projectRoot: home } });
+    const doc = JSON.parse(s.snippet);
+    expect(doc.mcpServers).toBeUndefined();
+    expect(doc.skills.activation.user["$HOME/.agents/skills/beta/SKILL.md"]).toBe("off");
+    expect(doc.skills.activation.projects[home][".agents/skills/beta/SKILL.md"]).toBe("off");
+    expect(s.defaultPath).toBe(join(home, ".config", "muse", "settings.json"));
+    expect(s.instructions).toContain("harbor sync keeps the maps fresh");
+  });
+
+  test("apply: merges into existing settings, preserves other keys, idempotent", () => {
+    const p = join(home, ".config", "muse", "settings.json");
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, JSON.stringify({ schema_version: 1, provider: "meta" }) + "\n");
+    const opts = { home, muse: { ...MUSE_OPTS, projectRoot: home } };
+    const r = applyConfig("muse-code", opts);
+    expect(r.action).toBe("merged");
+    expect(r.backup).not.toBeNull();
+    const doc = JSON.parse(readFileSync(p, "utf8"));
+    expect(doc.provider).toBe("meta");
+    expect(doc.skills.activation.user["$HOME/.agents/skills/beta/SKILL.md"]).toBe("off");
+    expect(applyConfig("muse-code", opts).action).toBe("unchanged");
+  });
+
+  test("apply: re-scoping to another room removes the stale off", () => {
+    const opts = { home, muse: { ...MUSE_OPTS, projectRoot: home } };
+    applyConfig("muse-code", opts);
+    const p = join(home, ".config", "muse", "settings.json");
+    const rescoped = {
+      home,
+      muse: {
+        room: "legal",
+        pool: ["alpha", "beta"],
+        user: { "$HOME/.agents/skills/alpha/SKILL.md": "off" },
+        project: { ".agents/skills/alpha/SKILL.md": "off" },
+        projectRoot: home,
+      },
+    };
+    applyConfig("muse-code", rescoped);
+    const doc = JSON.parse(readFileSync(p, "utf8"));
+    expect(doc.skills.activation.user["$HOME/.agents/skills/beta/SKILL.md"]).toBeUndefined();
+    expect(doc.skills.activation.user["$HOME/.agents/skills/alpha/SKILL.md"]).toBe("off");
+  });
+});
+
 // ── every agent emits + applies without throwing ───────────────────────────--
 
-describe("coverage: all eight agents", () => {
+describe("coverage: all agents", () => {
   test("emit + write succeed for every agent id", () => {
     for (const agent of AGENT_IDS as AgentId[]) {
       // The orchestrator target needs rooms to actually have something to
-      // write; every other agent ignores the option.
-      const opts = agent === "orchestrator" ? { home, rooms: ["legal", "devops"] } : { home };
+      // write; muse-code needs its precomputed activation maps. Every other
+      // agent ignores these options.
+      const opts =
+        agent === "orchestrator"
+          ? { home, rooms: ["legal", "devops"] }
+          : agent === "muse-code"
+            ? { home, muse: { ...MUSE_OPTS, projectRoot: home } }
+            : { home };
       const s = emitSnippet(agent, opts);
       expect(s.snippet.length).toBeGreaterThan(0);
       const r = applyConfig(agent, opts);
