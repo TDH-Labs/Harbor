@@ -59,7 +59,7 @@ export interface RawRoom {
 
 export interface RawConfig {
   schema_version: string;
-  paths: { home: string; skills_dir: string; state_dir: string };
+  paths: { home: string; skills_dir: string | string[]; state_dir: string };
   discovery: {
     scan_home: boolean;
     skip_dirs: string[];
@@ -392,8 +392,20 @@ export class Config {
   get homeTemplate(): string {
     return this.data.paths.home;
   }
+  /**
+   * Skill pool path(s). Accepts a single string (legacy) or a list. A list lets
+   * one room resolve its own `~/.agents/skills`-style directories AND the shared
+   * pool, which is what room-local skill trees require. Order is precedence:
+   * the first path that contains a skill wins.
+   */
+  get skillsDirTemplates(): string[] {
+    const raw = this.data.paths.skills_dir;
+    const list = Array.isArray(raw) ? raw : [raw];
+    return list.filter((p): p is string => typeof p === "string" && p.length > 0);
+  }
   get skillsDirTemplate(): string {
-    return this.data.paths.skills_dir;
+    // Backward-compatible: the first (highest-precedence) pool.
+    return this.skillsDirTemplates[0] ?? "~/.agents/skills";
   }
   get stateDirTemplate(): string {
     return this.data.paths.state_dir;

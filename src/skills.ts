@@ -246,23 +246,26 @@ function stripQuotes(s: string): string {
  * entry is a `<category>/<skill>/SKILL.md`. Mirrors `get_all_skill_names`.
  */
 export function getAllSkillNames(env: Environment): string[] {
-  const pool = env.skillsDir;
   const names = new Set<string>();
-  if (!existsSync(pool)) return [];
-  for (const name of safeReaddir(pool)) {
-    const entry = join(pool, name);
-    if (!isDirOrSymlink(entry)) continue;
-    // A top-level entry counts as a skill only if it IS one — i.e. it has its
-    // own SKILL.md (existsSync follows symlinks, so a flat symlink-to-skill
-    // counts and a broken/dangling symlink does not). A real directory WITHOUT
-    // its own SKILL.md is a category container (e.g. `mattpocock-eng/` holding
-    // symlinks to room-local skills), not a skill — skip it as a name but still
-    // surface the nested skills it groups. Without this guard, category dirs
-    // were counted as phantom skills and dumped into the default room.
-    if (existsSync(join(entry, "SKILL.md"))) names.add(name);
-    if (isRealDir(entry)) {
-      for (const sub of safeReaddir(entry)) {
-        if (existsSync(join(entry, sub, "SKILL.md"))) names.add(sub);
+  // Walk every configured pool. Room-local trees usually precede the shared
+  // pool, so a skill that exists only in a room tree is still catalogued.
+  for (const pool of env.skillsDirs) {
+    if (!existsSync(pool)) continue;
+    for (const name of safeReaddir(pool)) {
+      const entry = join(pool, name);
+      if (!isDirOrSymlink(entry)) continue;
+      // A top-level entry counts as a skill only if it IS one — i.e. it has its
+      // own SKILL.md (existsSync follows symlinks, so a flat symlink-to-skill
+      // counts and a broken/dangling symlink does not). A real directory WITHOUT
+      // its own SKILL.md is a category container (e.g. `mattpocock-eng/` holding
+      // symlinks to room-local skills), not a skill — skip it as a name but still
+      // surface the nested skills it groups. Without this guard, category dirs
+      // were counted as phantom skills and dumped into the default room.
+      if (existsSync(join(entry, "SKILL.md"))) names.add(name);
+      if (isRealDir(entry)) {
+        for (const sub of safeReaddir(entry)) {
+          if (existsSync(join(entry, sub, "SKILL.md"))) names.add(sub);
+        }
       }
     }
   }
@@ -280,10 +283,12 @@ export function getAllSkillNames(env: Environment): string[] {
  * against its intended parent before being accepted.
  */
 export function findSkillDir(env: Environment, name: string): string | null {
-  const pool = env.skillsDir;
-  const flat = join(pool, name);
-  if (isPathWithin(flat, pool) && existsSync(flat)) return flat;
-  if (existsSync(pool)) {
+  // Walk pools in precedence order. The traversal guard is applied per pool:
+  // `name` is agent-supplied and must stay inside the pool it resolved from.
+  for (const pool of env.skillsDirs) {
+    if (!existsSync(pool)) continue;
+    const flat = join(pool, name);
+    if (isPathWithin(flat, pool) && existsSync(flat)) return flat;
     for (const cat of safeReaddir(pool)) {
       const catDir = join(pool, cat);
       if (!isRealDir(catDir)) continue;
@@ -292,6 +297,38 @@ export function findSkillDir(env: Environment, name: string): string | null {
     }
   }
   return null;
+}
+
+/**
+ * Skills that resolve from more than one configured pool. Surfaced as a
+ * diagnostic instead of silently preferring the first match: a room-local copy
+ * that has drifted from the shared pool is otherwise invisible until someone
+ * notices the wrong version loading.
+ */
+export function findDuplicateSkills(env: Environment): { name: string; dirs: string[] }[] {
+  const seen = new Map<string, string[]>();
+  for (const pool of env.skillsDirs) {
+    if (!existsSync(pool)) continue;
+    for (const name of safeReaddir(pool)) {
+      const entry = join(pool, name);
+      if (!isDirOrSymlink(entry)) continue;
+      if (existsSync(join(entry, "SKILL.md"))) {
+        seen.set(name, [...(seen.get(name) ?? []), entry]);
+      }
+      if (isRealDir(entry)) {
+        for (const sub of safeReaddir(entry)) {
+          const nested = join(entry, sub);
+          if (existsSync(join(nested, "SKILL.md"))) {
+            seen.set(sub, [...(seen.get(sub) ?? []), nested]);
+          }
+        }
+      }
+    }
+  }
+  return [...seen.entries()]
+    .filter(([, dirs]) => dirs.length > 1)
+    .map(([name, dirs]) => ({ name, dirs }))
+    .sort((a, b) => a.name.localeCompare(b.name));
 }
 
 // ── Room assignment ────────────────────────────────────────────────────────--
@@ -352,12 +389,15 @@ export function explicitSkillRooms(config: Config): Record<string, string[]> {
  */
 export function assignCategorizedSkills(env: Environment): Record<string, string> {
   const out: Record<string, string> = {};
-  const pool = env.skillsDir;
   const categoryToRoom = env.config.skillCategoryToRoom;
   const defaultRoom = env.config.skillDefaultRoom;
-  if (!existsSync(pool)) return out;
+  // Every configured pool contributes categories; a skill already assigned by
+  // an earlier (higher-precedence) pool keeps that assignment.
+  const pools = env.skillsDirs.filter((p) => existsSync(p));
+  if (pools.length === 0) return out;
 
   // Strategy 1: category directories containing skill subdirs.
+  for (const pool of pools) {
   for (const cat of safeReaddir(pool)) {
     const catDir = join(pool, cat);
     if (!isRealDir(catDir)) continue;
@@ -396,6 +436,7 @@ export function assignCategorizedSkills(env: Environment): Record<string, string
         break;
       }
     }
+  }
   }
 
   return out;

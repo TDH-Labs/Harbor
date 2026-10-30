@@ -117,7 +117,16 @@ export class Environment {
     return join(this.root, "data");
   }
   get skillsDir(): string {
-    return this.resolve(this.config.skillsDirTemplate);
+    // First (highest-precedence) pool. Kept for API compatibility.
+    return this.skillsDirs[0] ?? this.resolve(this.config.skillsDirTemplate);
+  }
+  /**
+   * Every configured skill pool, resolved, in precedence order. Callers that
+   * search for a skill must walk this list rather than `skillsDir`, so a skill
+   * that lives in a room-local tree is still discoverable.
+   */
+  get skillsDirs(): string[] {
+    return this.config.skillsDirTemplates.map((t) => this.resolve(t));
   }
   get stateDir(): string {
     return this.resolve(this.config.stateDirTemplate);
