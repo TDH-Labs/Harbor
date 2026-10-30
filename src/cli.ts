@@ -1058,28 +1058,52 @@ const mcpAddCmd = defineCommand({
     name: { type: "string", description: "Server entry name" },
     command: { type: "string", description: "Server command" },
     args: { type: "string", description: "Comma-separated command args" },
-    env: { type: "string", description: "Comma-separated KEY=VALUE env vars" },
+    env: { type: "string", description: "Comma-separated KEY=VALUE env vars (stdio)" },
+    url: { type: "string", description: "Remote MCP endpoint URL (HTTP/SSE) — alternative to --command" },
+    type: { type: "string", description: "Remote transport: http (default) or sse" },
+    headers: { type: "string", description: "Comma-separated KEY=VALUE headers for a remote server" },
   },
   run({ args }) {
     const env = envFromArgs(args);
     const room = args.room;
     const name = args.name;
     const command = args.command;
-    if (!room || !name || !command) {
-      console.error("mcp-add: --room, --name, and --command are all required");
+    const url = args.url;
+    // A server is either stdio (--command) or remote (--url), never both.
+    if (!room || !name) {
+      console.error("mcp-add: --room and --name are required");
+      process.exitCode = 1;
+      return;
+    }
+    if (!command && !url) {
+      console.error("mcp-add: one of --command (stdio) or --url (remote) is required");
+      process.exitCode = 1;
+      return;
+    }
+    if (command && url) {
+      console.error("mcp-add: --command and --url are mutually exclusive");
       process.exitCode = 1;
       return;
     }
     const serverArgs = parseCommaList(args.args);
     const envVars = parseEnvPairs(args.env);
+    const headerPairs = parseEnvPairs(args.headers);
 
     let result;
     try {
       result = addServerToRoom(env, room, {
         name,
-        command,
-        ...(serverArgs.length > 0 ? { args: serverArgs } : {}),
-        ...(Object.keys(envVars).length > 0 ? { env: envVars } : {}),
+        ...(url
+          ? {
+              url,
+              type: args.type === "sse" ? "sse" : "http",
+              ...(Object.keys(headerPairs).length > 0 ? { headers: headerPairs } : {}),
+            }
+          : {
+              command: command as string,
+              ...(serverArgs.length > 0 ? { args: serverArgs } : {}),
+              ...(Object.keys(envVars).length > 0 ? { env: envVars } : {}),
+            }),
       });
     } catch (err) {
       console.error(`mcp-add: ${err instanceof Error ? err.message : String(err)}`);
