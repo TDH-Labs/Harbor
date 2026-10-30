@@ -48,7 +48,7 @@ import { spawn } from "./spawn.ts";
 import { checkBudget, spendBudget, BudgetExceededError } from "./budget.ts";
 import { gate, runWithGateContext, AccessDeniedError } from "./gate.ts";
 import { audit } from "./audit.ts";
-import { listSkills, generateRoomIndexes, findSkillDir } from "./skills.ts";
+import { listSkills, generateRoomIndexes, findSkillDir, findDuplicateSkills } from "./skills.ts";
 import {
   addServerToRoom,
   generateRoomConfig,
@@ -629,6 +629,21 @@ const checkCmd = defineCommand({
     }
     const w = watcherStatus(env);
     console.log(`${w.running ? "ok  " : "warn"} watcher ${w.running ? `running (pid ${w.pid})` : "not running"}`);
+    // Skill pool health: a pool that is configured but unreadable, or a skill
+    // name that resolves from two pools, is invisible today — the room index
+    // promises skills the MCP server will then refuse to serve.
+    for (const pool of env.skillsDirs) {
+      if (existsSync(pool)) ok(`skill pool ${pool}`);
+      else warn(`skill pool ${pool} missing`);
+    }
+    const dups = findDuplicateSkills(env);
+    if (dups.length === 0) {
+      ok(`no duplicate skills across ${env.skillsDirs.length} pool(s)`);
+    } else {
+      const sample = dups.slice(0, 5).map((d) => d.name).join(", ");
+      const more = dups.length > 5 ? ` (+${dups.length - 5} more)` : "";
+      warn(`${dups.length} skill(s) resolve from more than one pool — first match wins: ${sample}${more}`);
+    }
   },
 });
 
