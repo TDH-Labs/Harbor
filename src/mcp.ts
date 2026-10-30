@@ -71,9 +71,14 @@ export interface ValidateOptions {
 
 /** Standard MCP config document: `{ "mcpServers": { name: { command, args?, env? } } }`. */
 export interface McpServerEntry {
-  command: string;
+  /** Present for stdio servers; omitted for remote (url) servers. */
+  command?: string;
   args?: string[];
   env?: Record<string, string>;
+  /** Present for remote HTTP/SSE servers; omitted for stdio servers. */
+  url?: string;
+  type?: "http" | "sse";
+  headers?: Record<string, string>;
 }
 export interface McpConfig {
   mcpServers: Record<string, McpServerEntry>;
@@ -283,6 +288,25 @@ export function roomMcpConfig(servers: RawMcpServer[]): McpConfig {
 }
 
 function buildEntry(server: RawMcpServer): McpServerEntry {
+  const raw = server as Record<string, unknown>;
+  const url = typeof raw.url === "string" && raw.url.length > 0 ? raw.url : undefined;
+
+  // A server with a url is remote (HTTP/SSE): emit url + type, never a command.
+  // Emitting `command: ""` alongside a url produced configs that clients either
+  // rejected or tried to spawn an empty binary for.
+  if (url) {
+    const entry: McpServerEntry = { url };
+    const type = raw.type;
+    entry.type = type === "sse" ? "sse" : "http";
+    const headers = raw.headers;
+    if (headers && typeof headers === "object" && !Array.isArray(headers)) {
+      const h: Record<string, string> = {};
+      for (const [k, v] of Object.entries(headers as Record<string, unknown>)) h[k] = String(v);
+      if (Object.keys(h).length > 0) entry.headers = h;
+    }
+    return entry;
+  }
+
   const entry: McpServerEntry = { command: server.command ?? "" };
   if (server.args && server.args.length > 0) entry.args = [...server.args];
   const envVars = extractEnvVars(server);

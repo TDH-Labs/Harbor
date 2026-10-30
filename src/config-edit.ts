@@ -131,9 +131,14 @@ export function addSkillToRoom(env: Environment, skill: string, room: string): E
 /** A third-party MCP server entry, as written into `[[skills.rooms.<room>.mcp.servers]]`. */
 export interface McpServerSpec {
   name: string;
-  command: string;
+  /** stdio transport. Omitted when `url` is set. */
+  command?: string;
   args?: string[];
   env?: Record<string, string>;
+  /** Remote HTTP/SSE transport. Omitted when `command` is set. */
+  url?: string;
+  type?: "http" | "sse";
+  headers?: Record<string, string>;
 }
 
 /**
